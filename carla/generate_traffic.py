@@ -162,7 +162,7 @@ def main():
     random.seed(args.seed if args.seed is not None else int(time.time()))
 
     try:
-        world = client.get_world()
+        world = client.load_world('Town05_Opt', map_layers = carla.MapLayer.NONE)
 
         traffic_manager = client.get_trafficmanager(args.tm_port)
         traffic_manager.set_global_distance_to_leading_vehicle(2.5)
@@ -180,7 +180,6 @@ def main():
             if not settings.synchronous_mode:
                 synchronous_master = True
                 settings.synchronous_mode = True
-                settings.fixed_delta_seconds = 0.05
             else:
                 synchronous_master = False
         else:
