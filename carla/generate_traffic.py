@@ -162,7 +162,7 @@ def main():
     random.seed(args.seed if args.seed is not None else int(time.time()))
 
     try:
-        world = client.load_world('Town05_Opt', map_layers = carla.MapLayer.NONE)
+        world = client.load_world('Town05_Opt', )
 
         traffic_manager = client.get_trafficmanager(args.tm_port)
         traffic_manager.set_global_distance_to_leading_vehicle(2.5)
