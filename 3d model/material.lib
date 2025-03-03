@@ -1,0 +1,204 @@
+# Aspose.3D Wavefront OBJ Exporter
+# Copyright 2004-2025 Aspose Pty Ltd.
+# File created: 03/02/2025 13:06:34
+
+newmtl 12 - Default
+	Ka 0.5882353 0.5882353 0.5882353
+	Kd 0.5882353 0.5882353 0.5882353
+	Ke 0 0 0
+	illum 2
+	Ks 0.8980392 0.8980392 0.8980392
+	Ns 0.1
+	d 1
+	Tr 0
+	map_Kd MITSUBIS.JPG
+newmtl AM98_013_glass2
+	Ka 0 0 0
+	Kd 0.5019608 0.5019608 0.5019608
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 1
+	d 0.18
+	Tr 0.82
+newmtl AM98_013_glass_b
+	Ka 0 0 0
+	Kd 0.039215688 0.039215688 0.039215688
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 1
+	d 1
+	Tr 0
+newmtl AM98_013_glass
+	Ka 0 0 0
+	Kd 0.10980392 0.1254902 0.1254902
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 1
+	d 0.22
+	Tr 0.78
+newmtl AM98_013_carpain
+	Ka 0 0 0
+	Kd 0.9372549 0.105882354 0.11372549
+	Ke 0 0 0
+	illum 2
+	Ks 0.078431375 0.078431375 0.078431375
+	Ns 0.72
+	d 1
+	Tr 0
+newmtl AM98_013_black_p
+	Ka 0 0 0
+	Kd 0.1254902 0.1254902 0.1254902
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 0.7
+	d 1
+	Tr 0
+newmtl AM98_013_red_lig
+	Ka 0 0 0
+	Kd 0.49803922 0.49803922 0.49803922
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 0.9
+	d 1
+	Tr 0
+newmtl AM98_013_rim_bli
+	Ka 0 0 0
+	Kd 0.7058824 0.7058824 0.7058824
+	Ke 0 0 0
+	illum 2
+	Ks 0.2509804 0.2509804 0.2509804
+	Ns 0.75
+	d 1
+	Tr 0
+newmtl AM98_013_silver_
+	Ka 0 0 0
+	Kd 0.5019608 0.5019608 0.5019608
+	Ke 0 0 0
+	illum 2
+	Ks 0.78431374 0.78431374 0.78431374
+	Ns 0.75
+	d 1
+	Tr 0
+newmtl AM98_013_brake_d
+	Ka 0 0 0
+	Kd 0.19607843 0.19607843 0.19607843
+	Ke 0 0 0
+	illum 2
+	Ks 0 0 0
+	Ns 0.84
+	d 1
+	Tr 0
+newmtl AM98_013_tire
+	Ka 0 0 0
+	Kd 0.12941177 0.12941177 0.12941177
+	Ke 0 0 0
+	illum 2
+	Ks 0.10980392 0.10980392 0.10980392
+	Ns 0.6
+	d 1
+	Tr 0
+newmtl AM98_013_glass_s
+	Ka 0 0 0
+	Kd 1 1 1
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 1
+	d 0.33
+	Tr 0.67
+newmtl AM98_013_xenon l
+	Ka 0 0 0
+	Kd 0.25490198 0.2627451 0.31764707
+	Ke 0 0 0
+	illum 2
+	Ks 0.8039216 0.9372549 1
+	Ns 1
+	d 0.46
+	Tr 0.54
+newmtl Ce
+	Ka 0 0 0
+	Kd 0.91764706 0.9137255 0.96862745
+	Ke 0 0 0
+	illum 2
+	Ks 0.08627451 0.08627451 0.08627451
+	Ns 1
+	d 1
+	Tr 0
+newmtl AM98_013_interio
+	Ka 0 0 0
+	Kd 0.2509804 0.2509804 0.2509804
+	Ke 0 0 0
+	illum 2
+	Ks 0.19607843 0.19607843 0.19607843
+	Ns 0.6
+	d 1
+	Tr 0
+newmtl AM98_013_registe
+	Ka 0 0 0
+	Kd 0.98039216 0.98039216 0.98039216
+	Ke 0 0 0
+	illum 2
+	Ks 0.19607843 0.19607843 0.19607843
+	Ns 0.5
+	d 1
+	Tr 0
+newmtl AM98_013_chrome9
+	Ka 0 0 0
+	Kd 0.19607843 0.19607843 0.19607843
+	Ke 0 0 0
+	illum 2
+	Ks 0.98039216 0.98039216 0.98039216
+	Ns 0.7
+	d 1
+	Tr 0
+newmtl AM98_013_white_l
+	Ka 0 0 0
+	Kd 0.49803922 0.49803922 0.49803922
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 1
+	d 1
+	Tr 0
+newmtl AM98_013_glas1
+	Ka 0 0 0
+	Kd 1 1 1
+	Ke 0 0 0
+	illum 2
+	Ks 1 1 1
+	Ns 1
+	d 0.1
+	Tr 0.9
+newmtl AM98_013_chrome_
+	Ka 0 0 0
+	Kd 0.39215687 0.39215687 0.39215687
+	Ke 0 0 0
+	illum 2
+	Ks 0.98039216 0.98039216 0.98039216
+	Ns 0.95
+	d 1
+	Tr 0
+newmtl AM98_013_chro1
+	Ka 0 0 0
+	Kd 0.39215687 0.39215687 0.39215687
+	Ke 0 0 0
+	illum 2
+	Ks 0.98039216 0.98039216 0.98039216
+	Ns 0.95
+	d 1
+	Tr 0
+newmtl 15 - Default
+	Ka 0.9372549 0.105882354 0.11372549
+	Kd 0.9372549 0.105882354 0.11372549
+	Ke 0 0 0
+	illum 2
+	Ks 0.8980392 0.8980392 0.8980392
+	Ns 0.1
+	d 1
+	Tr 0
+	map_Kd LOGO_IMI.JPG
