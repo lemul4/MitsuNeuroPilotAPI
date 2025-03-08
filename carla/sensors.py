@@ -47,7 +47,7 @@ except IndexError:
 import carla
 
 # ---------------- Глобальные переменные и константы ----------------
-CARLA_FPS = 40
+CARLA_FPS = 20
 SENSOR_TICK = '0.05'  # 20 fps
 
 latest_seg_frame = None
@@ -225,7 +225,7 @@ def process_rgb_image(image):
         latest_rgb_frame = frame
 
 def process_depth_image(image):
-    frame = get_frame_from_image(image, carla.ColorConverter.Depth)
+    frame = get_frame_from_image(image, carla.ColorConverter.LogarithmicDepth)
     with depth_frame_lock:
         global latest_depth_frame
         latest_depth_frame = frame
