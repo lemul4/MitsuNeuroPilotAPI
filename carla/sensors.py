@@ -1,23 +1,6 @@
 #!/usr/bin/env python
 """
 CARLA Manual Control with RGB, Semantic Segmentation Cameras and Additional Sensors
-
-Скрипт подключается к симулятору CARLA, спавнит транспортное средство,
-прикрепляет к нему несколько сенсоров:
- - сенсор семантической сегментации,
- - RGB-камера,
- - семантический LIDAR,
- - GNSS-сенсор,
- - датчик глубины,
- - датчик препятствий,
- - датчик столкновений,
- - датчик выезда из полосы.
-Пользователь может управлять автомобилем с клавиатуры и контроллером руля.
-
-При указании аргумента --record-data дополнительно осуществляется запись данных:
- - lidar_semantic, semantic_cam, depth_cam – кадры сохраняются с именем, содержащим номер кадра
- - gnss, obstacle_sensor, collision_sensor, lane_invasion_sensor – события записываются в CSV с первым столбцом, содержащим номер кадра
- - vehicle control и скорость – записываются в CSV с первым столбцом, содержащим номер кадра
 """
 
 import glob
@@ -26,10 +9,9 @@ import sys
 import argparse
 import time
 import threading
+import queue
 from datetime import datetime
 import math
-import queue  # Используем очередь для асинхронной записи
-
 import pygame
 import numpy as np
 import cv2
@@ -46,9 +28,9 @@ except IndexError:
 
 import carla
 
-# ---------------- Глобальные переменные и константы ----------------
-CARLA_FPS = 20
-SENSOR_TICK = '0.05'  # 20 fps
+# ---------------- Глобальные переменные ----------------
+CARLA_FPS = 40
+SENSOR_TICK = '0.1'  # 10 фпс 
 
 latest_seg_frame = None
 seg_frame_lock = threading.Lock()
@@ -70,38 +52,14 @@ obstacle_file = None
 collision_file = None
 lane_invasion_file = None
 
-# Очередь для задач записи в файлы и поток-работник
-file_io_queue = queue.Queue()
-file_io_worker_thread = None
+# Глобальные буферы для событий
+collision_events = {}          
+lane_invasion_events = {}      
+first_sensor_tick_frame = None  
 
-def file_io_worker():
-    """Поток-работник, выполняющий задачи записи в файлы из очереди."""
-    while True:
-        task = file_io_queue.get()
-        if task is None:
-            file_io_queue.task_done()
-            break
-        try:
-            task_type = task["type"]
-            if task_type == "image":
-                cv2.imwrite(task["path"], task["data"])
-            elif task_type == "np_save":
-                np.save(task["path"], task["data"])
-            elif task_type == "csv":
-                file_obj = task["file"]
-                file_obj.write(task["line"])
-        except Exception as e:
-            print("Ошибка записи в файл:", e)
-        file_io_queue.task_done()
-
-def start_file_io_worker():
-    global file_io_worker_thread
-    file_io_worker_thread = threading.Thread(target=file_io_worker, daemon=True)
-    file_io_worker_thread.start()
-
-def stop_file_io_worker():
-    file_io_queue.put(None)
-    file_io_worker_thread.join()
+# Потоковая очередь для записи файлов
+file_write_queue = queue.Queue()
+file_write_thread = None  
 
 # Цветовая палитра для семантической разметки
 VIRIDIS = np.array(matplotlib.colormaps['plasma'].colors)
@@ -137,11 +95,33 @@ LABEL_COLORS = np.array([
     (180, 165, 180)      # Guard Rail
 ]) / 255.0
 
-# ---------------- Вспомогательные функции ----------------
+# ---------------- Функции для асинхронной записи ----------------
+
+def write_line(file_obj, text):
+    """
+    Записывает строку в файл и сбрасывает буфер.
+    """
+    file_obj.write(text)
+    file_obj.flush()
+
+def file_writer():
+    """
+    Функция-воркер, которая постоянно обрабатывает задачи из очереди.
+    """
+    while True:
+        task = file_write_queue.get()
+        if task is None:
+            break
+        func, args, kwargs = task
+        try:
+            func(*args, **kwargs)
+        except Exception as e:
+            print("Ошибка при записи файла:", e)
+        file_write_queue.task_done()
+
+# ---------------- Helper Functions ----------------
 
 def get_frame_from_image(image, color_converter=None):
-    """Универсальная функция для получения кадра из изображения сенсора.
-    При наличии выполняет преобразование цвета."""
     if color_converter:
         image.convert(color_converter)
     array = np.frombuffer(image.raw_data, dtype=np.uint8)
@@ -151,15 +131,17 @@ def get_frame_from_image(image, color_converter=None):
 # ---------------- Callback для Lidar ----------------
 
 def semantic_lidar_callback(point_cloud, point_list):
-    """Обработка данных Lidar с семантической разметкой.
-    Инвертируется ось Y для корректной визуализации в Open3D."""
+    """
+    Обработка данных Lidar с семантической разметкой.
+    Инвертируется ось Y для корректной визуализации в Open3D.
+    """
     data = np.frombuffer(point_cloud.raw_data, dtype=np.dtype([
         ('x', np.float32), ('y', np.float32), ('z', np.float32),
         ('CosAngle', np.float32), ('ObjIdx', np.uint32), ('ObjTag', np.uint32)]))
     points = np.array([data['y'], data['x'], data['z']]).T
 
     labels = np.array(data['ObjTag'])
-    labels[labels == 24] = 1  # Переназначение разметки дороги в класс дороги
+    labels[labels == 24] = 1 
     mask = ~np.isin(labels, [11, 23])
     filtered_points = points[mask]
     filtered_labels = labels[mask]
@@ -169,24 +151,27 @@ def semantic_lidar_callback(point_cloud, point_list):
     point_list.colors = o3d.utility.Vector3dVector(colors)
     
     if recording_enabled:
+        filtered_data = data[mask]
         filename = os.path.join(recording_dirs['lidar_semantic'], f"lidar_{point_cloud.frame:06d}.npy")
-        file_io_queue.put({"type": "np_save", "path": filename, "data": data})
+        file_write_queue.put((np.save, (filename, filtered_data), {}))
 
 def generate_lidar_bp(world):
-    """Генерация blueprint для Lidar с заданными параметрами."""
     lidar_bp = world.get_blueprint_library().find('sensor.lidar.ray_cast_semantic')
     lidar_bp.set_attribute('upper_fov', '15.0')
     lidar_bp.set_attribute('lower_fov', '-25.0')
-    lidar_bp.set_attribute('channels', '64')
-    lidar_bp.set_attribute('range', '70')
+    lidar_bp.set_attribute('channels', '32')
+    lidar_bp.set_attribute('range', '50')
     lidar_bp.set_attribute('rotation_frequency', '20.0')
-    lidar_bp.set_attribute('points_per_second', '350000')
+    lidar_bp.set_attribute('points_per_second', '300000')
     lidar_bp.set_attribute('role_name', 'lidar_semantic')
     lidar_bp.set_attribute('sensor_tick', SENSOR_TICK)
     return lidar_bp
 
 def add_open3d_axis(vis):
-    """Добавление осей координат в Open3D-визуализатор."""
+    """
+    Добавление осей координат в Open3D-визуализатор.
+    Предварительный расчёт точек, линий и цветов для повышения производительности.
+    """
     axis = o3d.geometry.LineSet()
     pts = np.array([
         [0.0, 0.0, 0.0],
@@ -210,13 +195,16 @@ def add_open3d_axis(vis):
 # ---------------- Callback функции для сенсоров ----------------
 
 def process_segmentation_image(image):
+    global first_sensor_tick_frame, latest_seg_frame
+    # Фиксируем первый сенсорный кадр, если ещё не задан
+    if first_sensor_tick_frame is None:
+        first_sensor_tick_frame = image.frame
     frame = get_frame_from_image(image, carla.ColorConverter.CityScapesPalette)
     with seg_frame_lock:
-        global latest_seg_frame
         latest_seg_frame = frame
     if recording_enabled:
         filename = os.path.join(recording_dirs['semantic_cam'], f"semantic_{image.frame:06d}.png")
-        file_io_queue.put({"type": "image", "path": filename, "data": frame})
+        file_write_queue.put((cv2.imwrite, (filename, frame), {}))
 
 def process_rgb_image(image):
     frame = get_frame_from_image(image)
@@ -231,41 +219,37 @@ def process_depth_image(image):
         latest_depth_frame = frame
     if recording_enabled:
         filename = os.path.join(recording_dirs['depth_cam'], f"depth_{image.frame:06d}.png")
-        file_io_queue.put({"type": "image", "path": filename, "data": frame})
+        file_write_queue.put((cv2.imwrite, (filename, frame), {}))
 
 def process_gnss_data(data):
     msg = "GNSS: Latitude: {:.6f}, Longitude: {:.6f}, Altitude: {:.2f}".format(
         data.latitude, data.longitude, data.altitude)
     print(msg)
     if recording_enabled:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        line = f"{data.frame},{timestamp},{data.latitude},{data.longitude},{data.altitude}\n"
-        file_io_queue.put({"type": "csv", "file": gnss_file, "line": line})
+        line = f"{data.frame},{data.timestamp:.3f},{data.latitude},{data.longitude},{data.altitude}\n"
+        file_write_queue.put((write_line, (gnss_file, line), {}))
 
 def process_obstacle_data(event):
-    msg = "🚧 Obstacle event: " + str(event)
-    print(msg)
+    actor_str = event.other_actor.type_id if event.other_actor is not None else "Unknown"
+    print(f"🚧 Obstacle event: other_actor={actor_str}, distance={event.distance:.2f}")
     if recording_enabled:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        line = f"{event.frame},{timestamp},{event}\n"
-        file_io_queue.put({"type": "csv", "file": obstacle_file, "line": line})
+        line = f"{event.frame},{event.timestamp:.3f},{actor_str},{event.distance:.2f}\n"
+        file_write_queue.put((write_line, (obstacle_file, line), {}))
 
 def process_collision_data(event):
-    actor_type = event.other_actor.type_id if event.other_actor is not None else "Unknown"
-    msg = "💥 Collision with: " + actor_type
-    print(msg)
-    if recording_enabled:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        line = f"{event.frame},{timestamp},{actor_type}\n"
-        file_io_queue.put({"type": "csv", "file": collision_file, "line": line})
+    global collision_events
+    # Сохраняем событие столкновения в буфер, вместо немедленной записи
+    if event.frame not in collision_events:
+        collision_events[event.frame] = []
+    collision_events[event.frame].append(event)
 
 def process_lane_invasion_data(event):
-    msg = "🚦 Lane invasion detected: " + str(event.crossed_lane_markings)
-    print(msg)
-    if recording_enabled:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        line = f"{event.frame},{timestamp},{event.crossed_lane_markings}\n"
-        file_io_queue.put({"type": "csv", "file": lane_invasion_file, "line": line})
+    global lane_invasion_events
+    # Сохраняем событие выезда из полосы в буфер, вместо немедленной записи
+    if event.frame not in lane_invasion_events:
+        lane_invasion_events[event.frame] = []
+    lane_invasion_events[event.frame].append(event)
+
 
 # ---------------- Display Loop (cv2 окна) ----------------
 
@@ -313,8 +297,9 @@ def cleanup(actors, vis):
         pass
     cv2.destroyAllWindows()
     pygame.quit()
-    if recording_enabled:
-        stop_file_io_worker()
+    file_write_queue.put(None)
+    if file_write_thread is not None:
+        file_write_thread.join()
     global control_csv_file, gnss_file, obstacle_file, collision_file, lane_invasion_file
     if recording_enabled:
         if control_csv_file: control_csv_file.close()
@@ -326,7 +311,7 @@ def cleanup(actors, vis):
 # ---------------- Main Function ----------------
 
 def main():
-    global recording_enabled, recording_dirs, control_csv_file, gnss_file, obstacle_file, collision_file, lane_invasion_file
+    global recording_enabled, recording_dirs, control_csv_file, gnss_file, obstacle_file, collision_file, lane_invasion_file, file_write_thread
     argparser = argparse.ArgumentParser(
         description="CARLA Manual Control with RGB, Semantic Segmentation Cameras and Additional Sensors")
     argparser.add_argument('--host', default='127.0.0.1',
@@ -341,10 +326,11 @@ def main():
     argparser.add_argument('--disable-obstacle', action='store_true', help='Отключить датчик препятствий')
     argparser.add_argument('--disable-collision', action='store_true', help='Отключить датчик столкновений')
     argparser.add_argument('--disable-laneinvasion', action='store_true', help='Отключить датчик выезда из полосы')
+    # Новый аргумент для включения записи данных
     argparser.add_argument('--record-data', action='store_true', help='Включить запись и сохранение данных сенсоров и vehicle control')
     args = argparser.parse_args()
 
-    # Настройка записи,
+    # Настройка записи, если аргумент указан
     recording_enabled = args.record_data
     if recording_enabled:
         base_record_dir = os.path.join("recordings", datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -368,19 +354,21 @@ def main():
         gnss_file.write("frame,timestamp,latitude,longitude,altitude\n")
         obstacle_csv_path = os.path.join(recording_dirs['obstacle_sensor'], "obstacle.csv")
         obstacle_file = open(obstacle_csv_path, "w")
-        obstacle_file.write("frame,timestamp,event\n")
+        obstacle_file.write("frame,timestamp,other_actor,distance\n")
         collision_csv_path = os.path.join(recording_dirs['collision_sensor'], "collision.csv")
         collision_file = open(collision_csv_path, "w")
         collision_file.write("frame,timestamp,other_actor\n")
         lane_invasion_csv_path = os.path.join(recording_dirs['lane_invasion_sensor'], "lane_invasion.csv")
         lane_invasion_file = open(lane_invasion_csv_path, "w")
-        lane_invasion_file.write("frame,timestamp,crossed_lane_markings\n")
+        lane_invasion_file.write("frame,timestamp,type,lane_change\n")
         print(f"Запись данных включена. Данные сохраняются в {base_record_dir}")
-        start_file_io_worker()  # Запуск потока для асинхронной записи
+        # Запуск фонового потока записи
+        file_write_thread = threading.Thread(target=file_writer, daemon=True)
+        file_write_thread.start()
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(10.0)
-    world = client.load_world('Town05_Opt', map_layers=carla.MapLayer.NONE)
+    world = client.load_world('Town05_Opt',)
 
     settings = world.get_settings()
     settings.no_rendering_mode = True
@@ -402,8 +390,8 @@ def main():
 
     if not args.disable_seg:
         seg_cam_bp = blueprint_library.find('sensor.camera.semantic_segmentation')
-        seg_cam_bp.set_attribute('image_size_x', '1280')
-        seg_cam_bp.set_attribute('image_size_y', '720')
+        seg_cam_bp.set_attribute('image_size_x', '768')
+        seg_cam_bp.set_attribute('image_size_y', '432')
         seg_cam_bp.set_attribute('fov', '90')
         seg_cam_bp.set_attribute('sensor_tick', SENSOR_TICK)
         seg_cam_bp.set_attribute('lens_circle_falloff', '1.2')
@@ -423,14 +411,14 @@ def main():
         rgb_cam_bp.set_attribute('image_size_x', '1920')
         rgb_cam_bp.set_attribute('image_size_y', '1080')
         rgb_cam_bp.set_attribute('fov', '105')
-        rgb_cam_bp.set_attribute('sensor_tick', SENSOR_TICK)
+        rgb_cam_bp.set_attribute('sensor_tick', str(1 / CARLA_FPS))
         rgb_cam_bp.set_attribute('lens_circle_falloff', '1.2')
         rgb_cam_bp.set_attribute('lens_circle_multiplier', '1.0')
         rgb_cam_bp.set_attribute('lens_k', '-0.2')
         rgb_cam_bp.set_attribute('lens_kcube', '0.01')
         rgb_cam_bp.set_attribute('role_name', 'rgb_camera')
         rgb_cam_transform = carla.Transform(
-            carla.Location(x=0.25, y=-0.31, z=1.25),
+            carla.Location(x=0.25, y=-0.31, z=1.35),
             carla.Rotation(pitch=0, yaw=0, roll=0)
         )
         rgb_cam = world.spawn_actor(rgb_cam_bp, rgb_cam_transform, attach_to=vehicle)
@@ -462,8 +450,8 @@ def main():
 
     if not args.disable_depth:
         depth_cam_bp = blueprint_library.find('sensor.camera.depth')
-        depth_cam_bp.set_attribute('image_size_x', '1280')
-        depth_cam_bp.set_attribute('image_size_y', '720')
+        depth_cam_bp.set_attribute('image_size_x', '768')
+        depth_cam_bp.set_attribute('image_size_y', '432')
         depth_cam_bp.set_attribute('fov', '90')
         depth_cam_bp.set_attribute('sensor_tick', SENSOR_TICK)
         depth_cam_bp.set_attribute('lens_circle_falloff', '1.2')
@@ -482,7 +470,7 @@ def main():
         obstacle_bp = blueprint_library.find('sensor.other.obstacle')
         obstacle_bp.set_attribute('sensor_tick', SENSOR_TICK)
         obstacle_bp.set_attribute('debug_linetrace', 'False')
-        obstacle_bp.set_attribute('distance', '2')
+        obstacle_bp.set_attribute('distance', '3')
         obstacle_bp.set_attribute('only_dynamics', 'False')
         obstacle_bp.set_attribute('role_name', 'obstacle_sensor')
         obstacle_transform = carla.Transform(carla.Location(x=2.5, z=1.0))
@@ -633,11 +621,55 @@ def main():
             global latest_game_time
             latest_game_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-            # Запись данных vehicle control
-            if recording_enabled:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                line = f"{snapshot.frame},{timestamp},{control.throttle},{control.steer},{control.brake},{control.reverse},{latest_speed_kmh}\n"
-                file_io_queue.put({"type": "csv", "file": control_csv_file, "line": line})
+            # Обработка событий столкновения и выезда из полосы на "сенсорном" кадре
+            current_frame = snapshot.frame
+            if first_sensor_tick_frame is not None:
+                frames_per_sensor_tick = int(CARLA_FPS * float(SENSOR_TICK))
+                if (current_frame - first_sensor_tick_frame) % frames_per_sensor_tick == 0:
+                    current_time = snapshot.timestamp.elapsed_seconds
+
+                    # Обработка столкновений:
+                    all_collision_events = []
+                    for key in list(collision_events.keys()):
+                        if key <= current_frame:
+                            all_collision_events.extend(collision_events[key])
+                            del collision_events[key]
+                    unique_collisions = {}
+                    for event in all_collision_events:
+                        actor_type = event.other_actor.type_id if event.other_actor is not None else "Unknown"
+                        if actor_type not in unique_collisions:
+                            unique_collisions[actor_type] = event
+                    for actor_type, event in unique_collisions.items():
+                        print("💥 Collision with:", actor_type)
+                        if recording_enabled:
+                            line = f"{current_frame},{current_time:.3f},{actor_type}\n"
+                            file_write_queue.put((write_line, (collision_file, line), {}))
+
+                    # Обработка выезда из полосы:
+                    all_lane_events = []
+                    for key in list(lane_invasion_events.keys()):
+                        if key <= current_frame:
+                            all_lane_events.extend(lane_invasion_events[key])
+                            del lane_invasion_events[key]
+                    unique_lane_invasions = {}
+                    for event in all_lane_events:
+                        for lm in event.crossed_lane_markings:
+                            lm_type = str(lm.type)
+                            lm_lane_change = str(lm.lane_change)
+                            key = (lm_type, lm_lane_change)
+                            if key not in unique_lane_invasions:
+                                unique_lane_invasions[key] = (lm_type, lm_lane_change)
+                    for key, value in unique_lane_invasions.items():
+                        lm_type,  lm_lane_change = value
+                        print("🚦 Lane invasion detected:", lm_type, lm_lane_change)
+                        if recording_enabled:
+                            line = f"{current_frame},{current_time:.3f},{lm_type},{lm_lane_change}\n"
+                            file_write_queue.put((write_line, (lane_invasion_file, line), {}))
+
+                    # Запись данных vehicle control
+                    if recording_enabled:
+                        line = f"{snapshot.frame},{snapshot.timestamp.elapsed_seconds:.3f},{control.throttle},{control.steer},{control.brake},{control.reverse},{latest_speed_kmh}\n"
+                        file_write_queue.put((write_line, (control_csv_file, line), {}))
 
             if not args.disable_rgb:
                 with rgb_frame_lock:
