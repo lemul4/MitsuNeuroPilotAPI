@@ -1,4 +1,4 @@
-"""Simulator interface for CARLA."""
+"""Simulator interface for CARLA. Scenic"""
 
 try:
     import carla
@@ -22,6 +22,7 @@ from scenic.simulators.carla.blueprints import oldBlueprintNames
 import scenic.simulators.carla.utils.utils as utils
 import scenic.simulators.carla.utils.visuals as visuals
 from scenic.syntax.veneer import verbosePrint
+
 
 class CarlaSimulator(DrivingSimulator):
     """Implementation of `Simulator` for CARLA."""
@@ -62,8 +63,6 @@ class CarlaSimulator(DrivingSimulator):
 
         # Set to synchronous with fixed timestep
         settings = self.world.get_settings()
-        settings.synchronous_mode = True
-        settings.fixed_delta_seconds = timestep  # NOTE: Should not exceed 0.1
         self.world.apply_settings(settings)
         verbosePrint("Map loaded in simulator.")
 
@@ -97,7 +96,6 @@ class CarlaSimulator(DrivingSimulator):
         settings.fixed_delta_seconds = None
         self.world.apply_settings(settings)
         self.tm.set_synchronous_mode(False)
-
 
 
 class CarlaSimulation(DrivingSimulation):
