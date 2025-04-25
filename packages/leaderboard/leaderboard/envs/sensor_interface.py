@@ -155,10 +155,45 @@ class CallBack(object):
 
     # Parsing CARLA physical Sensors
     def _parse_image_cb(self, image, tag):
-        array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-        array = copy.deepcopy(array)
-        array = np.reshape(array, (image.height, image.width, 4))
-        self._data_provider.update_sensor(tag, array, image.frame)
+        if 'depth' in tag:
+            # Преобразуем изображение в логарифмическую глубину
+            image.convert(carla.ColorConverter.LogarithmicDepth)
+
+            # Преобразуем данные изображения в массив NumPy
+            array = np.frombuffer(image.raw_data, dtype=np.uint8)
+            array = array.reshape((image.height, image.width, 4))  # Формат BGRA
+
+            # Извлекаем каналы B, G и R
+            B = array[:, :, 0].astype(np.float32)
+            G = array[:, :, 1].astype(np.float32)
+            R = array[:, :, 2].astype(np.float32)
+
+            # Вычисляем нормализованную глубину
+            normalized_depth = (R + G * 256 + B * 256 * 256) / (256 ** 3 - 1)
+
+            # Преобразуем нормализованную глубину в метры (максимальная глубина 1000 м)
+            depth_meters = normalized_depth * 1000.0
+
+            # Обновляем данные сенсора
+            self._data_provider.update_sensor(tag, depth_meters, image.frame)
+
+        elif 'instance' in tag:
+            array = np.frombuffer(image.raw_data, dtype=np.uint8)
+            array = array.reshape((image.height, image.width, 4))
+
+            self._data_provider.update_sensor(tag, array, image.frame)
+
+        elif 'semantic' in tag:
+            image.convert(carla.ColorConverter.CityScapesPalette)
+            array = np.frombuffer(image.raw_data, dtype=np.uint8)
+            array = array.reshape((image.height, image.width, 4))
+
+            self._data_provider.update_sensor(tag, array, image.frame)
+
+        else:
+            array = np.frombuffer(image.raw_data, dtype=np.uint8)
+            array = array.reshape((image.height, image.width, 4))
+            self._data_provider.update_sensor(tag, array, image.frame)
 
     def _parse_lidar_cb(self, lidar_data, tag):
         points = np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4'))

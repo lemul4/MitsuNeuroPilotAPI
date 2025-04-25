@@ -42,7 +42,11 @@ sensors_to_icons = {
     'sensor.other.gnss':        'carla_gnss',
     'sensor.other.imu':         'carla_imu',
     'sensor.opendrive_map':     'carla_opendrive_map',
-    'sensor.speedometer':       'carla_speedometer'
+    'sensor.speedometer':       'carla_speedometer',
+    'sensor.camera.depth':      'carla_depth',
+    'sensor.camera.instance_segmentation': 'carla_instance_segmentation',
+    'sensor.camera.semantic_segmentation': 'carla_semantic_segmentation',
+
 }
 
 class LeaderboardEvaluator(object):
@@ -53,7 +57,7 @@ class LeaderboardEvaluator(object):
 
     # Tunable parameters
     client_timeout = 10.0  # in seconds
-    frame_rate = 20.0      # in Hz
+    frame_rate = 10.0      # in Hz
 
     def __init__(self, args, statistics_manager):
         """

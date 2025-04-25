@@ -30,7 +30,12 @@ QUALIFIER_SENSORS_LIMITS = {
     'sensor.other.gnss': 1,
     'sensor.other.imu': 1,
     'sensor.opendrive_map': 1,
-    'sensor.speedometer': 1
+    'sensor.speedometer': 1,
+    # Added qualifiers
+    'sensor.camera.depth': 4,
+    'sensor.camera.instance_segmentation': 4,
+    'sensor.camera.semantic_segmentation': 4,
+
 }
 SENSORS_LIMITS = {
     'sensor.camera.rgb': 8,
@@ -39,7 +44,11 @@ SENSORS_LIMITS = {
     'sensor.other.gnss': 1,
     'sensor.other.imu': 1,
     'sensor.opendrive_map': 1,
-    'sensor.speedometer': 1
+    'sensor.speedometer': 1,
+    # Added limits
+    'sensor.camera.depth': 4,
+    'sensor.camera.instance_segmentation': 4,
+    'sensor.camera.semantic_segmentation': 4,
 }
 ALLOWED_SENSORS = SENSORS_LIMITS.keys()
 
@@ -154,7 +163,7 @@ class AgentWrapper(object):
             sensor_location = carla.Location()
             sensor_rotation = carla.Rotation()
 
-        if type_ == 'sensor.camera.rgb':
+        elif type_ == 'sensor.camera.rgb':
             attributes['image_size_x'] = str(sensor_spec['width'])
             attributes['image_size_y'] = str(sensor_spec['height'])
             attributes['fov'] = str(sensor_spec['fov'])
@@ -163,6 +172,33 @@ class AgentWrapper(object):
                                              z=sensor_spec['z'])
             sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'],
                                              roll=sensor_spec['roll'],
+                                             yaw=sensor_spec['yaw'])
+
+        elif type_ == 'sensor.camera.depth':
+            # Поддержка камеры глубины
+            attributes['image_size_x'] = str(sensor_spec['width'])
+            attributes['image_size_y'] = str(sensor_spec['height'])
+            attributes['fov'] = str(sensor_spec['fov'])
+            sensor_location = carla.Location(x=sensor_spec['x'], y=sensor_spec['y'], z=sensor_spec['z'])
+            sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'], roll=sensor_spec['roll'],
+                                             yaw=sensor_spec['yaw'])
+
+        elif type_ == 'sensor.camera.instance_segmentation':
+            # Поддержка instance segmentation
+            attributes['image_size_x'] = str(sensor_spec['width'])
+            attributes['image_size_y'] = str(sensor_spec['height'])
+            attributes['fov'] = str(sensor_spec['fov'])
+            sensor_location = carla.Location(x=sensor_spec['x'], y=sensor_spec['y'], z=sensor_spec['z'])
+            sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'], roll=sensor_spec['roll'],
+                                             yaw=sensor_spec['yaw'])
+
+        elif type_ == 'sensor.camera.semantic_segmentation':
+            # Поддержка semantic_segmentation
+            attributes['image_size_x'] = str(sensor_spec['width'])
+            attributes['image_size_y'] = str(sensor_spec['height'])
+            attributes['fov'] = str(sensor_spec['fov'])
+            sensor_location = carla.Location(x=sensor_spec['x'], y=sensor_spec['y'], z=sensor_spec['z'])
+            sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'], roll=sensor_spec['roll'],
                                              yaw=sensor_spec['yaw'])
 
         elif type_ == 'sensor.lidar.ray_cast':
