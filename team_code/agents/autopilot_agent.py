@@ -178,7 +178,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
             {'type':'sensor.other.imu','x':0.0,'y':0.0,'z':0.0,'roll':0.0,'pitch':0.0,'yaw':0.0,
              'sensor_tick':0.1,'id':'imu'},
             # Speedometer
-            {'type':'sensor.speedometer','reading_frequency':20,'id':'speed'}
+            {'type':'sensor.speedometer','reading_frequency':10,'id':'speed'}
         ]
 
     def stop_function(self, is_stop):
