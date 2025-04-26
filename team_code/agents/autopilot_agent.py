@@ -343,7 +343,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
 
         steer = self._turn_controller.step(angle)
         steer = np.clip(steer, -1.0, 1.0)
-        self.steer_alpha = 0.3  # степень сглаживания: 0.1–0.3 обычно ок
+        self.steer_alpha = 0.4  # степень сглаживания: 0.1–0.4 обычно ок
 
         self.smoothed_steer = (self.steer_alpha * steer +
                                (1 - self.steer_alpha) * self.smoothed_steer)
