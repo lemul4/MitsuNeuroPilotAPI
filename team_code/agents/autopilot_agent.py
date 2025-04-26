@@ -55,7 +55,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         current_time = now.strftime("%H_%M_%S")
         time_info = f"/{current_date}-{current_time}/"
 
-        self.dataset_save_path = os.path.join("checkpoint/dataset/imitation" + time_info)
+        self.dataset_save_path = os.path.join("dataset/imitation" + time_info)
 
         # Threading setup for async saving
         self._save_queue = queue.Queue()
