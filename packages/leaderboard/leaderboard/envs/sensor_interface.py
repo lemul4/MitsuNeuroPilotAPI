@@ -178,10 +178,67 @@ class CallBack(object):
             self._data_provider.update_sensor(tag, depth_meters, image.frame)
 
         elif 'instance' in tag:
+            LABEL_COLORS = np.array([
+                (0, 0, 0),  # Unlabeled
+                (128, 64, 128),  # Road
+                (244, 35, 232),  # Sidewalk
+                (70, 70, 70),  # Building
+                (102, 102, 156),  # Wall
+                (190, 153, 153),  # Fence
+                (153, 153, 153),  # Pole
+                (250, 170, 30),  # Traffic Light
+                (220, 220, 0),  # Traffic Sign
+                (107, 142, 35),  # Vegetation
+                (152, 251, 152),  # Terrain
+                (70, 130, 180),  # Sky
+                (220, 20, 60),  # Pedestrian
+                (255, 0, 0),  # Rider
+                (0, 0, 142),  # Car
+                (0, 0, 70),  # Truck
+                (0, 60, 100),  # Bus
+                (0, 80, 100),  # Train
+                (0, 0, 230),  # Motorcycle
+                (119, 11, 32),  # Bicycle
+                (110, 190, 160),  # Static
+                (170, 120, 50),  # Dynamic
+                (55, 90, 80),  # Other
+                (45, 60, 150),  # Water
+                (157, 234, 50),  # Road Line
+                (81, 0, 81),  # Ground
+                (150, 100, 100),  # Bridge
+                (230, 150, 140),  # Rail Track
+                (180, 165, 180)  # Guard Rail
+            ]) / 255.0
+
+            PALETTE = (LABEL_COLORS * 255).astype(np.uint8)
+            DESIRED_IDS = {12, 13, 14, 15, 16, 17, 18, 19, }
             array = np.frombuffer(image.raw_data, dtype=np.uint8)
             array = array.reshape((image.height, image.width, 4))
 
-            self._data_provider.update_sensor(tag, array, image.frame)
+            # split
+            B = array[:, :, 0].astype(np.uint16)
+            G = array[:, :, 1].astype(np.uint16)
+            sem = array[:, :, 2].astype(np.uint8)  # semantic id
+            inst_id = B + (G << 8)  # уникальный instance id
+
+            # подготовим выходное BGRA-поле
+            out = np.zeros_like(array)
+
+            # 1) для НЕ-интересных семантических классов раскрашиваем по палитре
+            mask_semantic = ~np.isin(sem, list(DESIRED_IDS))
+            out[mask_semantic, :3] = PALETTE[sem[mask_semantic]]
+            out[mask_semantic, 3] = 255
+
+            # 2) для интересных (истинных инстансов) закодируем inst_id в цвет
+            #    — можно любой способ, здесь просто разложим обратно в два канала + sem
+            mask_inst = ~mask_semantic
+            out[mask_inst, 0] = (inst_id[mask_inst] & 0xFF).astype(np.uint8)  # B
+            out[mask_inst, 1] = ((inst_id[mask_inst] >> 8) & 0xFF).astype(np.uint8)  # G
+            out[mask_inst, 2] = sem[mask_inst]  # R = semantic id
+            out[mask_inst, 3] = 255
+
+            # и обновляем сенсор
+            self._data_provider.update_sensor(tag, out, image.frame)
 
         elif 'semantic' in tag:
             image.convert(carla.ColorConverter.CityScapesPalette)
