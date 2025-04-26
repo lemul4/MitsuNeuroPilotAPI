@@ -7,5 +7,7 @@
 /dataSources/
 /dataSources.local.xml
 /.idea/
+/.venv1/
+/.venv/
 /recordings/
 /packages/leaderboard/results.json
