@@ -1,49 +1,39 @@
-""" Scenario Description
-Traffic Scenario 03 (dynamic).
-Obstacle avoidance without prior action.
-The ego-vehicle encounters an obstacle / unexpected entity on the road and must perform an
-emergency brake or an avoidance maneuver.
-
-To run this file using the Carla simulator:
-    scenic examples/carla/manual_control/carlaChallenge5_dynamic.scenic --2d --model scenic.simulators.carla.model --simulate
+"""
+Сценарий обгона медленной машины
 """
 
-## SET MAP AND MODEL (i.e. definitions of all referenceable vehicle types, road library, etc)
-param map = localPath('D:/CARLA_0.9.15/WindowsNoEditor/CarlaUE4/Content/Carla/Maps/OpenDrive/Town05_Opt.xodr')
-param carla_map = 'Town05_Opt'
+param map = localPath('C:/CARLA_0.9.15/CarlaUE4/Content/Carla/Maps/OpenDrive/Town03.xodr')
+param carla_map = 'Town03'
 param render = 0
+param timestep = 0.025
 model scenic.simulators.carla.model
 
-# CONSTANTS
-EGO_MODEL = "vehicle.lincoln.mkz_2017"
-EGO_SPEED = 10
 
-PEDESTRIAN_MIN_SPEED = 0.5
-THRESHOLD = 17
+MODEL_EGO = 'vehicle.audi.a2'
+MODEL_adversary = 'vehicle.lincoln.mkz_2017'
+MAX_DISTANCE = 50
+param ADV_DIST = VerifaiRange(10, 15)
+param ADV_SPEED = VerifaiRange(2, 5)
 
-behavior PedestrianBehavior(min_speed=1, threshold=10):
-    while (ego.speed <= 0.1):
-        wait
+INIT_DIST = 50
 
-    do CrossingBehavior(ego, min_speed, threshold)
 
-lane = Uniform(*network.lanes)
+initLane = Uniform(*network.lanes)
+egoSpawnPt = new OrientedPoint in initLane.centerline
 
-spot = new OrientedPoint on lane.centerline
-vending_spot = new OrientedPoint following roadDirection from spot for -3
 
-pedestrian = new Pedestrian right of spot by 3,
-    with heading 90 deg relative to spot.heading,
-    with regionContainedIn None,
-    with behavior PedestrianBehavior(PEDESTRIAN_MIN_SPEED, THRESHOLD)
-
-vending_machine = new VendingMachine right of vending_spot by 3,
-    with heading -90 deg relative to vending_spot.heading,
-    with regionContainedIn None
-
-ego = new Car following roadDirection from spot for Range(-30, -20),
-    with blueprint EGO_MODEL,
+ego = new Car at egoSpawnPt,
+    with blueprint MODEL_EGO,
     with rolename "hero"
 
-require (distance to intersection) > 50
-terminate when (distance to spot) > 100
+adversary = new Car following roadDirection for globalParameters.ADV_DIST,
+    with blueprint MODEL_adversary,
+    with behavior FollowLaneBehavior(target_speed=globalParameters.ADV_SPEED)
+
+require (distance to intersection) > INIT_DIST
+require (distance from adversary to intersection) > INIT_DIST
+require always (adversary.laneSection._fasterLane is not None)
+
+terminate when (distance from ego to adversary) > MAX_DISTANCE
+terminate when simulation().currentTime >= 500
+
