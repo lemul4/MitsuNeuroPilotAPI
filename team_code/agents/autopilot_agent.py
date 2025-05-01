@@ -23,7 +23,7 @@ DEBUG = False
 SENSOR_CONFIG = {
     'width': 592,
     'height': 333,
-    'fov': 120
+    'fov': 135
 }
 
 WEATHERS = {
@@ -55,7 +55,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         current_time = now.strftime("%H_%M_%S")
         time_info = f"/{current_date}-{current_time}/"
 
-        self.dataset_save_path = os.path.join("checkpoint/dataset/imitation" + time_info)
+        self.dataset_save_path = os.path.join("dataset/imitation" + time_info)
 
         # Threading setup for async saving
         self._save_queue = queue.Queue()
@@ -117,7 +117,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         self.subfolder_paths = []
         """"rgb_front", "rgb_front_60", "rgb_rear","""
         subfolders = [
-            "depth_front", "semantic_segmentation_front", "measurements"
+            "depth_front", "instance_segmentation_front", "measurements"
         ]
         for sub in subfolders:
             path = os.path.join(output_dir, sub)
@@ -166,11 +166,11 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
              'sensor_tick': 0.1,
              'id':'depth_front'},
             # segmentation front
-            {'type': 'sensor.camera.semantic_segmentation', 'x':1.3,'y':0.0,'z':2.3,
+            {'type': 'sensor.camera.instance_segmentation', 'x':1.3,'y':0.0,'z':2.3,
              'roll':0.0,'pitch':0.0,'yaw':0.0,
              'width':self._sensor_data['width'],'height':self._sensor_data['height'],'fov':self._sensor_data['fov'],
              'sensor_tick': 0.1,
-             'id':'semantic_segmentation_front'},
+             'id':'instance_segmentation_front'},
             # GNSS
             {'type':'sensor.other.gnss','x':0.0,'y':0.0,'z':0.0,'roll':0.0,'pitch':0.0,'yaw':0.0,
              'sensor_tick':0.1,'id':'gps'},
@@ -295,7 +295,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
                             image_rear=data['rgb_rear'],"""
             self.save_data(
                 image_depth=data['depth_front'],
-                image_seg=data['semantic_segmentation_front'],
+                image_seg=data['instance_segmentation_front'],
                 data=measurement_data
             )
 
@@ -308,7 +308,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         rgb_front_60 = input_data['rgb_front_60'][1][:, :, :3]
         rgb_rear = input_data['rgb_rear'][1][:, :, :3]"""
         depth_front = input_data['depth_front'][1]  # float32 depth in meters
-        sem_seg = input_data['semantic_segmentation_front'][1][:, :, :-1]
+        inst_seg = input_data['instance_segmentation_front'][1][:, :, :-1]
 
         gps = input_data['gps'][1][:2]
         speed = input_data['speed'][1]['speed']
@@ -319,7 +319,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         'rgb_rear': rgb_rear,"""
         return {
             'depth_front': depth_front,
-            'semantic_segmentation_front': sem_seg,
+            'instance_segmentation_front': inst_seg,
             'gps': gps,
             'speed': speed,
             'compass': compass,
@@ -343,11 +343,11 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
 
         steer = self._turn_controller.step(angle)
         steer = np.clip(steer, -1.0, 1.0)
-        self.steer_alpha = 0.3  # степень сглаживания: 0.1–0.3 обычно ок
+        self.steer_alpha = 0.4  # степень сглаживания: 0.1–0.4 обычно ок
 
         self.smoothed_steer = (self.steer_alpha * steer +
                                (1 - self.steer_alpha) * self.smoothed_steer)
-        steer = round(self.smoothed_steer, 3)
+        steer = self.smoothed_steer
 
         # acceleration
         angle_far_unnorm = base_utils.get_angle_to(pos, theta, far_target)

@@ -19,7 +19,7 @@ class CarlaDatasetLoader(Dataset):
     """
     def __init__(self, root_dir):
         self.root_dir = root_dir
-        subs = ["depth_front", "semantic_segmentation_front", "measurements"]
+        subs = ["depth_front", "instance_segmentation_front", "measurements"]
         self.depth_dir = os.path.join(root_dir, subs[0])
         self.seg_dir   = os.path.join(root_dir, subs[1])
         self.meas_dir  = os.path.join(root_dir, subs[2])
