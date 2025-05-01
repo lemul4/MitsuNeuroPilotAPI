@@ -575,7 +575,7 @@ def main():
                     sensor.stop()
                     sensor.destroy()
                 # Делаем небольшую задержку, чтобы завершились все колбэки
-                time.sleep(0.5)
+                time.sleep(1)
                 if recording_enabled:
                     if control_csv_file:
                         control_csv_file.close()

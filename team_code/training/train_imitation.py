@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from torch.utils.tensorboard import SummaryWriter
-from data import DatasetLoader
+from data import CarlaDatasetLoader
 
 # to add the parent "agents" folder to sys path and import models
 current = os.path.dirname(os.path.realpath(__file__))
@@ -130,7 +130,7 @@ if __name__ == "__main__":
             print(str(i) + "-imitation dataset: ", training_path_temp)
             
             # get and append every dataset for training
-            constructed_dataset = DatasetLoader(training_path_temp)
+            constructed_dataset = CarlaDatasetLoader(training_path_temp)
             training_dataset.append(constructed_dataset)
 
     # get validation set
@@ -147,7 +147,7 @@ if __name__ == "__main__":
             print(str(i) + "-validation dataset: ", validation_path_temp)
             
             # get and append every dataset for validation
-            constructed_dataset = DatasetLoader(validation_path_temp)
+            constructed_dataset = CarlaDatasetLoader(validation_path_temp)
             validation_dataset.append(constructed_dataset)
 
     print("\n================== Finished Loading Training Dataset ! ==================\n")
