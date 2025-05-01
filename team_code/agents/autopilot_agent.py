@@ -19,7 +19,6 @@ from agent_utils.planner import RoutePlanner
 
 
 DEBUG = False
-
 SENSOR_CONFIG = {
     'width': 592,
     'height': 333,
@@ -48,6 +47,10 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         self.data_count = 0
         self.initialized = False
         self.weather_id = WEATHERS_IDS[0]
+        self.last_brake = 0.0
+        self.last_throttle = 0.0
+        self.last_steer = 0.0
+        self.last_speed = 0.0
 
         today = datetime.today()
         now = datetime.now()
@@ -240,19 +243,22 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         applied_control.steer = steer
         applied_control.brake = brake
 
-
-
-
-
         if self.step % 10 == 0:
-            reward, done = self.calculate_reward(throttle=throttle, ego_speed=speed * 3.6, angle=angle,
-                                                 is_light=is_light, is_vehicle=is_vehicle, is_walker=is_walker,
-                                                 is_stop=is_stop)
-            label = self.define_classifier_label(reward)
-            self.steer_sequence.append(steer)
-            self.throttle_sequence.append(throttle)
-            self.brake_sequence.append(brake)
-            self.speed_sequence.append(speed)
+            self.steer_sequence.append(self.last_steer)
+            self.throttle_sequence.append(self.last_throttle)
+            self.brake_sequence.append(self.last_brake)
+            self.speed_sequence.append(self.last_speed)
+            self.last_brake = float(brake)
+            self.last_throttle = float(throttle)
+            self.last_steer = float(steer)
+            self.last_speed = float(speed)
+
+            """rgb_front = input_data['rgb_front'][1][:, :, :3]
+                    rgb_front_60 = input_data['rgb_front_60'][1][:, :, :3]
+                    rgb_rear = input_data['rgb_rear'][1][:, :, :3]"""
+            depth_front = input_data['depth_front'][1]  # float32 depth in meters
+            inst_seg = input_data['instance_segmentation_front'][1][:, :, :-1]
+
 
             measurement_data = {
                 'x': gps[0],
@@ -280,13 +286,10 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
                 'is_red_light_present': self.is_red_light_present,
                 'is_stops_present': self.is_stops_present,
 
-                'reward': reward,
-
-                'steer_sequence': np.array(self.steer_sequence).tolist(),
-                'throttle_sequence': np.array(self.throttle_sequence).tolist(),
-                'brake_sequence': np.array(self.brake_sequence).tolist(),
-                'speed_sequence': np.array(self.speed_sequence).tolist(),
-                'label': label
+                'steer_sequence': np.array(self.steer_sequence, dtype=np.float32).tolist(),
+                'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
+                'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
+                'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
 
             }
 
@@ -294,8 +297,8 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
                             image_front_60=data['rgb_front_60'],
                             image_rear=data['rgb_rear'],"""
             self.save_data(
-                image_depth=data['depth_front'],
-                image_seg=data['instance_segmentation_front'],
+                image_depth=depth_front,
+                image_seg=inst_seg,
                 data=measurement_data
             )
 
@@ -303,12 +306,6 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
 
     def tick(self, input_data):
         self.step += 1
-
-        """rgb_front = input_data['rgb_front'][1][:, :, :3]
-        rgb_front_60 = input_data['rgb_front_60'][1][:, :, :3]
-        rgb_rear = input_data['rgb_rear'][1][:, :, :3]"""
-        depth_front = input_data['depth_front'][1]  # float32 depth in meters
-        inst_seg = input_data['instance_segmentation_front'][1][:, :, :-1]
 
         gps = input_data['gps'][1][:2]
         speed = input_data['speed'][1]['speed']
@@ -318,8 +315,6 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         'rgb_front_60': rgb_front_60,
         'rgb_rear': rgb_rear,"""
         return {
-            'depth_front': depth_front,
-            'instance_segmentation_front': inst_seg,
             'gps': gps,
             'speed': speed,
             'compass': compass,
@@ -352,7 +347,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         # acceleration
         angle_far_unnorm = base_utils.get_angle_to(pos, theta, far_target)
         should_slow = abs(angle_far_unnorm) > 45.0 or abs(angle_unnorm) > 5.0
-        target_speed = 5.0 if should_slow else 30
+        target_speed = 6.0 if should_slow else 20
 
         if brake:
             target_speed = 0.0
@@ -363,7 +358,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         self.angle_unnorm = angle_unnorm
         self.angle_far_unnorm = angle_far_unnorm
 
-        delta = np.clip(target_speed - speed, 0.0, 0.30)
+        delta = np.clip(target_speed - speed, 0.0, 0.25)
         throttle = self._speed_controller.step(delta)
         throttle = np.clip(throttle, 0.0, 0.8)
 
