@@ -53,11 +53,11 @@ class CarlaDatasetLoader(Dataset):
         meas_path = os.path.join(self.meas_dir, name + ".json")
 
         # Load depth (uint16) -> float32 normalized [0,1]
-        depth_img = io.imread(depth_path).astype(np.float32)
-        depth = torch.from_numpy(depth_img).unsqueeze(0)
+        depth_img = io.imread(depth_path).astype(np.float32) / 65535.0
+        depth = torch.from_numpy(depth_img).unsqueeze(0).float()
 
         # Load segmentation (RGB) -> [3, H, W]
-        seg_img = io.imread(seg_path)
+        seg_img = io.imread(seg_path).astype(np.float32) / 255.0
         if seg_img.ndim == 3 and seg_img.shape[2] == 3:
             seg = torch.from_numpy(seg_img).permute(2, 0, 1).contiguous()
         else:

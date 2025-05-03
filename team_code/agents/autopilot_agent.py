@@ -347,7 +347,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         # acceleration
         angle_far_unnorm = base_utils.get_angle_to(pos, theta, far_target)
         should_slow = abs(angle_far_unnorm) > 45.0 or abs(angle_unnorm) > 5.0
-        target_speed = 6.0 if should_slow else 20
+        target_speed = 5.0 if should_slow else 20
 
         if brake:
             target_speed = 0.0
@@ -358,7 +358,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
         self.angle_unnorm = angle_unnorm
         self.angle_far_unnorm = angle_far_unnorm
 
-        delta = np.clip(target_speed - speed, 0.0, 0.25)
+        delta = np.clip(target_speed - speed, 0.0, 0.3)
         throttle = self._speed_controller.step(delta)
         throttle = np.clip(throttle, 0.0, 0.8)
 
@@ -478,7 +478,7 @@ class AutopilotAgent(autonomous_agent.AutonomousAgent):
     def is_vehicle_hazard(self, vehicle_list):
         o1 = base_utils._orientation(self.hero_vehicle.get_transform().rotation.yaw)
         p1 = base_utils._numpy(self.hero_vehicle.get_location())
-        s1 = max(8, 3.0 * np.linalg.norm(base_utils._numpy(self.hero_vehicle.get_velocity()))) # increases the threshold distance
+        s1 = max(8.5, 3.0 * np.linalg.norm(base_utils._numpy(self.hero_vehicle.get_velocity()))) # increases the threshold distance
         v1_hat = o1
         v1 = s1 * v1_hat
         for target_vehicle in vehicle_list:
