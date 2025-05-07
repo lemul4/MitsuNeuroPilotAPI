@@ -3,6 +3,7 @@ import glob
 import json
 import torch
 import torch.nn as nn
+from torch import optim
 from torch.backends import cudnn
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, ConcatDataset
@@ -21,6 +22,7 @@ if __name__ == '__main__':
     torch.backends.cudnn.allow_tf32 = True
     cudnn.benchmark = True
     cudnn.deterministic = False
+    torch.backends.cudnn.enabled = True
     torch.multiprocessing.set_start_method('spawn', force=True)
 
     # 1. Функция для создания ConcatDataset из всех townXX/run папок
@@ -71,32 +73,44 @@ if __name__ == '__main__':
     model = ImprovedCarlaAutopilotNet(
         depth_channels=1,
         seg_channels=3,
-        img_emb_dim=256,
+        img_emb_dim=512,
         rnn_input=4,
-        rnn_hidden=256,
-        cont_feat_dim=6,
-        signal_dim=2,
+        rnn_hidden=512,
+        cont_feat_dim=10,
+        signal_dim=1,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
         mlp_hidden=512
     ).to(DEVICE)
 
-    metrics = {
-        'steer_mae': MeanAbsoluteError().to(DEVICE),
-        'throttle_mae': MeanAbsoluteError().to(DEVICE),
-        'brake_mae': MeanAbsoluteError().to(DEVICE),
-        'steer_mse': MeanSquaredError().to(DEVICE),
-        'throttle_mse': MeanSquaredError().to(DEVICE),
-        'brake_mse': MeanSquaredError().to(DEVICE),
-        'steer_r2': R2Score().to(DEVICE),
-        'throttle_r2': R2Score().to(DEVICE),
-        'brake_r2': R2Score().to(DEVICE)
-    }
+    def create_metrics():
+        base_metrics = {
+            'steer_mae': MeanAbsoluteError().to(DEVICE),
+            'throttle_mae': MeanAbsoluteError().to(DEVICE),
+            'brake_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_mse': MeanSquaredError().to(DEVICE),
+            'throttle_mse': MeanSquaredError().to(DEVICE),
+            'brake_mse': MeanSquaredError().to(DEVICE),
+            'steer_r2': R2Score().to(DEVICE),
+            'throttle_r2': R2Score().to(DEVICE),
+            'brake_r2': R2Score().to(DEVICE),
 
+            # Новые метрики для разных диапазонов steer
+            'steer_straight_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_light_turn_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_sharp_turn_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_straight_mse': MeanSquaredError().to(DEVICE),
+            'steer_light_turn_mse': MeanSquaredError().to(DEVICE),
+            'steer_sharp_turn_mse': MeanSquaredError().to(DEVICE),
+            'steer_straight_r2': R2Score().to(DEVICE),
+            'steer_light_turn_r2': R2Score().to(DEVICE),
+            'steer_sharp_turn_r2': R2Score().to(DEVICE),
+        }
+        return base_metrics
 
     # 6. Тренировочная функция
     def configure_optimizers(model, lr, total_steps):
-        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-3,)
         scheduler = OneCycleLR(
             optimizer,
             max_lr=lr,
@@ -107,7 +121,7 @@ if __name__ == '__main__':
         )
         return optimizer, scheduler
 
-
+    # Обновляем функцию train_one_epoch
     def train_one_epoch(
             loader, model, optimizer, scheduler, criterion, scaler, device, metrics
     ):
@@ -140,17 +154,18 @@ if __name__ == '__main__':
                 loss_s = criterion(preds['steer'], tgt_s)
                 loss_t = criterion(preds['throttle'], tgt_t)
                 loss_b = criterion(preds['brake'], tgt_b)
-                loss = loss_s + 0.85 * loss_t + 0.5 * loss_b
+                loss = 1.5 * loss_s + 0.8 * loss_t + 0.5 * loss_b
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)  
+            scaler.step(optimizer)
             scaler.update()
             scheduler.step()
 
             running_loss += loss.item() * depth.size(0)
 
+            # Базовые метрики
             for prefix, pred, target in [
                 ('steer', preds['steer'], tgt_s),
                 ('throttle', preds['throttle'], tgt_t),
@@ -160,10 +175,28 @@ if __name__ == '__main__':
                 metrics[f'{prefix}_mse'].update(pred, target)
                 metrics[f'{prefix}_r2'].update(pred, target)
 
+            # Дополнительные метрики для steer по диапазонам
+            abs_steer = torch.abs(tgt_s)
+            mask_straight = abs_steer < 0.05
+            mask_light = (abs_steer >= 0.05) & (abs_steer < 0.15)
+            mask_sharp = abs_steer >= 0.15
+
+            for mask, prefix in [
+                (mask_straight, 'steer_straight'),
+                (mask_light, 'steer_light_turn'),
+                (mask_sharp, 'steer_sharp_turn')
+            ]:
+                if mask.any():
+                    metrics[f'{prefix}_mae'].update(preds['steer'][mask], tgt_s[mask])
+                    metrics[f'{prefix}_mse'].update(preds['steer'][mask], tgt_s[mask])
+                    metrics[f'{prefix}_r2'].update(preds['steer'][mask], tgt_s[mask])
+
         avg_loss = running_loss / len(loader.dataset)
         results = {name: m.compute().item() for name, m in metrics.items()}
         return avg_loss, results
 
+
+    # Аналогично обновляем функцию validate
     def validate(
             loader, model, criterion, device, metrics
     ):
@@ -191,33 +224,50 @@ if __name__ == '__main__':
                 tgt_b = batch['brake'].unsqueeze(1).to(device)
 
                 preds = model(depth, seg, hist, cont, sig, near, far)
-                loss = (criterion(preds['steer'], tgt_s)
-                        + 0.85 * criterion(preds['throttle'], tgt_t)
+                loss = (1.5 * criterion(preds['steer'], tgt_s)
+                        + 0.8 * criterion(preds['throttle'], tgt_t)
                         + 0.5 * criterion(preds['brake'], tgt_b))
                 val_loss += loss.item() * depth.size(0)
 
+                # Базовые метрики
                 for prefix, pred, target in [
                     ('steer', preds['steer'], tgt_s),
                     ('throttle', preds['throttle'], tgt_t),
                     ('brake', preds['brake'], tgt_b)
                 ]:
                     metrics[f'{prefix}_mae'].update(pred, target)
-                    metrics[f'{prefix}_mse'].update(pred, target) 
+                    metrics[f'{prefix}_mse'].update(pred, target)
                     metrics[f'{prefix}_r2'].update(pred, target)
+
+                # Дополнительные метрики для steer по диапазонам
+                abs_steer = torch.abs(tgt_s)
+                mask_straight = abs_steer < 0.05
+                mask_light = (abs_steer >= 0.05) & (abs_steer < 0.15)
+                mask_sharp = abs_steer >= 0.15
+
+                for mask, prefix in [
+                    (mask_straight, 'steer_straight'),
+                    (mask_light, 'steer_light_turn'),
+                    (mask_sharp, 'steer_sharp_turn')
+                ]:
+                    if mask.any():
+                        metrics[f'{prefix}_mae'].update(preds['steer'][mask], tgt_s[mask])
+                        metrics[f'{prefix}_mse'].update(preds['steer'][mask], tgt_s[mask])
+                        metrics[f'{prefix}_r2'].update(preds['steer'][mask], tgt_s[mask])
 
         avg_loss = val_loss / len(loader.dataset)
         results = {name: m.compute().item() for name, m in metrics.items()}
         return avg_loss, results
 
 
-    # Основной цикл обучения
-    num_epochs = 80
+    # Основной цикл обучения с новыми метриками
+    num_epochs = 70
     total_steps = num_epochs * len(dtrain)
     optimizer, scheduler = configure_optimizers(model, 1e-3, total_steps)
     scaler = GradScaler(device='cuda')
 
-    train_metrics = {name: m.__class__().to(DEVICE) for name, m in metrics.items()}
-    val_metrics = {name: m.__class__().to(DEVICE) for name, m in metrics.items()}
+    train_metrics = create_metrics()
+    val_metrics = create_metrics()
 
     best_val = float('inf')
     for epoch in range(1, num_epochs + 1):
@@ -231,12 +281,11 @@ if __name__ == '__main__':
 
         print(f"Epoch {epoch}: Train loss={train_loss:.4f}, Val loss={val_loss:.4f}")
 
-        # Блок для метрик обучения
+        # Вывод всех метрик
         print("  Train metrics:")
         for name, value in train_res.items():
             print(f"    {name}: {value:.4f}")
 
-        # Блок для метрик валидации
         print("  Val metrics:")
         for name, value in val_res.items():
             print(f"    {name}: {value:.4f}")
@@ -245,4 +294,3 @@ if __name__ == '__main__':
             torch.save(model.state_dict(), 'best_model.pth')
             best_val = val_loss
             print("Saved best model")
-
