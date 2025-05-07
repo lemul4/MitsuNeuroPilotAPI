@@ -1,7 +1,9 @@
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+import segmentation_models_pytorch as smp
 
 class ResNetEncoder(nn.Module):
     def __init__(self, in_channels, out_dim=256, backbone='resnet34'):
@@ -21,9 +23,9 @@ class ResNetEncoder(nn.Module):
 
         self.proj = nn.Sequential(
             nn.Linear(feat_dim, out_dim),
-            nn.LayerNorm(out_dim),
+            nn.BatchNorm1d(out_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.15)
+            nn.Dropout(0.2)
         )
 
     def forward(self, x):
@@ -32,8 +34,49 @@ class ResNetEncoder(nn.Module):
         x = x.view(x.size(0), -1)
         return self.proj(x)
 
+
+class EfficientNetEncoder(nn.Module):
+    def __init__(self, in_channels=3, out_dim=256, backbone='efficientnet_lite0'):
+        super().__init__()
+        # Получаем энкодер EfficientNet без головы
+        self.backbone = timm.create_model(backbone, pretrained=True, features_only=True, in_chans=in_channels)
+
+        # Получаем информацию о всех уровнях признаков
+        self.feature_info = self.backbone.feature_info
+        self.num_levels = len(self.feature_info)
+
+        # Создаем адаптивные пулинги и проекции для каждого уровня
+        self.pools = nn.ModuleList([nn.AdaptiveAvgPool2d(1) for _ in range(self.num_levels)])
+
+        # Вычисляем общее количество каналов после конкатенации
+        total_channels = sum([info['num_chs'] for info in self.feature_info])
+
+        self.proj = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(total_channels, out_dim),
+            nn.BatchNorm1d(out_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2)
+        )
+
+    def forward(self, x):
+        # Получаем все уровни признаков
+        feats = self.backbone(x)
+
+        # Применяем адаптивный пулинг к каждому уровню
+        pooled_feats = []
+        for i in range(self.num_levels):
+            pooled = self.pools[i](feats[i])
+            pooled_feats.append(pooled)
+
+        # Объединяем все уровни по каналам
+        combined = torch.cat([p.squeeze(-1).squeeze(-1) for p in pooled_feats], dim=1)
+
+        # Проецируем в итоговое пространство признаков
+        return self.proj(combined)
+
 class HistoryAttentionRNN(nn.Module):
-    def __init__(self, input_size, hidden_size=256, num_layers=2, dropout=0.15):
+    def __init__(self, input_size, hidden_size=256, num_layers=2, dropout=0.2):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -66,15 +109,15 @@ class CrossModalFusion(nn.Module):
         return gated * x1 + (1 - gated) * x2
 
 class ResidualMLPBlock(nn.Module):
-    def __init__(self, dim, dropout=0.15):
+    def __init__(self, dim, dropout=0.3):
         super().__init__()
         self.block = nn.Sequential(
             nn.Linear(dim, dim),
-            nn.LayerNorm(dim),
+            nn.BatchNorm1d(dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(dim, dim),
-            nn.LayerNorm(dim)
+            nn.BatchNorm1d(dim)
         )
         self.relu = nn.ReLU(inplace=True)
 
@@ -89,41 +132,40 @@ class ImprovedCarlaAutopilotNet(nn.Module):
         img_emb_dim=256,
         rnn_input=4,
         rnn_hidden=256,
-        cont_feat_dim=6,
-        signal_dim=2,
+        cont_feat_dim=10,
+        signal_dim=1,
         near_cmd_dim=7,
         far_cmd_dim=7,
         mlp_hidden=512
     ):
         super().__init__()
-        self.depth_encoder = ResNetEncoder(depth_channels, out_dim=img_emb_dim)
-        self.seg_encoder = ResNetEncoder(seg_channels, out_dim=img_emb_dim)
+        self.depth_encoder = EfficientNetEncoder(depth_channels, out_dim=img_emb_dim)
+        self.seg_encoder = EfficientNetEncoder(seg_channels, out_dim=img_emb_dim)
         self.img_fusion = CrossModalFusion(img_emb_dim)
 
         self.history_encoder = HistoryAttentionRNN(
             input_size=rnn_input,
             hidden_size=rnn_hidden,
             num_layers=2,
-            dropout=0.15
+            dropout=0.25
         )
 
-        # Feature-wise gating
         self.feature_gate = nn.Sequential(
             nn.Linear(cont_feat_dim + signal_dim + near_cmd_dim + far_cmd_dim,
                       cont_feat_dim + signal_dim + near_cmd_dim + far_cmd_dim),
             nn.Sigmoid()
         )
 
-        self.norm_tabular = nn.LayerNorm(cont_feat_dim + signal_dim + near_cmd_dim + far_cmd_dim)
+        self.norm_tabular = nn.BatchNorm1d(cont_feat_dim + signal_dim + near_cmd_dim + far_cmd_dim)
 
         hist_dim = rnn_hidden * 4
         mlp_in = img_emb_dim + hist_dim + cont_feat_dim + signal_dim + near_cmd_dim + far_cmd_dim
 
         self.mlp = nn.Sequential(
             nn.Linear(mlp_in, mlp_hidden),
-            nn.LayerNorm(mlp_hidden),
+            nn.BatchNorm1d(mlp_hidden),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.15),
+            nn.Dropout(0.3),
             ResidualMLPBlock(mlp_hidden),
             ResidualMLPBlock(mlp_hidden)
         )

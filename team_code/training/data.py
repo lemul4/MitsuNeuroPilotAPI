@@ -7,45 +7,69 @@ from torch.utils.data import Dataset
 from skimage import io
 
 class CarlaDatasetLoader(Dataset):
-    """
-    Dataset loader for CARLA imitation data with extended features:
-      - relative commands (dx, dy)
-      - sin/cos projections for angles
-      - acceleration feature
-      - one-hot encodings for signals and commands
-      - optional normalization of continuous features
-    """
-    def __init__(self, root_dir,
-                 num_near_commands: int,
-                 num_far_commands: int,
-                 stats: dict = None):
+    def __init__(self, root_dir, num_near_commands: int, num_far_commands: int, stats: dict = None):
         self.root_dir = root_dir
         subs = ["depth_front", "instance_segmentation_front", "measurements"]
         self.depth_dir = os.path.join(root_dir, subs[0])
         self.seg_dir = os.path.join(root_dir, subs[1])
         self.meas_dir = os.path.join(root_dir, subs[2])
-        self.len = len(os.listdir(self.meas_dir))
 
-        # number of discrete command categories
+        # --- Измененная логика ---
+        # Получаем базовые имена файлов (без расширения) для каждого типа
+        try:
+            depth_files = {os.path.splitext(f)[0] for f in os.listdir(self.depth_dir) if f.endswith('.png')}
+            seg_files = {os.path.splitext(f)[0] for f in os.listdir(self.seg_dir) if f.endswith('.png')}
+            meas_files = {os.path.splitext(f)[0] for f in os.listdir(self.meas_dir) if f.endswith('.json')}
+
+            # Находим пересечение - только те имена, для которых есть все 3 файла
+            self.valid_frames = sorted(list(depth_files.intersection(seg_files).intersection(meas_files)))
+
+            # Проверяем, что имена действительно похожи на числа ('0000', '0001', etc.)
+            # и удаляем те, что не являются, если такие попались
+            self.valid_frames = [f for f in self.valid_frames if f.isdigit()]
+
+        except FileNotFoundError:
+            # Если одна из директорий отсутствует, считаем этот run пустым
+            print(f"Warning: Could not find required subdirectories (depth, seg, meas) in {root_dir}. Skipping this run.")
+            self.valid_frames = []
+
+
+        if not self.valid_frames:
+             print(f"Warning: No valid frames found in {root_dir}. This dataset part will be empty.")
+        # self.len = len(os.listdir(self.meas_dir)) # Старая строка, заменяем на:
+        self.len = len(self.valid_frames)
+        # --- Конец измененной логики ---
+
         self.num_near = num_near_commands
         self.num_far = num_far_commands
-
-        # statistics for normalization: { 'speed': (mean, std), 'dx': ..., ... }
         self.stats = stats or {}
 
     def __len__(self):
+        # Возвращаем количество валидных кадров
         return self.len
 
     def _normalize(self, key, value):
-        if key in self.stats:
-            mean, std = self.stats[key]
-            return (value - mean) / std
-        return value
+         if key in self.stats:
+             mean, std = self.stats[key]
+             # Avoid division by zero or very small std deviation
+             if std > 1e-6:
+                return (value - mean) / std
+             else:
+                return value - mean # Or just return value if std is zero
+         return value
+
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        name = f"{idx:04d}"
+
+        if idx < 0 or idx >= self.len:
+             raise IndexError(f"Index {idx} out of bounds for dataset with length {self.len}")
+
+        # --- Измененная логика ---
+        # Получаем имя файла из списка валидных кадров
+        # name = f"{idx:04d}" # Старая строка, заменяем на:
+        name = self.valid_frames[idx]
 
         # Paths
         depth_path = os.path.join(self.depth_dir, name + ".png")
@@ -54,12 +78,13 @@ class CarlaDatasetLoader(Dataset):
 
         # Load depth (uint16) -> float32 normalized [0,1]
         depth_img = io.imread(depth_path).astype(np.float32) / 65535.0
-        depth = torch.from_numpy(depth_img).unsqueeze(0).float()
+        # Use clone() to ensure resizable storage
+        depth = torch.from_numpy(depth_img).unsqueeze(0).float().clone()
 
         # Load segmentation (RGB) -> [3, H, W]
         seg_img = io.imread(seg_path).astype(np.float32) / 255.0
         if seg_img.ndim == 3 and seg_img.shape[2] == 3:
-            seg = torch.from_numpy(seg_img).permute(2, 0, 1).contiguous()
+            seg = torch.from_numpy(seg_img).permute(2, 0, 1).contiguous().clone()
         else:
             raise ValueError(f"Segmentation image at {seg_path} is not RGB.")
 
@@ -68,53 +93,60 @@ class CarlaDatasetLoader(Dataset):
             data = json.load(f)
 
         # Raw continuous
-        x, y = data['x'], data['y']
-        x_c, y_c = data['x_command'], data['y_command']
+        x, y, z = data['x'], data['y'], data['z']
+
         theta = data['theta']
         speed = data['speed']
 
-        # Derived features
-        dx = x_c - x
-        dy = y_c - y
-        # angle sin/cos
-        sin_th, cos_th = np.sin(theta), np.cos(theta)
-        # acceleration from speed sequence
+        near_node_x = data['near_node_x']
+        near_node_y = data['near_node_y']
+        near_comand = data['near_command']
+
+        far_node_x = data['far_node_x']
+        far_node_y = data['far_node_y']
+        far_command = data['far_command']
+
+        angle_near = data['angle_near']
+        angle_far = data['angle_far']
+
         sp_seq = np.array(data['speed_sequence'], dtype=np.float32)
-        accel = sp_seq[-1] - sp_seq[-2] if len(sp_seq) >= 2 else 0.0
+        steer_seq = np.array(data['steer_sequence'], dtype=np.float32)
+        thr_seq = np.array(data['throttle_sequence'], dtype=np.float32)
+        br_seq = np.array(data['brake_sequence'], dtype=np.float32)
+
+        speed_seq = torch.from_numpy(sp_seq).clone()
+        steer_seq = torch.tensor(steer_seq).clone()
+        thr_seq = torch.tensor(thr_seq).clone()
+        br_seq = torch.tensor(br_seq).clone()
+
+        # Acceleration from speed sequence
+        accel_sp = sp_seq[-1] - sp_seq[-2] if len(sp_seq) >= 2 else 0.0
+        accel_steer = steer_seq[-1] - steer_seq[-2] if len(steer_seq) >= 2 else 0.0
+        accel_thr = thr_seq[-1] - thr_seq[-2] if len(thr_seq) >= 2 else 0.0
+        accel_br = br_seq[-1] - br_seq[-2] if len(br_seq) >= 2 else 0.0
+
 
         # One-hot signals: red light / stop sign
         red = int(data['is_red_light_present'])
-        stop = int(data['is_stops_present'])
-        signal_vec = torch.tensor([red, stop], dtype=torch.float32)
+        signal_vec = torch.tensor(red, dtype=torch.float32)
 
         # One-hot commands
-        near_cmd = data['near_command']
-        far_cmd = data['far_command']
-        near_oh = F.one_hot(torch.tensor(near_cmd), num_classes=self.num_near).float()
-        far_oh = F.one_hot(torch.tensor(far_cmd), num_classes=self.num_far).float()
+        near_oh = F.one_hot(torch.tensor(near_comand), num_classes=self.num_near).float()
+        far_oh  = F.one_hot(torch.tensor(far_command),  num_classes=self.num_far).float()
 
-        # Normalize continuous features
-        dx = self._normalize('dx', dx)
-        dy = self._normalize('dy', dy)
-        speed = self._normalize('speed', speed)
-        accel = self._normalize('accel', accel)
-        sin_th = self._normalize('sin_theta', sin_th)
-        cos_th = self._normalize('cos_theta', cos_th)
-
-        # Convert to tensors
-        cont_feats = torch.tensor([dx, dy, speed, accel, sin_th, cos_th], dtype=torch.float32)
-
-        # Sequences as tensors
-        speed_seq = torch.from_numpy(sp_seq)
-        steer_seq = torch.tensor(data['steer_sequence'], dtype=torch.float32)
-        thr_seq = torch.tensor(data['throttle_sequence'], dtype=torch.float32)
-        br_seq = torch.tensor(data['brake_sequence'], dtype=torch.float32)
+        # Convert to tensor
+        cont_feats = torch.tensor([x, y, z, theta, speed,
+                                   accel_sp, accel_steer, accel_thr, accel_br,
+                                   near_node_x, near_node_y,
+                                   far_node_x, far_node_y,
+                                   angle_near, angle_far], dtype=torch.float32)
 
         # Control targets
         steer = torch.tensor(data['steer'], dtype=torch.float32)
         throttle = torch.tensor(data['throttle'], dtype=torch.float32)
         brake = torch.tensor(data['brake'], dtype=torch.float32)
 
+    
         sample = {
             'depth': depth,
             'segmentation': seg,

@@ -1,23 +1,21 @@
-import os
-import weakref
-import numpy as np
-import random
-import cv2
 import json
-import carla
-import torch
-
+import os
+import random
+import weakref
 from collections import deque
 from datetime import datetime
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
-from leaderboard.autoagents import autonomous_agent 
+
+import carla
+import cv2
+import numpy as np
+import torch
 
 from agent_utils import base_utils
 from agent_utils.pid_controller import PIDController
 from agent_utils.planner import RoutePlanner
-
+from leaderboard.autoagents import autonomous_agent
 from networks.imitation_network import ImitationNetwork
-
+from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 # if True: IL vs Autopilot will be checked and Autopilot data is applied when brake commands are not the same
 # if False: IL agent will always be applied without saving data
@@ -41,26 +39,26 @@ SENSOR_CONFIG = {
 }
 
 WEATHERS = {
-        'ClearNoon': carla.WeatherParameters.ClearNoon,
-        'ClearSunset': carla.WeatherParameters.ClearSunset,
+    'ClearNoon': carla.WeatherParameters.ClearNoon,
+    'ClearSunset': carla.WeatherParameters.ClearSunset,
 
-        'CloudyNoon': carla.WeatherParameters.CloudyNoon,
-        'CloudySunset': carla.WeatherParameters.CloudySunset,
+    'CloudyNoon': carla.WeatherParameters.CloudyNoon,
+    'CloudySunset': carla.WeatherParameters.CloudySunset,
 
-        'WetNoon': carla.WeatherParameters.WetNoon,
-        'WetSunset': carla.WeatherParameters.WetSunset,
+    'WetNoon': carla.WeatherParameters.WetNoon,
+    'WetSunset': carla.WeatherParameters.WetSunset,
 
-        'MidRainyNoon': carla.WeatherParameters.MidRainyNoon,
-        'MidRainSunset': carla.WeatherParameters.MidRainSunset,
+    'MidRainyNoon': carla.WeatherParameters.MidRainyNoon,
+    'MidRainSunset': carla.WeatherParameters.MidRainSunset,
 
-        'WetCloudyNoon': carla.WeatherParameters.WetCloudyNoon,
-        'WetCloudySunset': carla.WeatherParameters.WetCloudySunset,
+    'WetCloudyNoon': carla.WeatherParameters.WetCloudyNoon,
+    'WetCloudySunset': carla.WeatherParameters.WetCloudySunset,
 
-        'HardRainNoon': carla.WeatherParameters.HardRainNoon,
-        'HardRainSunset': carla.WeatherParameters.HardRainSunset,
+    'HardRainNoon': carla.WeatherParameters.HardRainNoon,
+    'HardRainSunset': carla.WeatherParameters.HardRainSunset,
 
-        'SoftRainNoon': carla.WeatherParameters.SoftRainNoon,
-        'SoftRainSunset': carla.WeatherParameters.SoftRainSunset,
+    'SoftRainNoon': carla.WeatherParameters.SoftRainNoon,
+    'SoftRainSunset': carla.WeatherParameters.SoftRainSunset,
 }
 WEATHERS_IDS = list(WEATHERS)
 
@@ -83,8 +81,8 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
         self.route_id = route_id
         self.weather_id = WEATHERS_IDS[0]
 
-        today = datetime.today() # month - date - year
-        now = datetime.now() # hours - minutes - seconds
+        today = datetime.today()  # month - date - year
+        now = datetime.now()  # hours - minutes - seconds
 
         current_date = str(today.strftime("%b_%d_%Y"))
         current_time = str(now.strftime("%H_%M_%S"))
@@ -92,7 +90,8 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
         # month_date_year-hour_minute_second
         time_info = "/" + current_date + "-" + current_time + "/"
 
-        self.dataset_save_path = os.path.join(os.environ.get('BASE_CODE_PATH'), "checkpoint/dataset/" + os.environ.get('SAVE_DATASET_NAME') + time_info)
+        self.dataset_save_path = os.path.join(os.environ.get('BASE_CODE_PATH'),
+                                              "checkpoint/dataset/" + os.environ.get('SAVE_DATASET_NAME') + time_info)
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print("device: ", self.device)
@@ -100,7 +99,8 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
         self.agent = ImitationNetwork(device=self.device)
         self.agent.to(self.device)
 
-        model_path = os.path.join(os.path.join(os.environ.get('BASE_CODE_PATH'), "checkpoint/models/imitation/" + model_folder), model_name)
+        model_path = os.path.join(
+            os.path.join(os.environ.get('BASE_CODE_PATH'), "checkpoint/models/imitation/" + model_folder), model_name)
         self.agent.load_state_dict(torch.load(model_path))
 
         for param in self.agent.parameters():
@@ -122,7 +122,7 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
 
         if DAGGER:
             self.init_dataset(output_dir=self.dataset_save_path)
-        
+
         self.init_auto_pilot()
         self.init_privileged_agent()
 
@@ -130,13 +130,13 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
 
         self.count_vehicle_stop = 0
         self.count_is_seen = 0
-        
+
         self.previous_gps = 0.0
         self.speed_sequence = deque(np.zeros(120), maxlen=120)
 
         if self.debug:
             cv2.namedWindow("rgb-front")
-    
+
     def init_dataset(self, output_dir):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -175,57 +175,60 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
 
     def sensors(self):
         return [
-                {
-                    'type': 'sensor.camera.rgb',
-                    'x': 1.3, 'y': 0.0, 'z': 2.3,
-                    'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                    'width': self._sensor_data['width'], 'height': self._sensor_data['height'], 'fov': self._sensor_data['high_fov'],
-                    'id': 'rgb_front'
-                    },
-                {
-                    'type': 'sensor.camera.rgb',
-                    'x': 1.3, 'y': 0.0, 'z': 2.3,
-                    'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                    'width': self._sensor_data['width'], 'height': self._sensor_data['height'], 'fov': self._sensor_data['low_fov'],
-                    'id': 'rgb_front_60'
-                    },
-                {
-					'type': 'sensor.camera.rgb',
-					'x': -1.3, 'y': 0.0, 'z':2.3,
-					'roll': 0.0, 'pitch': 0.0, 'yaw': -180.0,
-					'width': self._sensor_data['width'], 'height': self._sensor_data['height'], 'fov': self._sensor_data['high_fov'],
-					'id': 'rgb_rear'
-					},
-                {
-                    'type': 'sensor.other.gnss',
-                    'x': 0.0, 'y': 0.0, 'z': 0.0,
-                    'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                    'sensor_tick': 0.01,
-                    'id': 'gps'
-                    },
-                {
-                    'type': 'sensor.other.imu',
-                    'x': 0.0, 'y': 0.0, 'z': 0.0,
-                    'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                    'sensor_tick': 0.05,
-                    'id': 'imu'
-                    },
-                {
-                    'type': 'sensor.speedometer',
-                    'reading_frequency': 20,
-                    'id': 'speed'
-                    }
-                ]
+            {
+                'type': 'sensor.camera.rgb',
+                'x': 1.3, 'y': 0.0, 'z': 2.3,
+                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+                'width': self._sensor_data['width'], 'height': self._sensor_data['height'],
+                'fov': self._sensor_data['high_fov'],
+                'id': 'rgb_front'
+            },
+            {
+                'type': 'sensor.camera.rgb',
+                'x': 1.3, 'y': 0.0, 'z': 2.3,
+                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+                'width': self._sensor_data['width'], 'height': self._sensor_data['height'],
+                'fov': self._sensor_data['low_fov'],
+                'id': 'rgb_front_60'
+            },
+            {
+                'type': 'sensor.camera.rgb',
+                'x': -1.3, 'y': 0.0, 'z': 2.3,
+                'roll': 0.0, 'pitch': 0.0, 'yaw': -180.0,
+                'width': self._sensor_data['width'], 'height': self._sensor_data['height'],
+                'fov': self._sensor_data['high_fov'],
+                'id': 'rgb_rear'
+            },
+            {
+                'type': 'sensor.other.gnss',
+                'x': 0.0, 'y': 0.0, 'z': 0.0,
+                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+                'sensor_tick': 0.01,
+                'id': 'gps'
+            },
+            {
+                'type': 'sensor.other.imu',
+                'x': 0.0, 'y': 0.0, 'z': 0.0,
+                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+                'sensor_tick': 0.05,
+                'id': 'imu'
+            },
+            {
+                'type': 'sensor.speedometer',
+                'reading_frequency': 20,
+                'id': 'speed'
+            }
+        ]
 
     def stop_function(self, is_stop):
         if self.stop_step < 200 and is_stop is not None:
             self.stop_step += 1
             self.not_brake_step = 0
             return True
-       
+
         else:
             if self.not_brake_step < 300:
-                self.not_brake_step += 1 
+                self.not_brake_step += 1
             else:
                 self.stop_step = 0
             return None
@@ -281,7 +284,8 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
             cv2.waitKey(1)
 
         # run brake classifier imitation learning agent
-        dnn_agent_brake = self.agent.inference(front_images=front_60_cv_image, waypoint_input=fused_inputs, speed_sequence=np.array(self.speed_sequence))
+        dnn_agent_brake = self.agent.inference(front_images=front_60_cv_image, waypoint_input=fused_inputs,
+                                               speed_sequence=np.array(self.speed_sequence))
 
         # if any of the following is not None, then the agent should brake
         is_light, is_walker, is_vehicle, is_stop = self.traffic_data()
@@ -295,19 +299,22 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
 
             save_dagger = True
             applied_brake = is_brake
-        
+
         else:
             save_dagger = False
             applied_brake = dnn_agent_brake
 
         # apply pid controllers
-        steer, throttle, brake, target_speed, angle = self.get_control(target=near_node, far_target=far_node, tick_data=data, brake=applied_brake)
+        steer, throttle, brake, target_speed, angle = self.get_control(target=near_node, far_target=far_node,
+                                                                       tick_data=data, brake=applied_brake)
 
         # compute step reward and deside for termination
-        reward, done = self.calculate_reward(throttle=throttle, ego_speed=speed, ego_gps=gps, is_light=is_light, is_vehicle=is_vehicle, is_walker=is_walker, is_stop=is_stop)
+        reward, done = self.calculate_reward(throttle=throttle, ego_speed=speed, ego_gps=gps, is_light=is_light,
+                                             is_vehicle=is_vehicle, is_walker=is_walker, is_stop=is_stop)
         label = self.define_classifier_label(reward)
 
-        print("[Action]:", throttle, steer, brake, " [Reward]:", reward, " [Done]:", done, "[Waypoint]:", near_node, "[GT Class ID]:", label)
+        print("[Action]:", throttle, steer, brake, " [Reward]:", reward, " [Done]:", done, "[Waypoint]:", near_node,
+              "[GT Class ID]:", label)
 
         self.is_collision = False
 
@@ -354,11 +361,12 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
 
             'speed_sequence': np.array(self.speed_sequence).tolist(),
             'label': label
-            }
+        }
 
         if self.step % 10 == 0 and save_dagger:
-            self.save_data(image_front=front_cv_image, image_front_60=front_60_cv_image, image_rear=rear_cv_image, data=measurement_data)
-        
+            self.save_data(image_front=front_cv_image, image_front_60=front_60_cv_image, image_rear=rear_cv_image,
+                           data=measurement_data)
+
         return applied_control
 
     def tick(self, input_data):
@@ -366,13 +374,13 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
 
         rgb_front = input_data['rgb_front'][1][:, :, :3]
         rgb_front = rgb_front[:, :, ::-1]
-        
+
         rgb_front_60 = input_data['rgb_front_60'][1][:, :, :3]
         rgb_front_60 = rgb_front_60[:, :, ::-1]
-        
+
         rgb_rear = input_data['rgb_rear'][1][:, :, :3]
         rgb_rear = rgb_rear[:, :, ::-1]
-        
+
         gps = input_data['gps'][1][:2]
         speed = input_data['speed'][1]['speed']
         compass = input_data['imu'][1][-1]
@@ -384,14 +392,14 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
             'gps': gps,
             'speed': speed,
             'compass': compass
-            }
+        }
 
     def get_position(self, tick_data):
         gps = tick_data['gps']
         gps = (gps - self._route_planner.mean) * self._route_planner.scale
 
         return gps
-    
+
     def get_control(self, target, far_target, tick_data, brake):
         pos = self.get_position(tick_data)
         theta = tick_data['compass']
@@ -409,16 +417,16 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
         angle_far_unnorm = base_utils.get_angle_to(pos, theta, far_target)
         should_slow = abs(angle_far_unnorm) > 45.0 or abs(angle_unnorm) > 5.0
         target_speed = 4.0 if should_slow else 7.0
-        
+
         if brake:
             target_speed = 0.0
-        
+
         self.should_slow = int(should_slow)
         self.should_brake = int(brake)
         self.angle = angle
         self.angle_unnorm = angle_unnorm
         self.angle_far_unnorm = angle_far_unnorm
-        
+
         delta = np.clip(target_speed - speed, 0.0, 0.25)
         throttle = self._speed_controller.step(delta)
         throttle = np.clip(throttle, 0.0, 0.75)
@@ -487,10 +495,11 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
         # give penalty if ego vehicle is not braking where it should brake
         if any(x is not None for x in [is_light, is_walker, is_vehicle]):
             self.count_is_seen += 1
-            
+
             # throttle desired after too much waiting around vehicle or walker
             if self.count_is_seen > 1200:
-                print("[Penalty]: too much stopping when there is a vehicle or walker or stop sign or traffic light around !")
+                print(
+                    "[Penalty]: too much stopping when there is a vehicle or walker or stop sign or traffic light around !")
                 reward -= 100
 
             # braking desired
@@ -506,7 +515,7 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
         else:
             reward += ego_speed
             self.count_is_seen = 0
-        
+
         # distance from starting position
         reward += np.linalg.norm(ego_gps - self.previous_gps)
 
@@ -568,7 +577,8 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
     def is_vehicle_hazard(self, vehicle_list):
         o1 = base_utils._orientation(self.hero_vehicle.get_transform().rotation.yaw)
         p1 = base_utils._numpy(self.hero_vehicle.get_location())
-        s1 = max(10, 3.0 * np.linalg.norm(base_utils._numpy(self.hero_vehicle.get_velocity()))) # increases the threshold distance
+        s1 = max(10, 3.0 * np.linalg.norm(
+            base_utils._numpy(self.hero_vehicle.get_velocity())))  # increases the threshold distance
         v1_hat = o1
         v1 = s1 * v1_hat
         for target_vehicle in vehicle_list:
@@ -604,15 +614,15 @@ class ImitationAgent(autonomous_agent.AutonomousAgent):
         cv2.imwrite(os.path.join(self.subfolder_paths[2], "%04i.png" % self.data_count), image_rear)
 
         with open(os.path.join(self.subfolder_paths[3], "%04i.json" % self.data_count), 'w+', encoding='utf-8') as f:
-            json.dump(data, f,  ensure_ascii=False, indent=4)
-        
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
         self.data_count += 1
-    
+
     def change_weather(self):
         index = random.choice(range(len(WEATHERS)))
         self.weather_id = WEATHERS_IDS[index]
         self.world.set_weather(WEATHERS[WEATHERS_IDS[index]])
-    
+
     @staticmethod
     def _on_collision(weak_self, event):
         self = weak_self()
