@@ -53,7 +53,7 @@ def validate(loader, model, criterion, device, metrics):
 
             # Прямой проход
             preds = model(depth, seg, hist, cont, sig, near, far)
-            loss = (criterion(preds['steer'], tgt_s)
+            loss = (1.5 * criterion(preds['steer'], tgt_s)
                     + 0.75 * criterion(preds['throttle'], tgt_t)
                     + 0.5 * criterion(preds['brake'], tgt_b))
             total_loss += loss.item() * depth.size(0)
@@ -101,16 +101,16 @@ if __name__ == '__main__':
     model = ImprovedCarlaAutopilotNet(
         depth_channels=1,
         seg_channels=3,
-        img_emb_dim=256,
+        img_emb_dim=512,
         rnn_input=4,
-        rnn_hidden=256,
-        cont_feat_dim=6,
-        signal_dim=2,
+        rnn_hidden=512,
+        cont_feat_dim=10,
+        signal_dim=1,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
         mlp_hidden=512
     ).to(DEVICE)
-    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model.pth', map_location=DEVICE)
+    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_4.pth', map_location=DEVICE)
     model.load_state_dict(checkpoint)
     print("Loaded model")
 
