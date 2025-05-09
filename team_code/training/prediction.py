@@ -11,8 +11,8 @@ from torch.backends import cudnn
 # Настройки
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-cudnn.benchmark = True
 cudnn.deterministic = False
+cudnn.benchmark = True
 torch.backends.cudnn.enabled = True
 torch.multiprocessing.set_start_method('spawn', force=True)
 
@@ -35,7 +35,6 @@ def build_concat_dataset(root_dir, num_near, num_far, stats=None):
                                    num_far_commands=num_far,
                                    stats=stats)
             )
-            break
     return datasets[0]  # Возьмём только первый датасет (одну поездку)
 
 # Загрузка модели
@@ -58,6 +57,186 @@ model.eval()
 dataset = build_concat_dataset(DATA_ROOT, NUM_NEAR, NUM_FAR)
 t = time.time()
 sample = dataset[0]  # Один пример
+
+# Подготовка данных
+depth = sample['depth'].unsqueeze(0).to(DEVICE)
+seg = sample['segmentation'].unsqueeze(0).to(DEVICE)
+hist = torch.stack([
+    sample['speed_sequence'],
+    sample['steer_sequence'],
+    sample['throttle_sequence'],
+    sample['brake_sequence']
+], dim=-1).unsqueeze(0).to(DEVICE)
+cont = sample['cont_feats'].unsqueeze(0).to(DEVICE)
+sig = sample['signal_vec'].unsqueeze(0).to(DEVICE)
+near = sample['near_cmd_oh'].unsqueeze(0).to(DEVICE)
+far = sample['far_cmd_oh'].unsqueeze(0).to(DEVICE)
+
+# Предсказание
+with torch.no_grad():
+    output = model(depth, seg, hist, cont, sig, near, far)
+    steer = output['steer'].item()
+    throttle = output['throttle'].item()
+    brake = output['brake'].item()
+
+print(time.time()-t)
+
+# Вывод управления
+print(f"Predicted steer: {steer:.4f}")
+print(f"Predicted throttle: {throttle:.4f}")
+print(f"Predicted brake: {brake:.4f}")
+
+print(f"Actual steer: {sample['steer']:.4f}")
+print(f"Actual throttle: {sample['throttle']:.4f}")
+print(f"Actual brake: {sample['brake']:.4f}")
+
+
+t = time.time()
+sample = dataset[1]  # Один пример
+
+# Подготовка данных
+depth = sample['depth'].unsqueeze(0).to(DEVICE)
+seg = sample['segmentation'].unsqueeze(0).to(DEVICE)
+hist = torch.stack([
+    sample['speed_sequence'],
+    sample['steer_sequence'],
+    sample['throttle_sequence'],
+    sample['brake_sequence']
+], dim=-1).unsqueeze(0).to(DEVICE)
+cont = sample['cont_feats'].unsqueeze(0).to(DEVICE)
+sig = sample['signal_vec'].unsqueeze(0).to(DEVICE)
+near = sample['near_cmd_oh'].unsqueeze(0).to(DEVICE)
+far = sample['far_cmd_oh'].unsqueeze(0).to(DEVICE)
+
+# Предсказание
+with torch.no_grad():
+    output = model(depth, seg, hist, cont, sig, near, far)
+    steer = output['steer'].item()
+    throttle = output['throttle'].item()
+    brake = output['brake'].item()
+
+print(time.time()-t)
+
+# Вывод управления
+print(f"Predicted steer: {steer:.4f}")
+print(f"Predicted throttle: {throttle:.4f}")
+print(f"Predicted brake: {brake:.4f}")
+
+print(f"Actual steer: {sample['steer']:.4f}")
+print(f"Actual throttle: {sample['throttle']:.4f}")
+print(f"Actual brake: {sample['brake']:.4f}")
+
+
+t = time.time()
+sample = dataset[2]  # Один пример
+
+# Подготовка данных
+depth = sample['depth'].unsqueeze(0).to(DEVICE)
+seg = sample['segmentation'].unsqueeze(0).to(DEVICE)
+hist = torch.stack([
+    sample['speed_sequence'],
+    sample['steer_sequence'],
+    sample['throttle_sequence'],
+    sample['brake_sequence']
+], dim=-1).unsqueeze(0).to(DEVICE)
+cont = sample['cont_feats'].unsqueeze(0).to(DEVICE)
+sig = sample['signal_vec'].unsqueeze(0).to(DEVICE)
+near = sample['near_cmd_oh'].unsqueeze(0).to(DEVICE)
+far = sample['far_cmd_oh'].unsqueeze(0).to(DEVICE)
+
+# Предсказание
+with torch.no_grad():
+    output = model(depth, seg, hist, cont, sig, near, far)
+    steer = output['steer'].item()
+    throttle = output['throttle'].item()
+    brake = output['brake'].item()
+
+print(time.time()-t)
+
+# Вывод управления
+print(f"Predicted steer: {steer:.4f}")
+print(f"Predicted throttle: {throttle:.4f}")
+print(f"Predicted brake: {brake:.4f}")
+
+print(f"Actual steer: {sample['steer']:.4f}")
+print(f"Actual throttle: {sample['throttle']:.4f}")
+print(f"Actual brake: {sample['brake']:.4f}")
+
+
+t = time.time()
+sample = dataset[4]  # Один пример
+
+# Подготовка данных
+depth = sample['depth'].unsqueeze(0).to(DEVICE)
+seg = sample['segmentation'].unsqueeze(0).to(DEVICE)
+hist = torch.stack([
+    sample['speed_sequence'],
+    sample['steer_sequence'],
+    sample['throttle_sequence'],
+    sample['brake_sequence']
+], dim=-1).unsqueeze(0).to(DEVICE)
+cont = sample['cont_feats'].unsqueeze(0).to(DEVICE)
+sig = sample['signal_vec'].unsqueeze(0).to(DEVICE)
+near = sample['near_cmd_oh'].unsqueeze(0).to(DEVICE)
+far = sample['far_cmd_oh'].unsqueeze(0).to(DEVICE)
+
+# Предсказание
+with torch.no_grad():
+    output = model(depth, seg, hist, cont, sig, near, far)
+    steer = output['steer'].item()
+    throttle = output['throttle'].item()
+    brake = output['brake'].item()
+
+print(time.time()-t)
+
+# Вывод управления
+print(f"Predicted steer: {steer:.4f}")
+print(f"Predicted throttle: {throttle:.4f}")
+print(f"Predicted brake: {brake:.4f}")
+
+print(f"Actual steer: {sample['steer']:.4f}")
+print(f"Actual throttle: {sample['throttle']:.4f}")
+print(f"Actual brake: {sample['brake']:.4f}")
+
+
+t = time.time()
+sample = dataset[55]  # Один пример
+
+# Подготовка данных
+depth = sample['depth'].unsqueeze(0).to(DEVICE)
+seg = sample['segmentation'].unsqueeze(0).to(DEVICE)
+hist = torch.stack([
+    sample['speed_sequence'],
+    sample['steer_sequence'],
+    sample['throttle_sequence'],
+    sample['brake_sequence']
+], dim=-1).unsqueeze(0).to(DEVICE)
+cont = sample['cont_feats'].unsqueeze(0).to(DEVICE)
+sig = sample['signal_vec'].unsqueeze(0).to(DEVICE)
+near = sample['near_cmd_oh'].unsqueeze(0).to(DEVICE)
+far = sample['far_cmd_oh'].unsqueeze(0).to(DEVICE)
+
+# Предсказание
+with torch.no_grad():
+    output = model(depth, seg, hist, cont, sig, near, far)
+    steer = output['steer'].item()
+    throttle = output['throttle'].item()
+    brake = output['brake'].item()
+
+print(time.time()-t)
+
+# Вывод управления
+print(f"Predicted steer: {steer:.4f}")
+print(f"Predicted throttle: {throttle:.4f}")
+print(f"Predicted brake: {brake:.4f}")
+
+print(f"Actual steer: {sample['steer']:.4f}")
+print(f"Actual throttle: {sample['throttle']:.4f}")
+print(f"Actual brake: {sample['brake']:.4f}")
+
+
+t = time.time()
+sample = dataset[56]  # Один пример
 
 # Подготовка данных
 depth = sample['depth'].unsqueeze(0).to(DEVICE)
