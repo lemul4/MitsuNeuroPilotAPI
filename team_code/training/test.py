@@ -11,6 +11,13 @@ from torchmetrics import MeanAbsoluteError, MeanSquaredError, R2Score
 from data import CarlaDatasetLoader
 from networks.carla_autopilot_net import ImprovedCarlaAutopilotNet
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+cudnn.deterministic = False
+cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
+torch.multiprocessing.set_start_method('spawn', force=True)
+
 def build_concat_dataset(root_dir, num_near, num_far, stats=None):
     run_dirs = sorted(glob.glob(os.path.join(root_dir, 'town*', '*')))
     datasets = []
@@ -68,6 +75,22 @@ def validate(loader, model, criterion, device, metrics):
                 metrics[f'{prefix}_mse'].update(pred, target)
                 metrics[f'{prefix}_r2'].update(pred, target)
 
+            # Дополнительные метрики для steer по диапазонам
+            abs_steer = torch.abs(tgt_s)
+            mask_straight = abs_steer < 0.05
+            mask_light = (abs_steer >= 0.05) & (abs_steer < 0.15)
+            mask_sharp = abs_steer >= 0.15
+
+            for mask, prefix in [
+                (mask_straight, 'steer_straight'),
+                (mask_light, 'steer_light_turn'),
+                (mask_sharp, 'steer_sharp_turn')
+            ]:
+                if mask.any():
+                    metrics[f'{prefix}_mae'].update(preds['steer'][mask], tgt_s[mask])
+                    metrics[f'{prefix}_mse'].update(preds['steer'][mask], tgt_s[mask])
+                    metrics[f'{prefix}_r2'].update(preds['steer'][mask], tgt_s[mask])
+
     avg_loss = total_loss / len(loader.dataset)
     results = {name: m.compute().item() for name, m in metrics.items()}
     return avg_loss, results
@@ -110,21 +133,32 @@ if __name__ == '__main__':
         far_cmd_dim=NUM_FAR,
         mlp_hidden=512
     ).to(DEVICE)
-    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_high_d.pth', map_location=DEVICE)
+    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_low_d.pth', map_location=DEVICE)
     model.load_state_dict(checkpoint)
     print("Loaded model")
 
     # Определяем метрики
     metrics = {
         'steer_mae': MeanAbsoluteError().to(DEVICE),
-        'throttle_mae': MeanAbsoluteError().to(DEVICE),
-        'brake_mae': MeanAbsoluteError().to(DEVICE),
-        'steer_mse': MeanSquaredError().to(DEVICE),
-        'throttle_mse': MeanSquaredError().to(DEVICE),
-        'brake_mse': MeanSquaredError().to(DEVICE),
-        'steer_r2': R2Score().to(DEVICE),
-        'throttle_r2': R2Score().to(DEVICE),
-        'brake_r2': R2Score().to(DEVICE)
+            'throttle_mae': MeanAbsoluteError().to(DEVICE),
+            'brake_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_mse': MeanSquaredError().to(DEVICE),
+            'throttle_mse': MeanSquaredError().to(DEVICE),
+            'brake_mse': MeanSquaredError().to(DEVICE),
+            'steer_r2': R2Score().to(DEVICE),
+            'throttle_r2': R2Score().to(DEVICE),
+            'brake_r2': R2Score().to(DEVICE),
+
+            # Новые метрики для разных диапазонов steer
+            'steer_straight_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_light_turn_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_sharp_turn_mae': MeanAbsoluteError().to(DEVICE),
+            'steer_straight_mse': MeanSquaredError().to(DEVICE),
+            'steer_light_turn_mse': MeanSquaredError().to(DEVICE),
+            'steer_sharp_turn_mse': MeanSquaredError().to(DEVICE),
+            'steer_straight_r2': R2Score().to(DEVICE),
+            'steer_light_turn_r2': R2Score().to(DEVICE),
+            'steer_sharp_turn_r2': R2Score().to(DEVICE),
     }
 
     # Критерий потерь
