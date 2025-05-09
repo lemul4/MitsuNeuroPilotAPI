@@ -56,7 +56,7 @@ class EfficientNetEncoder(nn.Module):
             nn.Linear(total_channels, out_dim),
             nn.BatchNorm1d(out_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2)
+            nn.Dropout(0.1)
         )
 
     def forward(self, x):
@@ -76,7 +76,7 @@ class EfficientNetEncoder(nn.Module):
         return self.proj(combined)
 
 class HistoryAttentionRNN(nn.Module):
-    def __init__(self, input_size, hidden_size=256, num_layers=2, dropout=0.2):
+    def __init__(self, input_size, hidden_size=256, num_layers=2, dropout=0.1):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -109,7 +109,7 @@ class CrossModalFusion(nn.Module):
         return gated * x1 + (1 - gated) * x2
 
 class ResidualMLPBlock(nn.Module):
-    def __init__(self, dim, dropout=0.3):
+    def __init__(self, dim, dropout=0.15):
         super().__init__()
         self.block = nn.Sequential(
             nn.Linear(dim, dim),
@@ -132,7 +132,7 @@ class ImprovedCarlaAutopilotNet(nn.Module):
         img_emb_dim=256,
         rnn_input=4,
         rnn_hidden=256,
-        cont_feat_dim=10,
+        cont_feat_dim=14,
         signal_dim=1,
         near_cmd_dim=7,
         far_cmd_dim=7,
@@ -147,7 +147,7 @@ class ImprovedCarlaAutopilotNet(nn.Module):
             input_size=rnn_input,
             hidden_size=rnn_hidden,
             num_layers=2,
-            dropout=0.25
+            dropout=0.1
         )
 
         self.feature_gate = nn.Sequential(
@@ -165,7 +165,7 @@ class ImprovedCarlaAutopilotNet(nn.Module):
             nn.Linear(mlp_in, mlp_hidden),
             nn.BatchNorm1d(mlp_hidden),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.15),
             ResidualMLPBlock(mlp_hidden),
             ResidualMLPBlock(mlp_hidden)
         )

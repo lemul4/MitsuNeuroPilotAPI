@@ -153,6 +153,7 @@ class AutopilotAgent(AutonomousAgent):
         """
         bp_lib = self.world.get_blueprint_library()
         bp_collision = bp_lib.find('sensor.other.collision')
+        self.is_collision = False
         self.collision_sensor = self.world.spawn_actor(bp_collision, carla.Transform(), attach_to=self.hero_vehicle)
         self.collision_sensor.listen(lambda event: AutopilotAgent._on_collision(weakref.ref(self), event))
         print("AutopilotAgent: Collision sensor initialized.")
