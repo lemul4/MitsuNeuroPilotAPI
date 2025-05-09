@@ -93,14 +93,14 @@ class CarlaDatasetLoader(Dataset):
             data = json.load(f)
 
         # Raw continuous
-        x, y, z = data['x'], data['y'], data['z']
+        x, y= data['x'], data['y']
 
         theta = data['theta']
         speed = data['speed']
 
         near_node_x = data['near_node_x']
         near_node_y = data['near_node_y']
-        near_comand = data['near_command']
+        near_command = data['near_command']
 
         far_node_x = data['far_node_x']
         far_node_y = data['far_node_y']
@@ -108,6 +108,21 @@ class CarlaDatasetLoader(Dataset):
 
         angle_near = data['angle_near']
         angle_far = data['angle_far']
+
+        x = self._normalize('x', x)
+        y = self._normalize('y', y)
+
+        theta = self._normalize('theta', theta)
+        speed = self._normalize('speed', speed)
+
+        near_node_x = self._normalize('near_node_x', near_node_x)
+        near_node_y = self._normalize('near_node_y', near_node_y)
+
+        far_node_x = self._normalize('far_node_x', far_node_x)
+        far_node_y = self._normalize('far_node_y', far_node_y)
+
+        angle_near = self._normalize('angle_near', angle_near)
+        angle_far = self._normalize('angle_far', angle_far)
 
         sp_seq = np.array(data['speed_sequence'], dtype=np.float32)
         steer_seq = np.array(data['steer_sequence'], dtype=np.float32)
@@ -126,16 +141,16 @@ class CarlaDatasetLoader(Dataset):
         accel_br = br_seq[-1] - br_seq[-2] if len(br_seq) >= 2 else 0.0
 
 
-        # One-hot signals: red light / stop sign
+        # One-hot signals: red light
         red = int(data['is_red_light_present'])
-        signal_vec = torch.tensor(red, dtype=torch.float32)
+        signal_vec = torch.tensor([red], dtype=torch.float32)
 
         # One-hot commands
-        near_oh = F.one_hot(torch.tensor(near_comand), num_classes=self.num_near).float()
+        near_oh = F.one_hot(torch.tensor(near_command), num_classes=self.num_near).float()
         far_oh  = F.one_hot(torch.tensor(far_command),  num_classes=self.num_far).float()
 
         # Convert to tensor
-        cont_feats = torch.tensor([x, y, z, theta, speed,
+        cont_feats = torch.tensor([x, y, theta, speed,
                                    accel_sp, accel_steer, accel_thr, accel_br,
                                    near_node_x, near_node_y,
                                    far_node_x, far_node_y,

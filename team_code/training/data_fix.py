@@ -24,7 +24,7 @@ def remove_collision_files(data_root):
                     with open(json_file, 'r') as f:
                         data = json.load(f)
 
-                    if data.get('is_collision', False):
+                    if data.get('is_collision_event', False):
                         base_name = os.path.splitext(os.path.basename(json_file))[0]
 
                         # Файлы к удалению
@@ -46,7 +46,7 @@ def remove_collision_files(data_root):
 
 
 # Путь к данным
-DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/imitation/val'
+DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/autopilot_behavior_data/train'
 
 # Запуск
 remove_collision_files(DATA_ROOT)

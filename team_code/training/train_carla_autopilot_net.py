@@ -43,7 +43,7 @@ if __name__ == '__main__':
 
 
     # 2. Гиперпараметры и пути
-    DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/imitation'
+    DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/autopilot_behavior_data'
     TRAIN_ROOT = os.path.join(DATA_ROOT, 'train')
     VAL_ROOT = os.path.join(DATA_ROOT, 'val')
     BATCH_SIZE = 16
@@ -64,7 +64,7 @@ if __name__ == '__main__':
     dval = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        shuffle=False,
         num_workers=4,
         pin_memory=True
     )
@@ -76,7 +76,7 @@ if __name__ == '__main__':
         img_emb_dim=512,
         rnn_input=4,
         rnn_hidden=512,
-        cont_feat_dim=10,
+        cont_feat_dim=14,
         signal_dim=1,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
@@ -154,7 +154,7 @@ if __name__ == '__main__':
                 loss_s = criterion(preds['steer'], tgt_s)
                 loss_t = criterion(preds['throttle'], tgt_t)
                 loss_b = criterion(preds['brake'], tgt_b)
-                loss = 1.5 * loss_s + 0.8 * loss_t + 0.5 * loss_b
+                loss = 1.5 * loss_s + 0.8 * loss_t + 0.4 * loss_b
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -226,7 +226,7 @@ if __name__ == '__main__':
                 preds = model(depth, seg, hist, cont, sig, near, far)
                 loss = (1.5 * criterion(preds['steer'], tgt_s)
                         + 0.8 * criterion(preds['throttle'], tgt_t)
-                        + 0.5 * criterion(preds['brake'], tgt_b))
+                        + 0.4 * criterion(preds['brake'], tgt_b))
                 val_loss += loss.item() * depth.size(0)
 
                 # Базовые метрики

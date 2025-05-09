@@ -81,7 +81,7 @@ if __name__ == '__main__':
     cudnn.deterministic = False
 
     # Параметры
-    DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/imitation'
+    DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/autopilot_behavior_data'
     VAL_ROOT = os.path.join(DATA_ROOT, 'val')
     BATCH_SIZE = 16
     NUM_NEAR = 7
@@ -104,13 +104,13 @@ if __name__ == '__main__':
         img_emb_dim=512,
         rnn_input=4,
         rnn_hidden=512,
-        cont_feat_dim=10,
+        cont_feat_dim=14,
         signal_dim=1,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
         mlp_hidden=512
     ).to(DEVICE)
-    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_4.pth', map_location=DEVICE)
+    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_high_d.pth', map_location=DEVICE)
     model.load_state_dict(checkpoint)
     print("Loaded model")
 
