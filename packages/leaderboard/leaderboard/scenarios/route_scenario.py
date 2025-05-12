@@ -18,9 +18,9 @@ import importlib
 import inspect
 import py_trees
 import traceback
-import numpy as np
 
 import carla
+from leaderboard.envs import vehicle_config
 from agents.navigation.local_planner import RoadOption
 
 from srunner.scenarioconfigs.scenario_configuration import ActorConfigurationData
@@ -142,22 +142,24 @@ class RouteScenario(BasicScenario):
         return new_scenarios_config
 
     def _spawn_ego_vehicle(self):
-        """Spawn the ego vehicle at the first waypoint of the route"""
-        elevate_transform = self.route[0][0]
-        elevate_transform.location.z += 0.5
-
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2020',
-                                                          elevate_transform,
-                                                          rolename='hero')
+        transform = self.route[0][0]
+        transform.location.z += 0.5
+        ego_vehicle = CarlaDataProvider.request_new_actor(
+            'vehicle.lincoln.mkz_2020', transform, rolename='hero'
+        )
         if not ego_vehicle:
             return
 
+        physics_control = vehicle_config.get_i_miev_physics_control()
+        ego_vehicle.apply_physics_control(physics_control)
+
+        # камеру наверх
         spectator = self.world.get_spectator()
-        spectator.set_transform(carla.Transform(elevate_transform.location + carla.Location(z=50),
-                                                    carla.Rotation(pitch=-90)))
+        spectator.set_transform(
+            carla.Transform(transform.location + carla.Location(z=50), carla.Rotation(pitch=-90))
+        )
 
         self.world.tick()
-
         return ego_vehicle
 
     def _get_parking_slots(self, max_distance=100, route_step=10):
