@@ -35,6 +35,7 @@ QUALIFIER_SENSORS_LIMITS = {
     'sensor.camera.depth': 4,
     'sensor.camera.instance_segmentation': 4,
     'sensor.camera.semantic_segmentation': 4,
+    "sensor.other.obstacle": 4
 
 }
 SENSORS_LIMITS = {
@@ -49,6 +50,7 @@ SENSORS_LIMITS = {
     'sensor.camera.depth': 4,
     'sensor.camera.instance_segmentation': 4,
     'sensor.camera.semantic_segmentation': 4,
+    "sensor.other.obstacle": 4
 }
 ALLOWED_SENSORS = SENSORS_LIMITS.keys()
 
@@ -200,6 +202,12 @@ class AgentWrapper(object):
             sensor_location = carla.Location(x=sensor_spec['x'], y=sensor_spec['y'], z=sensor_spec['z'])
             sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'], roll=sensor_spec['roll'],
                                              yaw=sensor_spec['yaw'])
+
+        elif type_ == 'sensor.other.obstacle':
+            sensor_location = carla.Location(x=sensor_spec['x'], y=sensor_spec['y'], z=sensor_spec['z'])
+            sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'], roll=sensor_spec['roll'],
+                                             yaw=sensor_spec['yaw'])
+
 
         elif type_ == 'sensor.lidar.ray_cast':
             attributes['range'] = str(85)

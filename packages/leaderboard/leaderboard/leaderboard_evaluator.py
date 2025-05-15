@@ -46,6 +46,8 @@ sensors_to_icons = {
     'sensor.camera.depth':      'carla_depth',
     'sensor.camera.instance_segmentation': 'carla_instance_segmentation',
     'sensor.camera.semantic_segmentation': 'carla_semantic_segmentation',
+    'sensor.other.obstacle': 'carla_obstacle',
+
 
 }
 
