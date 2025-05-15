@@ -1,631 +1,550 @@
-import json
-import os
-import random
-import weakref
-from collections import deque
-from datetime import datetime
+#!/usr/bin/env python
 
+from __future__ import print_function
+
+import math
 import carla
-import cv2
-import numpy as np
 import torch
 
-from agent_utils import base_utils
-from agent_utils.pid_controller import PIDController
-from agent_utils.planner import RoutePlanner
-from leaderboard.autoagents import autonomous_agent
-from networks.imitation_network import ImitationNetwork
+from agents.navigation.behavior_agent import BehaviorAgent
+from networks.carla_autopilot_net import ImprovedCarlaAutopilotNet
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
+from agent_utils import base_utils
+from torch.backends import cudnn
+import os
+import weakref
+import numpy as np
+import cv2
+import json
+import threading
+import queue
+from collections import deque
+from datetime import datetime, time
 
-# if True: IL vs Autopilot will be checked and Autopilot data is applied when brake commands are not the same
-# if False: IL agent will always be applied without saving data
-DAGGER = False
+from training.data_directly import DirectlyCarlaDatasetLoader
 
-# if True: front camera will be displayed
 DEBUG = False
-
-# if False: only clear weather will be active
-IS_WEATHER_CHANGE = True
-
-# trained IL model path (should be inside "checkpoint/models/imitation/" folder)
-model_folder = "Feb_04_2022-19_14_19"
-model_name = "epoch_30.pth"
-
 SENSOR_CONFIG = {
-    'width': 400,
-    'height': 300,
-    'high_fov': 100,
-    'low_fov': 60
+    'width': 592,
+    'height': 333,
+    'fov': 135
 }
-
-WEATHERS = {
-    'ClearNoon': carla.WeatherParameters.ClearNoon,
-    'ClearSunset': carla.WeatherParameters.ClearSunset,
-
-    'CloudyNoon': carla.WeatherParameters.CloudyNoon,
-    'CloudySunset': carla.WeatherParameters.CloudySunset,
-
-    'WetNoon': carla.WeatherParameters.WetNoon,
-    'WetSunset': carla.WeatherParameters.WetSunset,
-
-    'MidRainyNoon': carla.WeatherParameters.MidRainyNoon,
-    'MidRainSunset': carla.WeatherParameters.MidRainSunset,
-
-    'WetCloudyNoon': carla.WeatherParameters.WetCloudyNoon,
-    'WetCloudySunset': carla.WeatherParameters.WetCloudySunset,
-
-    'HardRainNoon': carla.WeatherParameters.HardRainNoon,
-    'HardRainSunset': carla.WeatherParameters.HardRainSunset,
-
-    'SoftRainNoon': carla.WeatherParameters.SoftRainNoon,
-    'SoftRainSunset': carla.WeatherParameters.SoftRainSunset,
-}
-WEATHERS_IDS = list(WEATHERS)
-
 
 def get_entry_point():
-    return 'ImitationAgent'
+    return 'AutopilotAgent'
 
+class AutopilotAgent(AutonomousAgent):
+    """
+    Autopilot agent that controls the ego vehicle using BehaviorAgent.
+    """
+    _agent = None
+    _route_assigned = False
+    _initialized_behavior_agent = False
 
-class ImitationAgent(autonomous_agent.AutonomousAgent):
-    def setup(self, path_to_conf_file, route_id):
-        self.track = autonomous_agent.Track.SENSORS
-        self._sensor_data = SENSOR_CONFIG
-        self.config_path = path_to_conf_file
-        self.debug = DEBUG
+    def __init__(self, carla_host, carla_port, debug=False):
+        super().__init__(carla_host, carla_port, debug)
+        self.angle_to_far_waypoint_deg = 0
+        self.angle_to_near_waypoint_deg = 0
+        self.debug = debug or DEBUG
+
         self.step = -1
-        self.stop_step = 0
-        self.not_brake_step = 0
         self.data_count = 0
-        self.initialized = False
-        self.route_id = route_id
-        self.weather_id = WEATHERS_IDS[0]
+        self.initialized_data_saving = False
+        self.dataset_save_path = ""
+        self._save_queue = queue.Queue()
+        self._worker_thread = None
+        self.is_collision = False
+        self.subfolder_paths = []
 
-        today = datetime.today()  # month - date - year
-        now = datetime.now()  # hours - minutes - seconds
 
-        current_date = str(today.strftime("%b_%d_%Y"))
-        current_time = str(now.strftime("%H_%M_%S"))
 
-        # month_date_year-hour_minute_second
-        time_info = "/" + current_date + "-" + current_time + "/"
+        self.last_brake = 0.0
+        self.last_throttle = 0.0
+        self.last_steer = 0.0
+        self.last_speed = 0.0
+        self.speed_sequence = deque(np.zeros(20), maxlen=20)
+        self.brake_sequence = deque(np.zeros(20), maxlen=20)
+        self.throttle_sequence = deque(np.zeros(20), maxlen=20)
+        self.steer_sequence = deque(np.zeros(20), maxlen=20)
+        self.angle_far_unnorm = 0.0
+        self.is_red_light_present_log = 0
+        self.is_stops_present_log = 0
+        self.hero_vehicle = None
 
-        self.dataset_save_path = os.path.join(os.environ.get('BASE_CODE_PATH'),
-                                              "checkpoint/dataset/" + os.environ.get('SAVE_DATASET_NAME') + time_info)
+        self.behavior_name = "cautious"
+        self.opt_dict = {}
 
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print("device: ", self.device)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        cudnn.deterministic = False
+        cudnn.benchmark = True
+        torch.backends.cudnn.enabled = True
+        torch.multiprocessing.set_start_method('spawn', force=True)
+        self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self.agent = ImitationNetwork(device=self.device)
-        self.agent.to(self.device)
+        self.model = ImprovedCarlaAutopilotNet(
+            depth_channels=1,
+            seg_channels=3,
+            img_emb_dim=1024,
+            rnn_input=4,
+            rnn_hidden=512,
+            cont_feat_dim=10,
+            signal_dim=1,
+            near_cmd_dim=7,
+            far_cmd_dim=7,
+            mlp_hidden=1024
+        ).to(self.DEVICE)
+        self.model = torch.jit.load("C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_traced_last_layer.pt", map_location=self.DEVICE)
+        # self.model.load_state_dict(torch.load("C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_last_layer.pth", map_location=self.DEVICE))
+        self.model.eval()
 
-        model_path = os.path.join(
-            os.path.join(os.environ.get('BASE_CODE_PATH'), "checkpoint/models/imitation/" + model_folder), model_name)
-        self.agent.load_state_dict(torch.load(model_path))
 
-        for param in self.agent.parameters():
-            param.requires_grad = False
-        self.agent.eval()
+    def setup(self, path_to_conf_file):
+        """
+        Setup the agent parameters.
+        """
+        self.track = Track.SENSORS
+        self._sensor_data_config = SENSOR_CONFIG
+        self.config_path = path_to_conf_file
 
-    def set_global_plan(self, global_plan_gps, global_plan_world_coord):
-        super().set_global_plan(global_plan_gps, global_plan_world_coord)
+        if not self.initialized_data_saving:
+            today = datetime.today()
+            now = datetime.now()
+            current_date = today.strftime("%b_%d_%Y")
+            current_time = now.strftime("%H_%M_%S")
+            time_info = f"/{current_date}-{current_time}/"
+            self.dataset_save_path = os.path.join("dataset/autopilot_behavior_data" + time_info)
 
-        self._plan_HACK = global_plan_world_coord
-        self._plan_gps_HACK = global_plan_gps
+            self._worker_thread = threading.Thread(target=self._save_worker, daemon=True)
+            self._worker_thread.start()
+            self.init_dataset_folders(self.dataset_save_path)
+            self.initialized_data_saving = True
 
-    def _init(self):
-        self._route_planner = RoutePlanner(4.0, 50.0)
-        self._command_planner = RoutePlanner(7.5, 25.0, 257)
+    def _init_behavior_agent_if_needed(self):
+        if not self._initialized_behavior_agent:
+            self.hero_vehicle = None
+            for actor in CarlaDataProvider.get_world().get_actors():
+                if actor.attributes.get('role_name', '') == 'hero':
+                    self.hero_vehicle = actor
+                    break
 
-        self._route_planner.set_route(self._plan_gps_HACK, True)
-        self._command_planner.set_route(self._global_plan, True)
+            if not self.hero_vehicle:
+                print("AutopilotAgent: Hero vehicle not found. Cannot initialize BehaviorAgent.")
+                return False
 
-        if DAGGER:
-            self.init_dataset(output_dir=self.dataset_save_path)
+            self._agent = BehaviorAgent(self.hero_vehicle, behavior=self.behavior_name, opt_dict=self.opt_dict)
+            print(f"AutopilotAgent: BehaviorAgent initialized with behavior: {self.behavior_name}")
 
-        self.init_auto_pilot()
-        self.init_privileged_agent()
+            route = []
+            if self._global_plan_world_coord:
+                map_api = CarlaDataProvider.get_map()
+                for transform, road_option in self._global_plan_world_coord:
+                    wp = map_api.get_waypoint(transform.location)
+                    route.append((wp, road_option))
+                self._agent.set_global_plan(route)
+                print("AutopilotAgent: Global plan set for BehaviorAgent.")
+            else:
+                print("AutopilotAgent: Warning - Global plan not available when initializing BehaviorAgent.")
 
-        self.initialized = True
+            self._initialized_behavior_agent = True
+            return True
+        return True
 
-        self.count_vehicle_stop = 0
-        self.count_is_seen = 0
+    def _init_data_saving_components(self):
+        """Initializes components needed for data saving that depend on the world/vehicle being ready."""
+        if not self.hero_vehicle:
+            self.hero_vehicle = CarlaDataProvider.get_hero_actor()
+            if not self.hero_vehicle:
+                print("AutopilotAgent: Hero vehicle not found. Cannot initialize privileged sensors.")
+                return
 
-        self.previous_gps = 0.0
-        self.speed_sequence = deque(np.zeros(120), maxlen=120)
+        self.world = self.hero_vehicle.get_world()
+        self.init_privileged_sensors()
 
         if self.debug:
-            cv2.namedWindow("rgb-front")
+            pass
 
-    def init_dataset(self, output_dir):
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
+    def init_dataset_folders(self, output_dir):
+        """
+        Initialize dataset folders for saving data.
+        """
+        os.makedirs(output_dir, exist_ok=True)
         self.subfolder_paths = []
-        subfolders = ["rgb_front", "rgb_front_60", "rgb_rear", "measurements"]
+        subfolders = [
+            "depth_front", "instance_segmentation_front", "measurements"
+        ]
+        for sub in subfolders:
+            path = os.path.join(output_dir, sub)
+            os.makedirs(path, exist_ok=True)
+            self.subfolder_paths.append(path)
+        print(f"AutopilotAgent: Dataset folders initialized at {output_dir}")
 
-        for subfolder in subfolders:
-            self.subfolder_paths.append(os.path.join(output_dir, subfolder))
-            if not os.path.exists(self.subfolder_paths[-1]):
-                os.makedirs(self.subfolder_paths[-1])
-
-    def init_auto_pilot(self):
-        self._turn_controller = PIDController(K_P=1.25, K_I=0.75, K_D=0.3, n=40)
-        self._speed_controller = PIDController(K_P=5.0, K_I=0.5, K_D=1.0, n=40)
-
-    def init_privileged_agent(self):
-        self.hero_vehicle = CarlaDataProvider.get_hero_actor()
-        self.world = self.hero_vehicle.get_world()
-
-        self.privileged_sensors()
-
-    def privileged_sensors(self):
-        blueprint = self.world.get_blueprint_library()
-
-        # get blueprint of the sensor
-        bp_collision = blueprint.find('sensor.other.collision')
-
+    def init_privileged_sensors(self):
+        """
+        Initialize privileged sensors for data collection.
+        """
+        bp_lib = self.world.get_blueprint_library()
+        bp_collision = bp_lib.find('sensor.other.collision')
         self.is_collision = False
-
-        # attach collision sensor to the ego vehicle
         self.collision_sensor = self.world.spawn_actor(bp_collision, carla.Transform(), attach_to=self.hero_vehicle)
-
-        # create sensor event callbacks
-        self.collision_sensor.listen(lambda event: ImitationAgent._on_collision(weakref.ref(self), event))
+        self.collision_sensor.listen(lambda event: AutopilotAgent._on_collision(weakref.ref(self), event))
+        print("AutopilotAgent: Collision sensor initialized.")
 
     def sensors(self):
-        return [
-            {
-                'type': 'sensor.camera.rgb',
-                'x': 1.3, 'y': 0.0, 'z': 2.3,
-                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                'width': self._sensor_data['width'], 'height': self._sensor_data['height'],
-                'fov': self._sensor_data['high_fov'],
-                'id': 'rgb_front'
-            },
-            {
-                'type': 'sensor.camera.rgb',
-                'x': 1.3, 'y': 0.0, 'z': 2.3,
-                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                'width': self._sensor_data['width'], 'height': self._sensor_data['height'],
-                'fov': self._sensor_data['low_fov'],
-                'id': 'rgb_front_60'
-            },
-            {
-                'type': 'sensor.camera.rgb',
-                'x': -1.3, 'y': 0.0, 'z': 2.3,
-                'roll': 0.0, 'pitch': 0.0, 'yaw': -180.0,
-                'width': self._sensor_data['width'], 'height': self._sensor_data['height'],
-                'fov': self._sensor_data['high_fov'],
-                'id': 'rgb_rear'
-            },
-            {
-                'type': 'sensor.other.gnss',
-                'x': 0.0, 'y': 0.0, 'z': 0.0,
-                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                'sensor_tick': 0.01,
-                'id': 'gps'
-            },
-            {
-                'type': 'sensor.other.imu',
-                'x': 0.0, 'y': 0.0, 'z': 0.0,
-                'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                'sensor_tick': 0.05,
-                'id': 'imu'
-            },
-            {
-                'type': 'sensor.speedometer',
-                'reading_frequency': 20,
-                'id': 'speed'
-            }
+        """
+        Define the sensor suite required by the agent.
+        """
+        sens = [
+            {'type': 'sensor.camera.depth', 'x':1.3,'y':0.0,'z':2.3,
+             'roll':0.0,'pitch':0.0,'yaw':0.0,
+             'width':self._sensor_data_config['width'],'height':self._sensor_data_config['height'],'fov':self._sensor_data_config['fov'],
+             'sensor_tick': 0.1,
+             'id':'depth_front'},
+            {'type': 'sensor.camera.instance_segmentation', 'x':1.3,'y':0.0,'z':2.3,
+             'roll':0.0,'pitch':0.0,'yaw':0.0,
+             'width':self._sensor_data_config['width'],'height':self._sensor_data_config['height'],'fov':self._sensor_data_config['fov'],
+             'sensor_tick': 0.1,
+             'id':'instance_segmentation_front'},
+            {'type':'sensor.other.imu','x':0.0,'y':0.0,'z':0.0,'roll':0.0,'pitch':0.0,'yaw':0.0,
+             'sensor_tick':0.1,'id':'imu'},
+            {'type':'sensor.speedometer','reading_frequency': 20,'id':'speed'}
         ]
-
-    def stop_function(self, is_stop):
-        if self.stop_step < 200 and is_stop is not None:
-            self.stop_step += 1
-            self.not_brake_step = 0
-            return True
-
-        else:
-            if self.not_brake_step < 300:
-                self.not_brake_step += 1
-            else:
-                self.stop_step = 0
-            return None
-
-    def check_daggerity(self, autopilot_brake, model_brake):
-        if abs(autopilot_brake - model_brake) > 0.5:
-            return True
-        else:
-            return False
+        return sens
 
     def run_step(self, input_data, timestamp):
-        if not self.initialized:
-            self._init()
-
-        data = self.tick(input_data)
-        gps = self.get_position(data)
-        speed = data['speed']
-        compass = data['compass']
-
-        if self.step % 20 == 0 and IS_WEATHER_CHANGE:
-            self.change_weather()
-
-        if self.step % 10 == 0:
-            self.speed_sequence.append(speed)
-            self.previous_gps = gps
-
-        # fix for theta=nan in some measurements
-        if np.isnan(data['compass']):
-            ego_theta = 0.0
-        else:
-            ego_theta = compass
-
-        near_node, near_command = self._route_planner.run_step(gps)
-        far_node, far_command = self._command_planner.run_step(gps)
-
-        # front image
-        rgb_front_image = data['rgb_front']
-        front_cv_image = rgb_front_image[:, :, ::-1]
-
-        rgb_front_60_image = data['rgb_front_60']
-        front_60_cv_image = rgb_front_60_image[:, :, ::-1]
-
-        rgb_rear_image = data['rgb_rear']
-        rear_cv_image = rgb_rear_image[:, :, ::-1]
-
-        fused_inputs = np.zeros(2, dtype=np.float32)
-        fused_inputs[0] = near_node[0] - gps[0]
-        fused_inputs[1] = near_node[1] - gps[1]
-
-        if self.debug:
-            disp_front_image = cv2.UMat(front_cv_image)
-            cv2.imshow("rgb-front", disp_front_image)
-            cv2.waitKey(1)
-
-        # run brake classifier imitation learning agent
-        dnn_agent_brake = self.agent.inference(front_images=front_60_cv_image, waypoint_input=fused_inputs,
-                                               speed_sequence=np.array(self.speed_sequence))
-
-        # if any of the following is not None, then the agent should brake
-        is_light, is_walker, is_vehicle, is_stop = self.traffic_data()
-        print("[Traffic]: traffic light-", is_light, " walker-", is_walker, " vehicle-", is_vehicle, " stop-", is_stop)
-
-        # by using priviledged information determine braking
-        is_brake = any(x is not None for x in [is_light, is_walker, is_vehicle, is_stop])
-
-        if self.check_daggerity(autopilot_brake=is_brake, model_brake=int(dnn_agent_brake)) and DAGGER:
-            print("[Info]: DAgger is Active !")
-
-            save_dagger = True
-            applied_brake = is_brake
-
-        else:
-            save_dagger = False
-            applied_brake = dnn_agent_brake
-
-        # apply pid controllers
-        steer, throttle, brake, target_speed, angle = self.get_control(target=near_node, far_target=far_node,
-                                                                       tick_data=data, brake=applied_brake)
-
-        # compute step reward and deside for termination
-        reward, done = self.calculate_reward(throttle=throttle, ego_speed=speed, ego_gps=gps, is_light=is_light,
-                                             is_vehicle=is_vehicle, is_walker=is_walker, is_stop=is_stop)
-        label = self.define_classifier_label(reward)
-
-        print("[Action]:", throttle, steer, brake, " [Reward]:", reward, " [Done]:", done, "[Waypoint]:", near_node,
-              "[GT Class ID]:", label)
-
-        self.is_collision = False
-
-        applied_control = carla.VehicleControl()
-        applied_control.throttle = throttle
-        applied_control.steer = steer
-        applied_control.brake = brake
-
-        measurement_data = {
-            'x': gps[0],
-            'y': gps[1],
-
-            'speed': speed,
-            'theta': ego_theta,
-
-            'x_command': far_node[0],
-            'y_command': far_node[1],
-            'far_command': far_command.value,
-
-            'near_node_x': near_node[0],
-            'near_node_y': near_node[1],
-            'near_command': near_command.value,
-
-            'steer': applied_control.steer,
-            'throttle': applied_control.throttle,
-            'brake': applied_control.brake,
-
-            'should_slow': self.should_slow,
-            'should_brake': self.should_brake,
-
-            'angle': self.angle,
-            'angle_unnorm': self.angle_unnorm,
-            'angle_far_unnorm': self.angle_far_unnorm,
-
-            'is_vehicle_present': self.is_vehicle_present,
-            'is_pedestrian_present': self.is_pedestrian_present,
-            'is_red_light_present': self.is_red_light_present,
-            'is_stops_present': self.is_stops_present,
-
-            'weather_id': self.weather_id,
-
-            'reward': reward,
-            'done': done,
-
-            'speed_sequence': np.array(self.speed_sequence).tolist(),
-            'label': label
-        }
-
-        if self.step % 10 == 0 and save_dagger:
-            self.save_data(image_front=front_cv_image, image_front_60=front_60_cv_image, image_rear=rear_cv_image,
-                           data=measurement_data)
-
-        return applied_control
-
-    def tick(self, input_data):
         self.step += 1
 
-        rgb_front = input_data['rgb_front'][1][:, :, :3]
-        rgb_front = rgb_front[:, :, ::-1]
+        if not self._initialized_behavior_agent:
+            if not self._init_behavior_agent_if_needed():
+                print("AutopilotAgent: BehaviorAgent initialization failed. Returning empty control.")
+                return carla.VehicleControl()
+            self._init_data_saving_components()
 
-        rgb_front_60 = input_data['rgb_front_60'][1][:, :, :3]
-        rgb_front_60 = rgb_front_60[:, :, ::-1]
+        if not self._agent:
+            print("AutopilotAgent: _agent (BehaviorAgent) not initialized. Returning empty control.")
+            return carla.VehicleControl()
 
-        rgb_rear = input_data['rgb_rear'][1][:, :, :3]
-        rgb_rear = rgb_rear[:, :, ::-1]
+        control = carla.VehicleControl()
 
-        gps = input_data['gps'][1][:2]
-        speed = input_data['speed'][1]['speed']
-        compass = input_data['imu'][1][-1]
+        bh_control = carla.VehicleControl()
+        if self._agent:
+            # BehaviorAgent.run_step() ожидает только флаг debug
+            # Данные сенсоров он получает через CarlaDataProvider внутри себя
+            bh_control = self._agent.run_step(debug=self.debug)
 
-        return {
-            'rgb_front': rgb_front,
-            'rgb_front_60': rgb_front_60,
-            'rgb_rear': rgb_rear,
-            'gps': gps,
-            'speed': speed,
-            'compass': compass
+        is_agent_affected_by_red_light = False
+        if hasattr(self._agent, '_last_traffic_light') and \
+                self._agent._last_traffic_light is not None and \
+                hasattr(self._agent._last_traffic_light, 'state') and \
+                self._agent._last_traffic_light.state == carla.TrafficLightState.Red:
+            is_agent_affected_by_red_light = True
+        self.is_red_light_present_log = 1 if is_agent_affected_by_red_light else 0
+
+        is_stop_sign_affecting_ego = self._is_stop_sign_affecting_ego_for_logging()
+        self.is_stops_present_log = 1 if is_stop_sign_affecting_ego else 0
+
+        current_speed_m_s = input_data['speed'][1]['speed']
+        imu_sensor_data = input_data['imu'][1]
+        compass_rad = imu_sensor_data[-1]
+
+        vehicle_transform = self.hero_vehicle.get_transform()
+        vehicle_location = vehicle_transform.location
+
+        log_near_node_coords, log_near_node_cmd = (None, None)
+        log_far_node_coords, log_far_node_cmd = (None, None)
+
+        if self._agent and hasattr(self._agent, 'get_local_planner') and self._agent.get_local_planner():
+            upcoming_waypoints = self._agent.get_local_planner().get_plan()
+            if upcoming_waypoints and len(upcoming_waypoints) > 0:
+                near_wp, near_cmd = upcoming_waypoints[0]
+                log_near_node_coords = (near_wp.transform.location.x, near_wp.transform.location.y)
+                log_near_node_cmd = near_cmd.value
+                far_idx = min(3, len(upcoming_waypoints) - 1)
+                if far_idx >= 0:
+                    far_wp, far_cmd = upcoming_waypoints[far_idx]
+                    log_far_node_coords = (far_wp.transform.location.x, far_wp.transform.location.y)
+                    log_far_node_cmd = far_cmd.value
+
+        self.steer_sequence.append(self.last_steer)
+        self.throttle_sequence.append(self.last_throttle)
+        self.brake_sequence.append(self.last_brake)
+        self.speed_sequence.append(self.last_speed)
+
+
+
+        vehicle_forward_vector = vehicle_transform.get_forward_vector()
+        vehicle_heading_rad = math.atan2(vehicle_forward_vector.y, vehicle_forward_vector.x)
+
+        vec_to_near_wp_x = log_near_node_coords[0] - vehicle_location.x
+        vec_to_near_wp_y = log_near_node_coords[1] - vehicle_location.y
+        angle_to_near_wp_rad = math.atan2(vec_to_near_wp_y, vec_to_near_wp_x)
+        angle_diff_near_rad = angle_to_near_wp_rad - vehicle_heading_rad
+        normalized_angle_near_rad = math.atan2(math.sin(angle_diff_near_rad), math.cos(angle_diff_near_rad))
+        self.angle_to_near_waypoint_deg = math.degrees(normalized_angle_near_rad)
+
+        vec_to_far_wp_x = log_far_node_coords[0] - vehicle_location.x
+        vec_to_far_wp_y = log_far_node_coords[1] - vehicle_location.y
+        angle_to_far_wp_rad = math.atan2(vec_to_far_wp_y, vec_to_far_wp_x)
+        angle_diff_far_rad = angle_to_far_wp_rad - vehicle_heading_rad
+        normalized_angle_far_rad = math.atan2(math.sin(angle_diff_far_rad), math.cos(angle_diff_far_rad))
+        self.angle_to_far_waypoint_deg = math.degrees(normalized_angle_far_rad)
+
+        depth_front_data = input_data['depth_front'][1]
+        inst_seg_raw = input_data['instance_segmentation_front'][1]
+        inst_seg_data = inst_seg_raw[:, :, :-1]
+
+        measurement_data = {
+            'timestamp': timestamp,
+
+            'x': vehicle_location.x,
+            'y': vehicle_location.y,
+            'z': vehicle_location.z,
+
+            'speed': current_speed_m_s,
+            'theta': compass_rad,
+
+            'near_node_x': log_near_node_coords[0] if log_near_node_coords else None,
+            'near_node_y': log_near_node_coords[1] if log_near_node_coords else None,
+            'near_command': log_near_node_cmd,
+
+            'far_node_x': log_far_node_coords[0] if log_far_node_coords else None,
+            'far_node_y': log_far_node_coords[1] if log_far_node_coords else None,
+            'far_command': log_far_node_cmd,
+
+            'angle_near': self.angle_to_near_waypoint_deg,
+            'angle_far': self.angle_to_far_waypoint_deg,
+
+            'steer': control.steer,
+            'throttle': control.throttle,
+            'brake': control.brake,
+
+            'is_red_light_present': self.is_red_light_present_log,
+
+            'steer_sequence': np.array(self.steer_sequence, dtype=np.float32).tolist(),
+            'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
+            'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
+            'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
+
+            'is_collision_event': self.is_collision,
         }
 
-    def get_position(self, tick_data):
-        gps = tick_data['gps']
-        gps = (gps - self._route_planner.mean) * self._route_planner.scale
+        input_data = {
+            'depth_front_data': depth_front_data,
+            'instance_segmentation_front_data': inst_seg_data,
+            'measurement_data': measurement_data
+        }
 
-        return gps
+        dataset = DirectlyCarlaDatasetLoader(
+            input_batch_data=[input_data],
+            num_near_commands=7,
+            num_far_commands=7,
+        )
 
-    def get_control(self, target, far_target, tick_data, brake):
-        pos = self.get_position(tick_data)
-        theta = tick_data['compass']
-        speed = tick_data['speed']
+        sample = dataset[0]
 
-        # steering
-        angle_unnorm = base_utils.get_angle_to(pos, theta, target)
-        angle = angle_unnorm / 90
+        depth = sample['depth'].unsqueeze(0).to(self.DEVICE)
+        seg = sample['segmentation'].unsqueeze(0).to(self.DEVICE)
+        hist = torch.stack([
+            sample['speed_sequence'],
+            sample['steer_sequence'],
+            sample['throttle_sequence'],
+            sample['brake_sequence']
+        ], dim=-1).unsqueeze(0).to(self.DEVICE)
+        cont = sample['cont_feats'].unsqueeze(0).to(self.DEVICE)
+        sig = sample['signal_vec'].unsqueeze(0).to(self.DEVICE)
+        near = sample['near_cmd_oh'].unsqueeze(0).to(self.DEVICE)
+        far = sample['far_cmd_oh'].unsqueeze(0).to(self.DEVICE)
 
-        steer = self._turn_controller.step(angle)
-        steer = np.clip(steer, -1.0, 1.0)
-        steer = round(steer, 3)
+        # Предсказание
+        with torch.no_grad():
+            pred_steer, pred_throttle, pred_brake = self.model(depth, seg, hist, cont, sig, near, far)
+            steer = pred_steer.item()
+            throttle = pred_throttle.item()
+            brake = pred_brake.item()
 
-        # acceleration
-        angle_far_unnorm = base_utils.get_angle_to(pos, theta, far_target)
-        should_slow = abs(angle_far_unnorm) > 45.0 or abs(angle_unnorm) > 5.0
-        target_speed = 4.0 if should_slow else 7.0
+        # Вывод управления
+        print(f"Predicted steer: {steer:.4f}")
+        print(f"Predicted throttle: {throttle:.4f}")
+        print(f"Predicted brake: {brake:.4f}")
 
-        if brake:
-            target_speed = 0.0
+        if throttle > 0.1 :
+            brake = 0
 
-        self.should_slow = int(should_slow)
-        self.should_brake = int(brake)
-        self.angle = angle
-        self.angle_unnorm = angle_unnorm
-        self.angle_far_unnorm = angle_far_unnorm
+        control.steer = steer
+        control.throttle = throttle
+        control.brake = brake
 
-        delta = np.clip(target_speed - speed, 0.0, 0.25)
-        throttle = self._speed_controller.step(delta)
-        throttle = np.clip(throttle, 0.0, 0.75)
+        measurement_data = {
+            'timestamp': timestamp,
 
-        if self.should_brake > 0.5:
-            steer *= 0.5
-            throttle = 0.0
+            'x': vehicle_location.x,
+            'y': vehicle_location.y,
+            'z': vehicle_location.z,
 
-        return steer, throttle, brake, target_speed, angle
+            'speed': current_speed_m_s,
+            'theta': compass_rad,
 
-    def destroy(self):
-        del self.agent
+            'near_node_x': log_near_node_coords[0] if log_near_node_coords else None,
+            'near_node_y': log_near_node_coords[1] if log_near_node_coords else None,
+            'near_command': log_near_node_cmd,
 
-        if self.collision_sensor is not None:
-            self.collision_sensor.stop()
+            'far_node_x': log_far_node_coords[0] if log_far_node_coords else None,
+            'far_node_y': log_far_node_coords[1] if log_far_node_coords else None,
+            'far_command': log_far_node_cmd,
 
-    def define_classifier_label(self, reward):
-        label = 0
-        if reward < 0.0:
-            if self.is_red_light_present:
-                label = 1
-            elif self.is_stops_present:
-                label = 2
-            elif self.is_vehicle_present:
-                label = 3
-            elif self.is_pedestrian_present:
-                label = 4
-            else:
-                label = 5
+            'angle_near': self.angle_to_near_waypoint_deg,
+            'angle_far': self.angle_to_far_waypoint_deg,
+
+            'steer': control.steer,
+            'throttle': control.throttle,
+            'brake': control.brake,
+
+            'is_red_light_present': self.is_red_light_present_log,
+
+            'steer_sequence': np.array(self.steer_sequence, dtype=np.float32).tolist(),
+            'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
+            'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
+            'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
+
+            'is_collision_event': self.is_collision,
+        }
+
+        self.save_data_async(
+                image_depth=depth_front_data.copy(),
+                image_seg=inst_seg_data.copy(),
+                data=measurement_data
+            )
+        self.last_steer = float(control.steer)
+        self.last_throttle = float(control.throttle)
+        self.last_brake = float(control.brake)
+        self.last_speed = float(current_speed_m_s)
+        self.is_collision = False
+        return control
+
+    def _is_stop_sign_affecting_ego_for_logging(self):
+        """
+        Check if stop sign is affecting ego vehicle for logging purposes.
+        """
+        if not self.hero_vehicle or not self.world:
+            return False
+
+        if base_utils:
+            try:
+                all_stop_signs = self.world.get_actors().filter('*traffic.stop*')
+                nearby_relevant_stops = base_utils.get_nearby_lights(self.hero_vehicle, all_stop_signs)
+                return len(nearby_relevant_stops) > 0
+            except Exception as e:
+                if self.debug:
+                    print(f"AutopilotAgent: Error using base_utils.get_nearby_lights for stop signs: {e}")
+                return self._manual_stop_sign_check_for_logging()
         else:
-            label = 0
-        return label
+            return self._manual_stop_sign_check_for_logging()
 
-    def traffic_data(self):
-        all_actors = self.world.get_actors()
+    def _manual_stop_sign_check_for_logging(self):
+        """
+        Manual check for stop signs affecting ego vehicle.
+        """
+        if not self.hero_vehicle or not self.world:
+            return False
 
-        lights_list = all_actors.filter('*traffic_light*')
-        walkers_list = all_actors.filter('*walker*')
-        vehicle_list = all_actors.filter('*vehicle*')
-        stop_list = all_actors.filter('*stop*')
+        stop_signs = self.world.get_actors().filter('*.stop')
+        ego_transform = self.hero_vehicle.get_transform()
+        ego_location = ego_transform.location
+        ego_fwd_vec = ego_transform.get_forward_vector()
+        vehicle_waypoint = CarlaDataProvider.get_map().get_waypoint(ego_location)
 
-        traffic_lights = base_utils.get_nearby_lights(self.hero_vehicle, lights_list)
-        stops = base_utils.get_nearby_lights(self.hero_vehicle, stop_list)
+        for stop_sign in stop_signs:
+            stop_location = stop_sign.get_location()
+            distance_to_stop = ego_location.distance(stop_location)
 
-        if len(stops) == 0:
-            stop = None
-        else:
-            stop = stops
+            if distance_to_stop < 25.0:
+                vec_to_stop = (stop_location - ego_location).make_unit_vector()
+                if ego_fwd_vec.dot(vec_to_stop) > 0.707:
+                    stop_waypoint = CarlaDataProvider.get_map().get_waypoint(stop_location, project_to_road=True,
+                                                                             lane_type=carla.LaneType.Any)
+                    if stop_waypoint.road_id == vehicle_waypoint.road_id or vehicle_waypoint.is_junction:
+                        return True
+        return False
 
-        light = self.is_light_red(traffic_lights)
-        walker = self.is_walker_hazard(walkers_list)
-        vehicle = self.is_vehicle_hazard(vehicle_list)
-        stop = self.stop_function(stop)
-
-        self.is_vehicle_present = 1 if vehicle is not None else 0
-        self.is_red_light_present = 1 if light is not None else 0
-        self.is_pedestrian_present = 1 if walker is not None else 0
-        self.is_stops_present = 1 if stop is not None else 0
-
-        return light, walker, vehicle, stop
-
-    def calculate_reward(self, throttle, ego_speed, ego_gps, is_light, is_vehicle, is_walker, is_stop):
-        reward = 0.0
-        done = 0
-
-        # give penalty if ego vehicle is not braking where it should brake
-        if any(x is not None for x in [is_light, is_walker, is_vehicle]):
-            self.count_is_seen += 1
-
-            # throttle desired after too much waiting around vehicle or walker
-            if self.count_is_seen > 1200:
-                print(
-                    "[Penalty]: too much stopping when there is a vehicle or walker or stop sign or traffic light around !")
-                reward -= 100
-
-            # braking desired
-            else:
-                # accelerating while it should brake
-                if throttle < 0.1:
-                    print("[Reward]: correctly braking !")
-                    reward += 50
-                else:
-                    print("[Penalty]: not braking !")
-                reward -= ego_speed
-
-        else:
-            reward += ego_speed
-            self.count_is_seen = 0
-
-        # distance from starting position
-        reward += np.linalg.norm(ego_gps - self.previous_gps)
-
-        # negative reward for collision
-        if self.is_collision:
-            print("[Penalty]: collision !")
-            reward -= 1500
-            done = 1
-
-        return reward, done
-
-    def shift_point(self, ego_compass, ego_gps, near_node, offset_amount):
-        # rotation matrix
-        R = np.array([
-            [np.cos(np.pi / 2 + ego_compass), -np.sin(np.pi / 2 + ego_compass)],
-            [np.sin(np.pi / 2 + ego_compass), np.cos(np.pi / 2 + ego_compass)]
-        ])
-
-        # transpose of rotation matrix
-        trans_R = R.T
-
-        local_command_point = np.array([near_node[0] - ego_gps[0], near_node[1] - ego_gps[1]])
-        local_command_point = trans_R.dot(local_command_point)
-
-        # positive offset shifts near node to right; negative offset shifts near node to left
-        local_command_point[0] += offset_amount
-        local_command_point[1] += 0
-
-        new_near_node = np.linalg.inv(trans_R).dot(local_command_point)
-
-        new_near_node[0] += ego_gps[0]
-        new_near_node[1] += ego_gps[1]
-
-        return new_near_node
-
-    def is_light_red(self, traffic_lights):
-        for light in traffic_lights:
-            if light.get_state() == carla.TrafficLightState.Red:
-                return True
-            elif light.get_state() == carla.TrafficLightState.Yellow:
-                return True
-        return None
-
-    def is_walker_hazard(self, walkers_list):
-        p1 = base_utils._numpy(self.hero_vehicle.get_location())
-        v1 = 10.0 * base_utils._orientation(self.hero_vehicle.get_transform().rotation.yaw)
-        for walker in walkers_list:
-            v2_hat = base_utils._orientation(walker.get_transform().rotation.yaw)
-            s2 = np.linalg.norm(base_utils._numpy(walker.get_velocity()))
-            if s2 < 0.05:
-                v2_hat *= s2
-            p2 = -3.0 * v2_hat + base_utils._numpy(walker.get_location())
-            v2 = 8.0 * v2_hat
-            collides, collision_point = base_utils.get_collision(p1, v1, p2, v2)
-            if collides:
-                return walker
-        return None
-
-    def is_vehicle_hazard(self, vehicle_list):
-        o1 = base_utils._orientation(self.hero_vehicle.get_transform().rotation.yaw)
-        p1 = base_utils._numpy(self.hero_vehicle.get_location())
-        s1 = max(10, 3.0 * np.linalg.norm(
-            base_utils._numpy(self.hero_vehicle.get_velocity())))  # increases the threshold distance
-        v1_hat = o1
-        v1 = s1 * v1_hat
-        for target_vehicle in vehicle_list:
-            if target_vehicle.id == self.hero_vehicle.id:
-                continue
-            o2 = base_utils._orientation(target_vehicle.get_transform().rotation.yaw)
-            p2 = base_utils._numpy(target_vehicle.get_location())
-            s2 = max(5.0, 2.0 * np.linalg.norm(base_utils._numpy(target_vehicle.get_velocity())))
-            v2_hat = o2
-            v2 = s2 * v2_hat
-            p2_p1 = p2 - p1
-            distance = np.linalg.norm(p2_p1)
-            p2_p1_hat = p2_p1 / (distance + 1e-4)
-            angle_to_car = np.degrees(np.arccos(v1_hat.dot(p2_p1_hat)))
-            angle_between_heading = np.degrees(np.arccos(o1.dot(o2)))
-            angle_to_car = min(angle_to_car, 360.0 - angle_to_car)
-            angle_between_heading = min(angle_between_heading, 360.0 - angle_between_heading)
-            if angle_between_heading > 60.0 and not (angle_to_car < 15 and distance < s1):
-                continue
-            elif angle_to_car > 30.0:
-                continue
-            elif distance > s1 and distance < s2:
-                self.target_vehicle_speed = target_vehicle.get_velocity()
-                continue
-            elif distance > s1:
-                continue
-            return target_vehicle
-        return None
-
-    def save_data(self, image_front, image_front_60, image_rear, data):
-        cv2.imwrite(os.path.join(self.subfolder_paths[0], "%04i.png" % self.data_count), image_front)
-        cv2.imwrite(os.path.join(self.subfolder_paths[1], "%04i.png" % self.data_count), image_front_60)
-        cv2.imwrite(os.path.join(self.subfolder_paths[2], "%04i.png" % self.data_count), image_rear)
-
-        with open(os.path.join(self.subfolder_paths[3], "%04i.json" % self.data_count), 'w+', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-
+    def save_data_async(self, image_depth, image_seg, data):
+        """
+        Save data asynchronously using worker thread.
+        """
+        idx = self.data_count
+        paths = self.subfolder_paths
+        task = (image_depth, image_seg, data, paths, idx)
+        self._save_queue.put(task)
         self.data_count += 1
 
-    def change_weather(self):
-        index = random.choice(range(len(WEATHERS)))
-        self.weather_id = WEATHERS_IDS[index]
-        self.world.set_weather(WEATHERS[WEATHERS_IDS[index]])
+    def _save_worker(self):
+        """
+        Worker thread for saving data.
+        """
+        while True:
+            task = self._save_queue.get()
+            if task is None:
+                self._save_queue.task_done()
+                break
+            img_depth, img_seg, data, paths, idx = task
+            try:
+                max_depth_val = np.nanmax(img_depth)
+                if max_depth_val > 0:
+                    depth_vis = (img_depth / max_depth_val * 65535).astype(np.uint16)
+                else:
+                    depth_vis = np.zeros_like(img_depth, dtype=np.uint16)
+                cv2.imwrite(os.path.join(paths[0], f"{idx:06d}.png"), depth_vis)
+
+                seg_vis = img_seg
+                cv2.imwrite(os.path.join(paths[1], f"{idx:06d}.png"), seg_vis)
+
+                with open(os.path.join(paths[2], f"{idx:06d}.json"), 'w+', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                print(f"AutopilotAgent: Error saving task {idx} to {paths}: {e}")
+            finally:
+                self._save_queue.task_done()
 
     @staticmethod
     def _on_collision(weak_self, event):
+        """Callback on collision sensor event"""
         self = weak_self()
         if not self:
             return
         self.is_collision = True
+
+    def set_global_plan(self, global_plan_gps, global_plan_world_coord):
+        super().set_global_plan(global_plan_gps, global_plan_world_coord)
+
+        if self._agent and self._initialized_behavior_agent:
+            route = []
+            map_api = CarlaDataProvider.get_map()
+            for transform, road_option in self._global_plan_world_coord:
+                wp = map_api.get_waypoint(transform.location)
+                route.append((wp, road_option))
+            self._agent.set_global_plan(route)
+            print("AutopilotAgent: Global plan updated for already initialized BehaviorAgent.")
+
+    def destroy(self):
+        """Clean up resources"""
+        print("AutopilotAgent: Destroying agent...")
+        if self._agent:
+            pass
+
+        if hasattr(self, 'collision_sensor') and self.collision_sensor and self.collision_sensor.is_alive:
+            self.collision_sensor.stop()
+            self.collision_sensor.destroy()
+            self.collision_sensor = None
+            print("AutopilotAgent: Collision sensor destroyed.")
+
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._save_queue.put(None)
+            self._save_queue.join()
+            self._worker_thread.join(timeout=5.0)
+            if self._worker_thread.is_alive():
+                print("AutopilotAgent: Warning - Save worker thread did not terminate cleanly.")
+            else:
+                print("AutopilotAgent: Save worker thread terminated.")
+        if self.debug:
+            pass
+        print("AutopilotAgent: Destroyed.")

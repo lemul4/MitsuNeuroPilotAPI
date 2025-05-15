@@ -46,7 +46,7 @@ if __name__ == '__main__':
     DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/autopilot_behavior_data'
     TRAIN_ROOT = os.path.join(DATA_ROOT, 'train')
     VAL_ROOT = os.path.join(DATA_ROOT, 'val')
-    BATCH_SIZE = 16
+    BATCH_SIZE = 12
     NUM_NEAR = 7
     NUM_FAR = 7
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -73,15 +73,17 @@ if __name__ == '__main__':
     model = ImprovedCarlaAutopilotNet(
         depth_channels=1,
         seg_channels=3,
-        img_emb_dim=512,
+        img_emb_dim=1024,
         rnn_input=4,
         rnn_hidden=512,
-        cont_feat_dim=14,
+        cont_feat_dim=10,
         signal_dim=1,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
-        mlp_hidden=512
+        mlp_hidden=1024
     ).to(DEVICE)
+
+    model = torch.compile(model, backend='eager')
 
     def create_metrics():
         base_metrics = {
@@ -150,10 +152,10 @@ if __name__ == '__main__':
 
             optimizer.zero_grad()
             with autocast(device_type='cuda', dtype=torch.float16):
-                preds = model(depth, seg, hist, cont, sig, near, far)
-                loss_s = criterion(preds['steer'], tgt_s)
-                loss_t = criterion(preds['throttle'], tgt_t)
-                loss_b = criterion(preds['brake'], tgt_b)
+                pred_steer, pred_throttle, pred_brake = model(depth, seg, hist, cont, sig, near, far)
+                loss_s = criterion(pred_steer, tgt_s)
+                loss_t = criterion(pred_throttle, tgt_t)
+                loss_b = criterion(pred_brake, tgt_b)
                 loss = 1.5 * loss_s + 0.8 * loss_t + 0.4 * loss_b
 
             scaler.scale(loss).backward()
@@ -167,9 +169,9 @@ if __name__ == '__main__':
 
             # Базовые метрики
             for prefix, pred, target in [
-                ('steer', preds['steer'], tgt_s),
-                ('throttle', preds['throttle'], tgt_t),
-                ('brake', preds['brake'], tgt_b)
+                ('steer', pred_steer, tgt_s),
+                ('throttle', pred_throttle, tgt_t),
+                ('brake', pred_brake, tgt_b)
             ]:
                 metrics[f'{prefix}_mae'].update(pred, target)
                 metrics[f'{prefix}_mse'].update(pred, target)
@@ -187,9 +189,9 @@ if __name__ == '__main__':
                 (mask_sharp, 'steer_sharp_turn')
             ]:
                 if mask.any():
-                    metrics[f'{prefix}_mae'].update(preds['steer'][mask], tgt_s[mask])
-                    metrics[f'{prefix}_mse'].update(preds['steer'][mask], tgt_s[mask])
-                    metrics[f'{prefix}_r2'].update(preds['steer'][mask], tgt_s[mask])
+                    metrics[f'{prefix}_mae'].update(pred_steer[mask], tgt_s[mask])
+                    metrics[f'{prefix}_mse'].update(pred_steer[mask], tgt_s[mask])
+                    metrics[f'{prefix}_r2'].update(pred_steer[mask], tgt_s[mask])
 
         avg_loss = running_loss / len(loader.dataset)
         results = {name: m.compute().item() for name, m in metrics.items()}
@@ -223,17 +225,17 @@ if __name__ == '__main__':
                 tgt_t = batch['throttle'].unsqueeze(1).to(device)
                 tgt_b = batch['brake'].unsqueeze(1).to(device)
 
-                preds = model(depth, seg, hist, cont, sig, near, far)
-                loss = (1.5 * criterion(preds['steer'], tgt_s)
-                        + 0.8 * criterion(preds['throttle'], tgt_t)
-                        + 0.4 * criterion(preds['brake'], tgt_b))
+                pred_steer, pred_throttle, pred_brake = model(depth, seg, hist, cont, sig, near, far)
+                loss = (1.5 * criterion(pred_steer, tgt_s)
+                        + 0.8 * criterion(pred_throttle, tgt_t)
+                        + 0.4 * criterion(pred_brake, tgt_b))
                 val_loss += loss.item() * depth.size(0)
 
                 # Базовые метрики
                 for prefix, pred, target in [
-                    ('steer', preds['steer'], tgt_s),
-                    ('throttle', preds['throttle'], tgt_t),
-                    ('brake', preds['brake'], tgt_b)
+                    ('steer', pred_steer, tgt_s),
+                    ('throttle', pred_throttle, tgt_t),
+                    ('brake', pred_brake, tgt_b)
                 ]:
                     metrics[f'{prefix}_mae'].update(pred, target)
                     metrics[f'{prefix}_mse'].update(pred, target)
@@ -251,9 +253,9 @@ if __name__ == '__main__':
                     (mask_sharp, 'steer_sharp_turn')
                 ]:
                     if mask.any():
-                        metrics[f'{prefix}_mae'].update(preds['steer'][mask], tgt_s[mask])
-                        metrics[f'{prefix}_mse'].update(preds['steer'][mask], tgt_s[mask])
-                        metrics[f'{prefix}_r2'].update(preds['steer'][mask], tgt_s[mask])
+                        metrics[f'{prefix}_mae'].update(pred_steer[mask], tgt_s[mask])
+                        metrics[f'{prefix}_mse'].update(pred_steer[mask], tgt_s[mask])
+                        metrics[f'{prefix}_r2'].update(pred_steer[mask], tgt_s[mask])
 
         avg_loss = val_loss / len(loader.dataset)
         results = {name: m.compute().item() for name, m in metrics.items()}
@@ -261,13 +263,24 @@ if __name__ == '__main__':
 
 
     # Основной цикл обучения с новыми метриками
-    num_epochs = 70
+    num_epochs = 80
     total_steps = num_epochs * len(dtrain)
     optimizer, scheduler = configure_optimizers(model, 1e-3, total_steps)
     scaler = GradScaler(device='cuda')
 
     train_metrics = create_metrics()
     val_metrics = create_metrics()
+
+    batch_size = 1
+    history_len = 20
+
+    dummy_depth = torch.randn(batch_size, 1, 333, 592).to(DEVICE)
+    dummy_seg = torch.randn(batch_size, 3, 333, 592).to(DEVICE)
+    dummy_history = torch.randn(batch_size, history_len, 4).to(DEVICE)
+    dummy_cont_feats = torch.randn(batch_size, 10).to(DEVICE)
+    dummy_signal_vec = torch.randn(batch_size, 1).to(DEVICE)
+    dummy_near_cmd = torch.randn(batch_size, 7).to(DEVICE)
+    dummy_far_cmd = torch.randn(batch_size, 7).to(DEVICE)
 
     best_val = float('inf')
     for epoch in range(1, num_epochs + 1):
@@ -291,6 +304,28 @@ if __name__ == '__main__':
             print(f"    {name}: {value:.4f}")
 
         if val_loss < best_val:
-            torch.save(model.state_dict(), 'best_model.pth')
+            if isinstance(model, torch._dynamo.eval_frame.OptimizedModule):
+                model_to_save = model.orig_mod  # Получаем исходную модель
+            else:
+                model_to_save = model
+            torch.save(model_to_save.state_dict(), 'best_model.pth')
+            traced_model = torch.jit.trace(
+                model_to_save,
+                (
+                    dummy_depth,
+                    dummy_seg,
+                    dummy_history,
+                    dummy_cont_feats,
+                    dummy_signal_vec,
+                    dummy_near_cmd,
+                    dummy_far_cmd
+                )
+            )
+            traced_model.save('best_model_traced_last_layer.pt')
+
+        if epoch == 20:
+            torch.save(model_to_save.state_dict(), 'model_20.pth')
+            traced_model.save('model_20_traced.pt')
+
             best_val = val_loss
             print("Saved best model")

@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 from skimage import io
 
 class CarlaDatasetLoader(Dataset):
-    def __init__(self, root_dir, num_near_commands: int, num_far_commands: int, stats: dict = None):
+    def __init__(self, root_dir, num_near_commands: int = 7, num_far_commands: int = 7, stats: dict = None):
         self.root_dir = root_dir
         subs = ["depth_front", "instance_segmentation_front", "measurements"]
         self.depth_dir = os.path.join(root_dir, subs[0])
@@ -134,12 +134,6 @@ class CarlaDatasetLoader(Dataset):
         thr_seq = torch.tensor(thr_seq).clone()
         br_seq = torch.tensor(br_seq).clone()
 
-        # Acceleration from speed sequence
-        accel_sp = sp_seq[-1] - sp_seq[-2] if len(sp_seq) >= 2 else 0.0
-        accel_steer = steer_seq[-1] - steer_seq[-2] if len(steer_seq) >= 2 else 0.0
-        accel_thr = thr_seq[-1] - thr_seq[-2] if len(thr_seq) >= 2 else 0.0
-        accel_br = br_seq[-1] - br_seq[-2] if len(br_seq) >= 2 else 0.0
-
 
         # One-hot signals: red light
         red = int(data['is_red_light_present'])
@@ -151,7 +145,6 @@ class CarlaDatasetLoader(Dataset):
 
         # Convert to tensor
         cont_feats = torch.tensor([x, y, theta, speed,
-                                   accel_sp, accel_steer, accel_thr, accel_br,
                                    near_node_x, near_node_y,
                                    far_node_x, far_node_y,
                                    angle_near, angle_far], dtype=torch.float32)

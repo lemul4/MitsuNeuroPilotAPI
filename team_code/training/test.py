@@ -127,13 +127,13 @@ if __name__ == '__main__':
         img_emb_dim=512,
         rnn_input=4,
         rnn_hidden=512,
-        cont_feat_dim=14,
+        cont_feat_dim=10,
         signal_dim=1,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
         mlp_hidden=512
     ).to(DEVICE)
-    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_low_d.pth', map_location=DEVICE)
+    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_no_acs.pth', map_location=DEVICE)
     model.load_state_dict(checkpoint)
     print("Loaded model")
 
