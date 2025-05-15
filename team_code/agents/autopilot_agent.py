@@ -232,10 +232,6 @@ class AutopilotAgent(AutonomousAgent):
         self.brake_sequence.append(self.last_brake)
         self.speed_sequence.append(self.last_speed)
 
-        self.last_steer = float(control.steer)
-        self.last_throttle = float(control.throttle)
-        self.last_brake = float(control.brake)
-        self.last_speed = float(current_speed_m_s)
 
         if self.step % 10 == 0:
             vehicle_forward_vector = vehicle_transform.get_forward_vector()
@@ -298,6 +294,11 @@ class AutopilotAgent(AutonomousAgent):
                 image_seg=inst_seg_data.copy(),
                 data=measurement_data
             )
+
+        self.last_steer = float(control.steer)
+        self.last_throttle = float(control.throttle)
+        self.last_brake = float(control.brake)
+        self.last_speed = float(current_speed_m_s)
         self.is_collision = False
         return control
 
