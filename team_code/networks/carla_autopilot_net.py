@@ -2,81 +2,64 @@ import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models
-import segmentation_models_pytorch as smp
-
-class ResNetEncoder(nn.Module):
-    def __init__(self, in_channels, out_dim=256, backbone='resnet34'):
-        super().__init__()
-        if backbone == 'resnet34':
-            resnet = models.resnet34(pretrained=True)
-        else:
-            raise ValueError(f"Unsupported backbone: {backbone}")
-
-        if in_channels != 3:
-            self.input_conv = nn.Conv2d(in_channels, 3, kernel_size=1)
-        else:
-            self.input_conv = nn.Identity()
-
-        self.feature_extractor = nn.Sequential(*list(resnet.children())[:-1])
-        feat_dim = resnet.fc.in_features
-
-        self.proj = nn.Sequential(
-            nn.Linear(feat_dim, out_dim),
-            nn.BatchNorm1d(out_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2)
-        )
-
-    def forward(self, x):
-        x = self.input_conv(x)
-        x = self.feature_extractor(x)
-        x = x.view(x.size(0), -1)
-        return self.proj(x)
-
 
 class EfficientNetEncoder(nn.Module):
-    def __init__(self, in_channels=3, out_dim=256, backbone='efficientnet_lite0'):
+    def __init__(self, in_channels=3, out_dim=1024, backbone='efficientnet_lite0', spatial_grid_size=8):
         super().__init__()
-        # Получаем энкодер EfficientNet без головы
-        self.backbone = timm.create_model(backbone, pretrained=True, features_only=True, in_chans=in_channels)
+        self.backbone = timm.create_model(
+            backbone,
+            pretrained=False, # Consider setting to True for transfer learning
+            features_only=True,
+            in_chans=in_channels
+        )
 
-        # Получаем информацию о всех уровнях признаков
+        # feature_info содержит информацию о каналах на каждом уровне
         self.feature_info = self.backbone.feature_info
-        self.num_levels = len(self.feature_info)
+        # Нам нужен только последний уровень
+        last_level_info = self.feature_info[-1]
+        self.last_layer_channels = last_level_info['num_chs']
 
-        # Создаем адаптивные пулинги и проекции для каждого уровня
-        self.pools = nn.ModuleList([nn.AdaptiveAvgPool2d(1) for _ in range(self.num_levels)])
+        self.spatial_grid_size = spatial_grid_size
 
-        # Вычисляем общее количество каналов после конкатенации
-        total_channels = sum([info['num_chs'] for info in self.feature_info])
+        # Адаптивный пулинг до фиксированной сетки
+        # Например, если spatial_grid_size=4, то пулит до HxW = 4x4
+        self.spatial_pool = nn.AdaptiveAvgPool2d(self.spatial_grid_size)
 
+        # Размерность после пулинга и разворачивания
+        pooled_flattened_dim = self.last_layer_channels * (self.spatial_grid_size ** 2)
+
+        # Проекция в финальную размерность out_dim
         self.proj = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(total_channels, out_dim),
+            nn.Flatten(), # На всякий случай, хотя flatten(1) будет сделан явно
+            nn.Linear(pooled_flattened_dim, out_dim),
             nn.BatchNorm1d(out_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.1)
+            nn.Dropout(0.15)
         )
 
     def forward(self, x):
-        # Получаем все уровни признаков
+        # Получаем признаки со всех уровней
         feats = self.backbone(x)
 
-        # Применяем адаптивный пулинг к каждому уровню
-        pooled_feats = []
-        for i in range(self.num_levels):
-            pooled = self.pools[i](feats[i])
-            pooled_feats.append(pooled)
+        # Берем признаки только с последнего уровня
+        # feats[-1] это тензор с формой (B, C_last, H_last, W_last)
+        last_feat = feats[-1]
 
-        # Объединяем все уровни по каналам
-        combined = torch.cat([p.squeeze(-1).squeeze(-1) for p in pooled_feats], dim=1)
+        # Применяем адаптивный пулинг до фиксированной сетки
+        # Выход будет (B, C_last, spatial_grid_size, spatial_grid_size)
+        pooled_feat = self.spatial_pool(last_feat)
 
-        # Проецируем в итоговое пространство признаков
-        return self.proj(combined)
+        # Разворачиваем пространственные измерения в одно
+        # Выход будет (B, C_last * spatial_grid_size * spatial_grid_size)
+        flattened_feat = pooled_feat.flatten(1) # Начиная с 1-й размерности (после батча)
+
+        # Проецируем в финальную размерность
+        output = self.proj(flattened_feat)
+
+        return output
 
 class HistoryAttentionRNN(nn.Module):
-    def __init__(self, input_size, hidden_size=256, num_layers=2, dropout=0.1):
+    def __init__(self, input_size, hidden_size=512, num_layers=2, dropout=0.1):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -96,17 +79,23 @@ class HistoryAttentionRNN(nn.Module):
         last_out = outputs[:, -1, :]
         return torch.cat([last_out, attn_out], dim=1)
 
-class CrossModalFusion(nn.Module):
+
+class CrossAttentionFusion(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.gate = nn.Sequential(
-            nn.Linear(dim * 2, dim),
-            nn.Sigmoid()
-        )
+        self.query = nn.Linear(dim, dim)
+        self.key = nn.Linear(dim, dim)
+        self.value = nn.Linear(dim, dim)
 
     def forward(self, x1, x2):
-        gated = self.gate(torch.cat([x1, x2], dim=1))
-        return gated * x1 + (1 - gated) * x2
+        q = self.query(x1)  # B x D
+        k = self.key(x2)
+        v = self.value(x2)
+        # Взаимодействие x1 с x2
+        attn = torch.sigmoid(q * k)  # или dot-product q @ k.T
+        fused = attn * v
+        return fused + x1  # residual
+
 
 class ResidualMLPBlock(nn.Module):
     def __init__(self, dim, dropout=0.15):
@@ -129,25 +118,25 @@ class ImprovedCarlaAutopilotNet(nn.Module):
         self,
         depth_channels=1,
         seg_channels=3,
-        img_emb_dim=256,
+        img_emb_dim=1024,
         rnn_input=4,
-        rnn_hidden=256,
-        cont_feat_dim=14,
+        rnn_hidden=512,
+        cont_feat_dim=10,
         signal_dim=1,
         near_cmd_dim=7,
         far_cmd_dim=7,
-        mlp_hidden=512
+        mlp_hidden=1024
     ):
         super().__init__()
         self.depth_encoder = EfficientNetEncoder(depth_channels, out_dim=img_emb_dim)
         self.seg_encoder = EfficientNetEncoder(seg_channels, out_dim=img_emb_dim)
-        self.img_fusion = CrossModalFusion(img_emb_dim)
+        self.img_fusion = CrossAttentionFusion(img_emb_dim)
 
         self.history_encoder = HistoryAttentionRNN(
             input_size=rnn_input,
             hidden_size=rnn_hidden,
             num_layers=2,
-            dropout=0.1
+            dropout=0.15
         )
 
         self.feature_gate = nn.Sequential(
@@ -201,4 +190,4 @@ class ImprovedCarlaAutopilotNet(nn.Module):
         throttle = torch.sigmoid(self.throttle_head(hidden))
         brake = torch.sigmoid(self.brake_head(hidden))
 
-        return {'steer': steer, 'throttle': throttle, 'brake': brake}
+        return steer, throttle, brake
