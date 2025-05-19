@@ -1,3 +1,4 @@
+import math
 import os
 import glob
 import json
@@ -27,7 +28,7 @@ if __name__ == '__main__':
 
     # 1. Функция для создания ConcatDataset из всех townXX/run папок
     def build_concat_dataset(root_dir, num_near, num_far, stats=None):
-        run_dirs = sorted(glob.glob(os.path.join(root_dir, 'town*', '*')))
+        run_dirs = sorted(glob.glob(os.path.join(root_dir, 'Town*', '*')))
         datasets = []
         for run in run_dirs:
             depth = os.path.join(run, 'depth_front')
@@ -42,6 +43,26 @@ if __name__ == '__main__':
         return ConcatDataset(datasets)
 
 
+    stats = {
+        'x': [-10000.0, 10000.0],  # Пример диапазона X-координаты
+        'y': [-10000.0, 10000.0],  # Пример диапазона Y-координаты
+        'theta': [0.0, 2 * math.pi],  # Обновленный диапазон для theta (радианы)
+        'speed': [-5.0, 15.0],  # Пример диапазона скорости (м/с)
+        'near_node_x': [-10000.0, 10000.0],  # Пример диапазона для X ближайшей точки
+        'near_node_y': [-10000.0, 10000.0],  # Пример диапазона для Y ближайшей точки
+        'far_node_x': [-10000.0, 10000.0],  # Пример диапазона для X дальней точки
+        'far_node_y': [-10000.0, 10000.0],  # Пример диапазона для Y дальней точки
+        'angle_near': [-180, 180],  # Обновленный диапазон для угла до ближайшей точки
+        'angle_far': [-180, 180],  # Обновленный диапазон для угла до дальней точки
+        'distanse': [0.0, 20.0],  # Диапазон для дистанции до препятствия [0, max_check_distance]
+        'steer_sequence': [-1.0, 1.0],  # Диапазон для руля
+        'throttle_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
+        'brake_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
+        'steer': [-1.0, 1.0],  # Цель руля
+        'throttle': [0.0, 1.0],  # Цель газа
+        'brake': [0.0, 1.0]  # Цель тормоза
+    }
+
     # 2. Гиперпараметры и пути
     DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/autopilot_behavior_data'
     TRAIN_ROOT = os.path.join(DATA_ROOT, 'train')
@@ -52,32 +73,32 @@ if __name__ == '__main__':
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # 4. Построение датасетов и загрузчиков
-    train_dataset = build_concat_dataset(TRAIN_ROOT, NUM_NEAR, NUM_FAR)
-    val_dataset = build_concat_dataset(VAL_ROOT, NUM_NEAR, NUM_FAR)
+    train_dataset = build_concat_dataset(TRAIN_ROOT, NUM_NEAR, NUM_FAR, stats)
+    val_dataset = build_concat_dataset(VAL_ROOT, NUM_NEAR, NUM_FAR, stats)
     dtrain = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True
     )
     dval = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True
     )
 
     # 5. Модель, оптимизатор, loss и AMP scaler
     model = ImprovedCarlaAutopilotNet(
         depth_channels=1,
-        seg_channels=3,
+        seg_channels=2,
         img_emb_dim=1024,
         rnn_input=4,
         rnn_hidden=512,
         cont_feat_dim=10,
-        signal_dim=1,
+        signal_dim=2,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
         mlp_hidden=1024
@@ -112,7 +133,7 @@ if __name__ == '__main__':
 
     # 6. Тренировочная функция
     def configure_optimizers(model, lr, total_steps):
-        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-3,)
+        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-2,)
         scheduler = OneCycleLR(
             optimizer,
             max_lr=lr,
@@ -197,8 +218,9 @@ if __name__ == '__main__':
         results = {name: m.compute().item() for name, m in metrics.items()}
         return avg_loss, results
 
+        # Аналогично обновляем функцию validate
 
-    # Аналогично обновляем функцию validate
+
     def validate(
             loader, model, criterion, device, metrics
     ):
@@ -275,10 +297,10 @@ if __name__ == '__main__':
     history_len = 20
 
     dummy_depth = torch.randn(batch_size, 1, 333, 592).to(DEVICE)
-    dummy_seg = torch.randn(batch_size, 3, 333, 592).to(DEVICE)
+    dummy_seg = torch.randn(batch_size, 2, 333, 592).to(DEVICE)
     dummy_history = torch.randn(batch_size, history_len, 4).to(DEVICE)
     dummy_cont_feats = torch.randn(batch_size, 10).to(DEVICE)
-    dummy_signal_vec = torch.randn(batch_size, 1).to(DEVICE)
+    dummy_signal_vec = torch.randn(batch_size, 2).to(DEVICE)
     dummy_near_cmd = torch.randn(batch_size, 7).to(DEVICE)
     dummy_far_cmd = torch.randn(batch_size, 7).to(DEVICE)
 
@@ -322,10 +344,13 @@ if __name__ == '__main__':
                 )
             )
             traced_model.save('best_model_traced_last_layer.pt')
+            print("Saved best model")
+            best_val = val_loss
 
         if epoch == 20:
             torch.save(model_to_save.state_dict(), 'model_20.pth')
             traced_model.save('model_20_traced.pt')
+            print("Saved model at epoch 20")
 
-            best_val = val_loss
-            print("Saved best model")
+
+    print("Training finished.")

@@ -51,6 +51,8 @@ class BehaviorAgent(BasicAgent):
         self._behavior = None
         self._sampling_resolution = 4.5
 
+        self.is_red_light_present_log = False
+
         # Parameters for agent behavior
         if behavior == 'cautious':
             self._behavior = Cautious()
@@ -251,9 +253,9 @@ class BehaviorAgent(BasicAgent):
 
         ego_vehicle_loc = self._vehicle.get_location()
         ego_vehicle_wp = self._map.get_waypoint(ego_vehicle_loc)
-
+        self.is_red_light_present_log = self.traffic_light_manager()
         # 1: Red lights and stops behavior
-        if self.traffic_light_manager():
+        if self.is_red_light_present_log:
             return self.emergency_stop()
 
         # 2.1: Pedestrian avoidance behaviors

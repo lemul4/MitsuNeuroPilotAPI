@@ -155,89 +155,64 @@ class CallBack(object):
 
     # Parsing CARLA physical Sensors
     def _parse_image_cb(self, image, tag):
-        if 'depth' in tag:
-            # Преобразуем изображение в логарифмическую глубину
+        if 'depth' in tag:  # Предполагаем, что tag - это строка или метаданные сенсора
+            # Используем ColorConverter.Depth для получения линейной глубины в буфере
+            # ВАЖНО: Это преобразует сырые данные в буфере image в формат,
+            # который ДАЛЕЕ будет декодирован как линейная глубина.
             image.convert(carla.ColorConverter.LogarithmicDepth)
 
-            # Преобразуем данные изображения в массив NumPy
+            # Преобразуем данные изображения в массив NumPy (формат BGRA)
             array = np.frombuffer(image.raw_data, dtype=np.uint8)
-            array = array.reshape((image.height, image.width, 4))  # Формат BGRA
+            array = array.reshape((image.height, image.width, 4))
 
-            # Извлекаем каналы B, G и R
+            # Извлекаем каналы B, G и R для декодирования линейной глубины
             B = array[:, :, 0].astype(np.float32)
             G = array[:, :, 1].astype(np.float32)
             R = array[:, :, 2].astype(np.float32)
 
-            # Вычисляем нормализованную глубину
-            normalized_depth = (R + G * 256 + B * 256 * 256) / (256 ** 3 - 1)
+            # Декодируем линейную глубину из BGRA в нормализованный диапазон [0, 1]
+            # Эта формула корректна для ColorConverter.Depth
+            raw_log_depth_value = R + G * 256 + B * 256 * 256
 
-            # Преобразуем нормализованную глубину в метры (максимальная глубина 1000 м)
-            depth_meters = normalized_depth * 1000.0
+            # Нормализуем это сырое значение к диапазону [0, 1].
+            # Это значение [0, 1] теперь представляет логарифмическую глубину, нормализованную к [0, 1].
+            # Оно НЕ является линейной глубиной в метрах или нормализованной линейной глубиной!
+
+            normalized_logarithmic_depth = raw_log_depth_value
 
             # Обновляем данные сенсора
-            self._data_provider.update_sensor(tag, depth_meters, image.frame)
+            self._data_provider.update_sensor(tag, normalized_logarithmic_depth, image.frame)
 
         elif 'instance' in tag:
-            LABEL_COLORS = np.array([
-                (0, 0, 0),  # Unlabeled
-                (128, 64, 128),  # Road
-                (244, 35, 232),  # Sidewalk
-                (70, 70, 70),  # Building
-                (102, 102, 156),  # Wall
-                (190, 153, 153),  # Fence
-                (153, 153, 153),  # Pole
-                (250, 170, 30),  # Traffic Light
-                (220, 220, 0),  # Traffic Sign
-                (107, 142, 35),  # Vegetation
-                (152, 251, 152),  # Terrain
-                (70, 130, 180),  # Sky
-                (220, 20, 60),  # Pedestrian
-                (255, 0, 0),  # Rider
-                (0, 0, 142),  # Car
-                (0, 0, 70),  # Truck
-                (0, 60, 100),  # Bus
-                (0, 80, 100),  # Train
-                (0, 0, 230),  # Motorcycle
-                (119, 11, 32),  # Bicycle
-                (110, 190, 160),  # Static
-                (170, 120, 50),  # Dynamic
-                (55, 90, 80),  # Other
-                (45, 60, 150),  # Water
-                (157, 234, 50),  # Road Line
-                (81, 0, 81),  # Ground
-                (150, 100, 100),  # Bridge
-                (230, 150, 140),  # Rail Track
-                (180, 165, 180)  # Guard Rail
-            ]) / 255.0
+            DESIRED_IDS = {12, 13, 14, 15, 16, 17, 18, 19}
 
-            PALETTE = (LABEL_COLORS * 255).astype(np.uint8)
-            DESIRED_IDS = {12, 13, 14, 15, 16, 17, 18, 19, }
-            array = np.frombuffer(image.raw_data, dtype=np.uint8)
-            array = array.reshape((image.height, image.width, 4))
+            array = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
 
-            # split
             B = array[:, :, 0].astype(np.uint16)
             G = array[:, :, 1].astype(np.uint16)
-            sem = array[:, :, 2].astype(np.uint8)  # semantic id
-            inst_id = B + (G << 8)  # уникальный instance id
+            sem = array[:, :, 2].astype(np.uint8)  # semantic class id
+            inst_id = B + (G << 8)
 
-            # подготовим выходное BGRA-поле
+            # выходной формат: (H, W, 4) — [semantic_id, instance_id, unused, alpha]
             out = np.zeros_like(array)
 
-            # 1) для НЕ-интересных семантических классов раскрашиваем по палитре
-            mask_semantic = ~np.isin(sem, list(DESIRED_IDS))
-            out[mask_semantic, :3] = PALETTE[sem[mask_semantic]]
-            out[mask_semantic, 3] = 255
+            # маска интересующих классов
+            mask_desired = np.isin(sem, list(DESIRED_IDS))
 
-            # 2) для интересных (истинных инстансов) закодируем inst_id в цвет
-            #    — можно любой способ, здесь просто разложим обратно в два канала + sem
-            mask_inst = ~mask_semantic
-            out[mask_inst, 0] = (inst_id[mask_inst] & 0xFF).astype(np.uint8)  # B
-            out[mask_inst, 1] = ((inst_id[mask_inst] >> 8) & 0xFF).astype(np.uint8)  # G
-            out[mask_inst, 2] = sem[mask_inst]  # R = semantic id
-            out[mask_inst, 3] = 255
+            # заполняем semantic id
+            out[:, :, 0] = sem
 
-            # и обновляем сенсор
+            # только для интересных классов записываем instance_id, иначе — 0
+            out[mask_desired, 1] = (inst_id[mask_desired] & 0xFF).astype(np.uint8)  # младший байт
+            # если тебе нужен полный instance id (до 16 бит), можно использовать 2 байта:
+            # out[mask_desired, 1] = (inst_id[mask_desired] & 0xFF).astype(np.uint8)
+            # out[mask_desired, 2] = ((inst_id[mask_desired] >> 8) & 0xFF).astype(np.uint8)
+
+            # alpha-канал — непрозрачный
+            out[:, :, 2] = 0
+            out[:, :, 3] = 0
+
+            # обновляем сенсор
             self._data_provider.update_sensor(tag, out, image.frame)
 
         elif 'semantic' in tag:
