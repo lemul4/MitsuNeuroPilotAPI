@@ -1,3 +1,4 @@
+import math
 import os
 import glob
 import torch
@@ -33,15 +34,16 @@ def build_concat_dataset(root_dir, num_near, num_far, stats=None):
             )
     return ConcatDataset(datasets)
 
-def validate(loader, model, criterion, device, metrics):
+def validate(
+        loader, model, criterion, device, metrics
+):
     model.eval()
-    total_loss = 0.0
+    val_loss = 0.0
     for m in metrics.values():
         m.reset()
 
     with torch.no_grad():
-        for batch in tqdm(loader, desc='Testing'):
-            # Переносим данные на устройство
+        for batch in tqdm(loader, desc='Val'):
             depth = batch['depth'].to(device)
             seg = batch['segmentation'].to(device)
             hist = torch.stack([
@@ -58,18 +60,17 @@ def validate(loader, model, criterion, device, metrics):
             tgt_t = batch['throttle'].unsqueeze(1).to(device)
             tgt_b = batch['brake'].unsqueeze(1).to(device)
 
-            # Прямой проход
-            preds = model(depth, seg, hist, cont, sig, near, far)
-            loss = (1.5 * criterion(preds['steer'], tgt_s)
-                    + 0.75 * criterion(preds['throttle'], tgt_t)
-                    + 0.5 * criterion(preds['brake'], tgt_b))
-            total_loss += loss.item() * depth.size(0)
+            pred_steer, pred_throttle, pred_brake = model(depth, seg, hist, cont, sig, near, far)
+            loss = (1.5 * criterion(pred_steer, tgt_s)
+                    + 0.8 * criterion(pred_throttle, tgt_t)
+                    + 0.4 * criterion(pred_brake, tgt_b))
+            val_loss += loss.item() * depth.size(0)
 
-            # Обновление метрик
+            # Базовые метрики
             for prefix, pred, target in [
-                ('steer', preds['steer'], tgt_s),
-                ('throttle', preds['throttle'], tgt_t),
-                ('brake', preds['brake'], tgt_b)
+                ('steer', pred_steer, tgt_s),
+                ('throttle', pred_throttle, tgt_t),
+                ('brake', pred_brake, tgt_b)
             ]:
                 metrics[f'{prefix}_mae'].update(pred, target)
                 metrics[f'{prefix}_mse'].update(pred, target)
@@ -87,11 +88,11 @@ def validate(loader, model, criterion, device, metrics):
                 (mask_sharp, 'steer_sharp_turn')
             ]:
                 if mask.any():
-                    metrics[f'{prefix}_mae'].update(preds['steer'][mask], tgt_s[mask])
-                    metrics[f'{prefix}_mse'].update(preds['steer'][mask], tgt_s[mask])
-                    metrics[f'{prefix}_r2'].update(preds['steer'][mask], tgt_s[mask])
+                    metrics[f'{prefix}_mae'].update(pred_steer[mask], tgt_s[mask])
+                    metrics[f'{prefix}_mse'].update(pred_steer[mask], tgt_s[mask])
+                    metrics[f'{prefix}_r2'].update(pred_steer[mask], tgt_s[mask])
 
-    avg_loss = total_loss / len(loader.dataset)
+    avg_loss = val_loss / len(loader.dataset)
     results = {name: m.compute().item() for name, m in metrics.items()}
     return avg_loss, results
 
@@ -103,15 +104,34 @@ if __name__ == '__main__':
     cudnn.benchmark = True
     cudnn.deterministic = False
 
+    stats = {
+        'x': [-10000.0, 10000.0],  # Пример диапазона X-координаты
+        'y': [-10000.0, 10000.0],  # Пример диапазона Y-координаты
+        'theta': [0.0, 2 * math.pi],  # Обновленный диапазон для theta (радианы)
+        'speed': [-5.0, 15.0],  # Пример диапазона скорости (м/с)
+        'near_node_x': [-10000.0, 10000.0],  # Пример диапазона для X ближайшей точки
+        'near_node_y': [-10000.0, 10000.0],  # Пример диапазона для Y ближайшей точки
+        'far_node_x': [-10000.0, 10000.0],  # Пример диапазона для X дальней точки
+        'far_node_y': [-10000.0, 10000.0],  # Пример диапазона для Y дальней точки
+        'angle_near': [-180, 180],  # Обновленный диапазон для угла до ближайшей точки
+        'angle_far': [-180, 180],  # Обновленный диапазон для угла до дальней точки
+        'distanse': [0.0, 20.0],  # Диапазон для дистанции до препятствия [0, max_check_distance]
+        'steer_sequence': [-1.0, 1.0],  # Диапазон для руля
+        'throttle_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
+        'brake_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
+        'steer': [-1.0, 1.0],  # Цель руля
+        'throttle': [0.0, 1.0],  # Цель газа
+        'brake': [0.0, 1.0]  # Цель тормоза
+    }
     # Параметры
     DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/autopilot_behavior_data'
     VAL_ROOT = os.path.join(DATA_ROOT, 'val')
-    BATCH_SIZE = 16
+    BATCH_SIZE = 12
     NUM_NEAR = 7
     NUM_FAR = 7
 
     # Собираем валидационный датасет и загрузчик
-    val_dataset = build_concat_dataset(VAL_ROOT, NUM_NEAR, NUM_FAR)
+    val_dataset = build_concat_dataset(VAL_ROOT, NUM_NEAR, NUM_FAR, stats)
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
@@ -123,17 +143,17 @@ if __name__ == '__main__':
     # Инициализируем модель и загружаем веса
     model = ImprovedCarlaAutopilotNet(
         depth_channels=1,
-        seg_channels=3,
-        img_emb_dim=512,
+        seg_channels=2,
+        img_emb_dim=1024,
         rnn_input=4,
         rnn_hidden=512,
         cont_feat_dim=10,
-        signal_dim=1,
+        signal_dim=2,
         near_cmd_dim=NUM_NEAR,
         far_cmd_dim=NUM_FAR,
-        mlp_hidden=512
+        mlp_hidden=1024
     ).to(DEVICE)
-    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_no_acs.pth', map_location=DEVICE)
+    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_04loss.pth', map_location=DEVICE)
     model.load_state_dict(checkpoint)
     print("Loaded model")
 

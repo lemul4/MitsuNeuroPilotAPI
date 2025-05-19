@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class EfficientNetEncoder(nn.Module):
-    def __init__(self, in_channels=3, out_dim=1024, backbone='efficientnet_lite0', spatial_grid_size=8):
+    def __init__(self, in_channels=2, out_dim=1024, backbone='efficientnet_lite0', spatial_grid_size=8):
         super().__init__()
         self.backbone = timm.create_model(
             backbone,
@@ -34,7 +34,7 @@ class EfficientNetEncoder(nn.Module):
             nn.Linear(pooled_flattened_dim, out_dim),
             nn.BatchNorm1d(out_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.15)
+            nn.Dropout(0.35)
         )
 
     def forward(self, x):
@@ -59,7 +59,7 @@ class EfficientNetEncoder(nn.Module):
         return output
 
 class HistoryAttentionRNN(nn.Module):
-    def __init__(self, input_size, hidden_size=512, num_layers=2, dropout=0.1):
+    def __init__(self, input_size, hidden_size=512, num_layers=2, dropout=0.35):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -98,7 +98,7 @@ class CrossAttentionFusion(nn.Module):
 
 
 class ResidualMLPBlock(nn.Module):
-    def __init__(self, dim, dropout=0.15):
+    def __init__(self, dim, dropout=0.4):
         super().__init__()
         self.block = nn.Sequential(
             nn.Linear(dim, dim),
@@ -117,12 +117,12 @@ class ImprovedCarlaAutopilotNet(nn.Module):
     def __init__(
         self,
         depth_channels=1,
-        seg_channels=3,
+        seg_channels=2,
         img_emb_dim=1024,
         rnn_input=4,
         rnn_hidden=512,
-        cont_feat_dim=10,
-        signal_dim=1,
+        cont_feat_dim=11,
+        signal_dim=2,
         near_cmd_dim=7,
         far_cmd_dim=7,
         mlp_hidden=1024
@@ -136,7 +136,7 @@ class ImprovedCarlaAutopilotNet(nn.Module):
             input_size=rnn_input,
             hidden_size=rnn_hidden,
             num_layers=2,
-            dropout=0.15
+            dropout=0.35
         )
 
         self.feature_gate = nn.Sequential(
@@ -154,7 +154,7 @@ class ImprovedCarlaAutopilotNet(nn.Module):
             nn.Linear(mlp_in, mlp_hidden),
             nn.BatchNorm1d(mlp_hidden),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.15),
+            nn.Dropout(0.4),
             ResidualMLPBlock(mlp_hidden),
             ResidualMLPBlock(mlp_hidden)
         )

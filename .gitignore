@@ -10,4 +10,4 @@
 /.venv1/
 /.venv/
 /recordings/
-/packages/leaderboard/results.json
+/dataset/results.json

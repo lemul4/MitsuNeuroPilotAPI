@@ -145,7 +145,7 @@ class RouteScenario(BasicScenario):
         transform = self.route[0][0]
         transform.location.z += 0.5
         ego_vehicle = CarlaDataProvider.request_new_actor(
-            'vehicle.lincoln.mkz_2020', transform, rolename='hero'
+            'vehicle.audi.a2', transform, rolename='hero'
         )
         if not ego_vehicle:
             return
