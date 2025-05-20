@@ -147,11 +147,13 @@ class CarlaDatasetLoader(Dataset):
         steer_seq_raw = np.array(data['steer_sequence'], dtype=np.float32)
         thr_seq_raw = np.array(data['throttle_sequence'], dtype=np.float32)
         br_seq_raw = np.array(data['brake_sequence'], dtype=np.float32)
+        light_seq_raw = np.array(data['light_sequence'], dtype=np.float32)
 
         speed_seq = self._normalize('speed', sp_seq_raw)
         steer_seq = self._normalize('steer', steer_seq_raw)
         throttle_seq = self._normalize('throttle', thr_seq_raw)
         brake_seq = self._normalize('brake', br_seq_raw)
+        light_seq = self._normalize('light', light_seq_raw)
 
         red = int(data['is_red_light_present'])
         colosion = int(data['is_collision_event'])
@@ -184,6 +186,7 @@ class CarlaDatasetLoader(Dataset):
             'steer_sequence': steer_seq,
             'throttle_sequence': throttle_seq,
             'brake_sequence': brake_seq,
+            'light_sequence': light_seq,
             'steer': steer,
             'throttle': throttle,
             'brake': brake
