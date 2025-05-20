@@ -30,16 +30,19 @@ if __name__ == '__main__':
     def build_concat_dataset(root_dir, num_near, num_far, stats=None):
         run_dirs = sorted(glob.glob(os.path.join(root_dir, 'Town*', '*')))
         datasets = []
+        i=1
         for run in run_dirs:
-            depth = os.path.join(run, 'depth_front')
-            seg = os.path.join(run, 'instance_segmentation_front')
-            meas = os.path.join(run, 'measurements')
-            if os.path.isdir(depth) and os.path.isdir(seg) and os.path.isdir(meas):
-                datasets.append(
-                    CarlaDatasetLoader(run, num_near_commands=num_near,
-                                       num_far_commands=num_far,
-                                       stats=stats)
-                )
+            if i % 2 == 0:
+                depth = os.path.join(run, 'depth_front')
+                seg = os.path.join(run, 'instance_segmentation_front')
+                meas = os.path.join(run, 'measurements')
+                if os.path.isdir(depth) and os.path.isdir(seg) and os.path.isdir(meas):
+                    datasets.append(
+                        CarlaDatasetLoader(run, num_near_commands=num_near,
+                                           num_far_commands=num_far,
+                                           stats=stats)
+                    )
+            i += 1
         return ConcatDataset(datasets)
 
 
@@ -58,9 +61,11 @@ if __name__ == '__main__':
         'steer_sequence': [-1.0, 1.0],  # Диапазон для руля
         'throttle_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
         'brake_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
+        'light_sequence': [0.0, 1.0],
         'steer': [-1.0, 1.0],  # Цель руля
         'throttle': [0.0, 1.0],  # Цель газа
-        'brake': [0.0, 1.0]  # Цель тормоза
+        'brake': [0.0, 1.0],  # Цель тормоза
+        'light': [0.0, 1.0],
     }
 
     # 2. Гиперпараметры и пути
@@ -95,7 +100,7 @@ if __name__ == '__main__':
         depth_channels=1,
         seg_channels=2,
         img_emb_dim=1024,
-        rnn_input=4,
+        rnn_input=5,
         rnn_hidden=512,
         cont_feat_dim=10,
         signal_dim=2,
@@ -161,7 +166,8 @@ if __name__ == '__main__':
                 batch['speed_sequence'],
                 batch['steer_sequence'],
                 batch['throttle_sequence'],
-                batch['brake_sequence']
+                batch['brake_sequence'],
+                batch['light_sequence'],
             ], dim=-1).to(device, non_blocking=True)
             cont = batch['cont_feats'].to(device, non_blocking=True)
             sig = batch['signal_vec'].to(device, non_blocking=True)
@@ -237,7 +243,8 @@ if __name__ == '__main__':
                     batch['speed_sequence'],
                     batch['steer_sequence'],
                     batch['throttle_sequence'],
-                    batch['brake_sequence']
+                    batch['brake_sequence'],
+                    batch['light_sequence'],
                 ], dim=-1).to(device)
                 cont = batch['cont_feats'].to(device)
                 sig = batch['signal_vec'].to(device)
@@ -298,7 +305,7 @@ if __name__ == '__main__':
 
     dummy_depth = torch.randn(batch_size, 1, 333, 592).to(DEVICE)
     dummy_seg = torch.randn(batch_size, 2, 333, 592).to(DEVICE)
-    dummy_history = torch.randn(batch_size, history_len, 4).to(DEVICE)
+    dummy_history = torch.randn(batch_size, history_len, 5).to(DEVICE)
     dummy_cont_feats = torch.randn(batch_size, 10).to(DEVICE)
     dummy_signal_vec = torch.randn(batch_size, 2).to(DEVICE)
     dummy_near_cmd = torch.randn(batch_size, 7).to(DEVICE)
@@ -330,7 +337,15 @@ if __name__ == '__main__':
                 model_to_save = model.orig_mod  # Получаем исходную модель
             else:
                 model_to_save = model
-            torch.save(model_to_save.state_dict(), 'best_model.pth')
+            torch.save({
+                'epoch': epoch,
+            'model_state_dict': model_to_save.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'val_loss': val_loss,
+                'train_loss': train_loss,
+            }, 'best_model_checkpoint.pth')
             traced_model = torch.jit.trace(
                 model_to_save,
                 (

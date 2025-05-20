@@ -45,9 +45,11 @@ stats = {
         'steer_sequence': [-1.0, 1.0],  # Диапазон для руля
         'throttle_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
         'brake_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
+        'light_sequence': [0.0, 1.0],
         'steer': [-1.0, 1.0],  # Цель руля
         'throttle': [0.0, 1.0],  # Цель газа
-        'brake': [0.0, 1.0]  # Цель тормоза
+        'brake': [0.0, 1.0],  # Цель тормоза
+        'light': [0.0, 1.0],
     }
 
 def get_entry_point():
@@ -82,10 +84,14 @@ class AutopilotAgent(AutonomousAgent):
         self.last_throttle = 0.0
         self.last_steer = 0.0
         self.last_speed = 0.0
+        self.last_light = 0
+
         self.speed_sequence = deque(np.zeros(20), maxlen=20)
         self.brake_sequence = deque(np.zeros(20), maxlen=20)
         self.throttle_sequence = deque(np.zeros(20), maxlen=20)
         self.steer_sequence = deque(np.zeros(20), maxlen=20)
+        self.light_sequence = deque(np.zeros(20), maxlen=20)
+
         self.angle_far_unnorm = 0.0
         self.is_red_light_present_log = 0
         self.is_stops_present_log = 0
@@ -104,12 +110,12 @@ class AutopilotAgent(AutonomousAgent):
 
         self.model = ImprovedCarlaAutopilotNet(
             depth_channels=1,
-            seg_channels=3,
+            seg_channels=2,
             img_emb_dim=1024,
-            rnn_input=4,
+            rnn_input=5,
             rnn_hidden=512,
             cont_feat_dim=10,
-            signal_dim=1,
+            signal_dim=2,
             near_cmd_dim=7,
             far_cmd_dim=7,
             mlp_hidden=1024
@@ -285,6 +291,7 @@ class AutopilotAgent(AutonomousAgent):
         self.throttle_sequence.append(self.last_throttle)
         self.brake_sequence.append(self.last_brake)
         self.speed_sequence.append(self.last_speed)
+        self.light_sequence.append(self.last_light)
 
         self.is_red_light_present_log = 1 if self._agent.is_red_light_present_log else 0
 
@@ -348,7 +355,7 @@ class AutopilotAgent(AutonomousAgent):
             'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
             'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
             'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
-
+            'light_sequence': np.array(self.light_sequence, dtype=np.float32).tolist(),
             'is_collision_event': self.is_collision,
         }
 
@@ -374,7 +381,8 @@ class AutopilotAgent(AutonomousAgent):
             sample['speed_sequence'],
             sample['steer_sequence'],
             sample['throttle_sequence'],
-            sample['brake_sequence']
+            sample['brake_sequence'],
+            sample['light_sequence']
         ], dim=-1).unsqueeze(0).to(self.DEVICE)
         cont = sample['cont_feats'].unsqueeze(0).to(self.DEVICE)
         sig = sample['signal_vec'].unsqueeze(0).to(self.DEVICE)
@@ -432,6 +440,7 @@ class AutopilotAgent(AutonomousAgent):
             'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
             'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
             'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
+            'light_sequence': np.array(self.light_sequence, dtype=np.float32).tolist(),
 
             'is_collision_event': self.is_collision,
         }
@@ -445,6 +454,7 @@ class AutopilotAgent(AutonomousAgent):
         self.last_throttle = float(control.throttle)
         self.last_brake = float(control.brake)
         self.last_speed = float(current_speed_m_s)
+        self.last_light = self.is_red_light_present_log
         self.is_collision = False
 
         return control

@@ -3,12 +3,12 @@
 # Устанавливаем переменные окружения
 $env:LEADERBOARD_ROOT = "$PSScriptRoot\packages\leaderboard"
 $env:TEAM_AGENT = "team_code\agents\autopilot_agent.py"
-$env:ROUTES = "$env:LEADERBOARD_ROOT\data\updated_routes_town02_long.xml"
+$env:ROUTES = "$env:LEADERBOARD_ROOT\data\merged_routes.xml"
 $env:ROUTES_SUBSET = "1" # номер сценария
 $env:REPETITIONS = "1"
-$env:DEBUG_CHALLENGE = "1"
+$env:DEBUG_CHALLENGE = "0"
 $env:CHALLENGE_TRACK_CODENAME = "SENSORS"
-$env:CHECKPOINT_ENDPOINT = "$env:LEADERBOARD_ROOT\results.json"
+$env:CHECKPOINT_ENDPOINT = "dataset\autopilot_behavior_data\results.json"
 $env:RECORD_PATH = ""
 $env:RESUME = ""
 

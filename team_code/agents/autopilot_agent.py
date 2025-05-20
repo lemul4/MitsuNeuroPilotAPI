@@ -38,7 +38,6 @@ class AutopilotAgent(AutonomousAgent):
 
     def __init__(self, carla_host, carla_port, debug=False):
         super().__init__(carla_host, carla_port, debug)
-        self.last_light = 0
         self.angle_to_far_waypoint_deg = 0
         self.angle_to_near_waypoint_deg = 0
         self.debug = debug or DEBUG
@@ -56,11 +55,14 @@ class AutopilotAgent(AutonomousAgent):
         self.last_throttle = 0.0
         self.last_steer = 0.0
         self.last_speed = 0.0
+        self.last_light = 0
+
         self.speed_sequence = deque(np.zeros(20), maxlen=20)
         self.brake_sequence = deque(np.zeros(20), maxlen=20)
         self.throttle_sequence = deque(np.zeros(20), maxlen=20)
         self.steer_sequence = deque(np.zeros(20), maxlen=20)
         self.light_sequence = deque(np.zeros(20), maxlen=20)
+
         self.angle_far_unnorm = 0.0
         self.is_red_light_present_log = 0
         self.is_stops_present_log = 0
