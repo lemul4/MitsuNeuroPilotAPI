@@ -8,58 +8,43 @@ class EfficientNetEncoder(nn.Module):
         super().__init__()
         self.backbone = timm.create_model(
             backbone,
-            pretrained=False, # Consider setting to True for transfer learning
+            pretrained=False,
             features_only=True,
             in_chans=in_channels
         )
 
-        # feature_info содержит информацию о каналах на каждом уровне
         self.feature_info = self.backbone.feature_info
-        # Нам нужен только последний уровень
         last_level_info = self.feature_info[-1]
         self.last_layer_channels = last_level_info['num_chs']
 
         self.spatial_grid_size = spatial_grid_size
 
-        # Адаптивный пулинг до фиксированной сетки
-        # Например, если spatial_grid_size=4, то пулит до HxW = 4x4
         self.spatial_pool = nn.AdaptiveAvgPool2d(self.spatial_grid_size)
 
-        # Размерность после пулинга и разворачивания
         pooled_flattened_dim = self.last_layer_channels * (self.spatial_grid_size ** 2)
 
-        # Проекция в финальную размерность out_dim
         self.proj = nn.Sequential(
-            nn.Flatten(), # На всякий случай, хотя flatten(1) будет сделан явно
+            nn.Flatten(),
             nn.Linear(pooled_flattened_dim, out_dim),
             nn.BatchNorm1d(out_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.35)
+            nn.Dropout(0.2)
         )
 
     def forward(self, x):
-        # Получаем признаки со всех уровней
         feats = self.backbone(x)
-
-        # Берем признаки только с последнего уровня
-        # feats[-1] это тензор с формой (B, C_last, H_last, W_last)
         last_feat = feats[-1]
 
-        # Применяем адаптивный пулинг до фиксированной сетки
-        # Выход будет (B, C_last, spatial_grid_size, spatial_grid_size)
         pooled_feat = self.spatial_pool(last_feat)
 
-        # Разворачиваем пространственные измерения в одно
-        # Выход будет (B, C_last * spatial_grid_size * spatial_grid_size)
-        flattened_feat = pooled_feat.flatten(1) # Начиная с 1-й размерности (после батча)
+        flattened_feat = pooled_feat.flatten(1)
 
-        # Проецируем в финальную размерность
         output = self.proj(flattened_feat)
 
         return output
 
 class HistoryAttentionRNN(nn.Module):
-    def __init__(self, input_size, hidden_size=512, num_layers=2, dropout=0.35):
+    def __init__(self, input_size, hidden_size=512, num_layers=2, dropout=0.2):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -88,17 +73,16 @@ class CrossAttentionFusion(nn.Module):
         self.value = nn.Linear(dim, dim)
 
     def forward(self, x1, x2):
-        q = self.query(x1)  # B x D
+        q = self.query(x1)
         k = self.key(x2)
         v = self.value(x2)
-        # Взаимодействие x1 с x2
-        attn = torch.sigmoid(q * k)  # или dot-product q @ k.T
+        attn = torch.sigmoid(q * k)
         fused = attn * v
-        return fused + x1  # residual
+        return fused + x1
 
 
 class ResidualMLPBlock(nn.Module):
-    def __init__(self, dim, dropout=0.4):
+    def __init__(self, dim, dropout=0.25):
         super().__init__()
         self.block = nn.Sequential(
             nn.Linear(dim, dim),
@@ -119,9 +103,9 @@ class ImprovedCarlaAutopilotNet(nn.Module):
         depth_channels=1,
         seg_channels=2,
         img_emb_dim=1024,
-        rnn_input=4,
+        rnn_input=5,
         rnn_hidden=512,
-        cont_feat_dim=11,
+        cont_feat_dim=10,
         signal_dim=2,
         near_cmd_dim=7,
         far_cmd_dim=7,
@@ -136,7 +120,7 @@ class ImprovedCarlaAutopilotNet(nn.Module):
             input_size=rnn_input,
             hidden_size=rnn_hidden,
             num_layers=2,
-            dropout=0.35
+            dropout=0.2
         )
 
         self.feature_gate = nn.Sequential(
@@ -154,7 +138,7 @@ class ImprovedCarlaAutopilotNet(nn.Module):
             nn.Linear(mlp_in, mlp_hidden),
             nn.BatchNorm1d(mlp_hidden),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.4),
+            nn.Dropout(0.25),
             ResidualMLPBlock(mlp_hidden),
             ResidualMLPBlock(mlp_hidden)
         )

@@ -5,37 +5,43 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from skimage import io
-
-import math
+import orjson
 
 class CarlaDatasetLoader(Dataset):
-    def __init__(self, root_dir, num_near_commands: int = 7, num_far_commands: int = 7, stats: dict = None):
+    def __init__(self, root_dir, num_near_commands: int = 7, num_far_commands: int = 7, stats: dict = None, keep_every_n: int = 1, repeat_count: int = 1):
         self.root_dir = root_dir
         subs = ["depth_front", "instance_segmentation_front", "measurements"]
         self.depth_dir = os.path.join(root_dir, subs[0])
         self.seg_dir = os.path.join(root_dir, subs[1])
         self.meas_dir = os.path.join(root_dir, subs[2])
 
-        # --- Измененная логика ---
-
         depth_files = {os.path.splitext(f)[0] for f in os.listdir(self.depth_dir) if f.endswith('.png')}
         seg_files = {os.path.splitext(f)[0] for f in os.listdir(self.seg_dir) if f.endswith('.png')}
         meas_files = {os.path.splitext(f)[0] for f in os.listdir(self.meas_dir) if f.endswith('.json')}
 
-        # Находим пересечение - только те имена, для которых есть все 3 файла
-        self.valid_frames = sorted(list(depth_files.intersection(seg_files).intersection(meas_files)))
+        all_valid = sorted(depth_files.intersection(seg_files).intersection(meas_files))
+        all_valid = [f for f in all_valid if f.isdigit()]
 
-        # Проверяем, что имена действительно похожи на числа ('0000', '0001', etc.)
-        # и удаляем те, что не являются, если такие попались
-        self.valid_frames = [f for f in self.valid_frames if f.isdigit()]
+        self.valid_frames = []
 
+        for i, f in enumerate(all_valid):
+            meas_path = os.path.join(self.meas_dir, f + ".json")
+            try:
+                with open(meas_path, 'r') as jf:
+                    data = orjson.loads(jf.read())
+                    near_command = data.get("near_command")
+                    far_command = data.get("far_command")
+                    red_light = int(data.get("is_red_light_present"))
+                    light_seq = np.array(data.get("light_sequence"), dtype=np.float32)
 
-        if not self.valid_frames:
-            print(f"Warning: No valid frames found in {root_dir}. This dataset part will be empty.")
-        # self.len = len(os.listdir(self.meas_dir)) # Старая строка, заменяем на:
+                    if near_command != 4 or far_command != 4 or (red_light == 0 and light_seq[-1] == 1):
+                        self.valid_frames.extend([f] * repeat_count)
+                    elif keep_every_n > 0 and i % keep_every_n == 0:
+                        self.valid_frames.append(f)
+            except Exception as e:
+                print(f"Failed to load {meas_path}: {e}")
+
         self.len = len(self.valid_frames)
-        # --- Конец измененной логики ---
-
         self.num_near = num_near_commands
         self.num_far = num_far_commands
         self.stats = stats or {}
@@ -105,7 +111,7 @@ class CarlaDatasetLoader(Dataset):
 
         # Load measurements
         with open(meas_path, 'r') as f:
-            data = json.load(f)
+            data = orjson.loads(f.read())
 
         # Raw continuous
         x, y = data['x'], data['y']

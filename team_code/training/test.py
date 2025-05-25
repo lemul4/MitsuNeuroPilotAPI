@@ -22,16 +22,19 @@ torch.multiprocessing.set_start_method('spawn', force=True)
 def build_concat_dataset(root_dir, num_near, num_far, stats=None):
     run_dirs = sorted(glob.glob(os.path.join(root_dir, 'town*', '*')))
     datasets = []
+    i = 0
     for run in run_dirs:
-        depth = os.path.join(run, 'depth_front')
-        seg = os.path.join(run, 'instance_segmentation_front')
-        meas = os.path.join(run, 'measurements')
-        if os.path.isdir(depth) and os.path.isdir(seg) and os.path.isdir(meas):
-            datasets.append(
-                CarlaDatasetLoader(run, num_near_commands=num_near,
-                                   num_far_commands=num_far,
-                                   stats=stats)
-            )
+        if i % 2 == 0:
+            depth = os.path.join(run, 'depth_front')
+            seg = os.path.join(run, 'instance_segmentation_front')
+            meas = os.path.join(run, 'measurements')
+            if os.path.isdir(depth) and os.path.isdir(seg) and os.path.isdir(meas):
+                datasets.append(
+                    CarlaDatasetLoader(run, num_near_commands=num_near,
+                                       num_far_commands=num_far,
+                                       stats=stats)
+                )
+        i += 1
     return ConcatDataset(datasets)
 
 def validate(
@@ -50,7 +53,8 @@ def validate(
                 batch['speed_sequence'],
                 batch['steer_sequence'],
                 batch['throttle_sequence'],
-                batch['brake_sequence']
+                batch['brake_sequence'],
+                batch['light_sequence'],
             ], dim=-1).to(device)
             cont = batch['cont_feats'].to(device)
             sig = batch['signal_vec'].to(device)
@@ -61,7 +65,7 @@ def validate(
             tgt_b = batch['brake'].unsqueeze(1).to(device)
 
             pred_steer, pred_throttle, pred_brake = model(depth, seg, hist, cont, sig, near, far)
-            loss = (1.5 * criterion(pred_steer, tgt_s)
+            loss = (2.5 * criterion(pred_steer, tgt_s)
                     + 0.8 * criterion(pred_throttle, tgt_t)
                     + 0.4 * criterion(pred_brake, tgt_b))
             val_loss += loss.item() * depth.size(0)
@@ -96,6 +100,7 @@ def validate(
     results = {name: m.compute().item() for name, m in metrics.items()}
     return avg_loss, results
 
+
 if __name__ == '__main__':
     # Настройка устройства и cudnn
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -119,9 +124,11 @@ if __name__ == '__main__':
         'steer_sequence': [-1.0, 1.0],  # Диапазон для руля
         'throttle_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
         'brake_sequence': [0.0, 1.0],  # Обычно уже [0, 1]
+        'light_sequence': [0.0, 1.0],
         'steer': [-1.0, 1.0],  # Цель руля
         'throttle': [0.0, 1.0],  # Цель газа
-        'brake': [0.0, 1.0]  # Цель тормоза
+        'brake': [0.0, 1.0],  # Цель тормоза
+        'light': [0.0, 1.0],
     }
     # Параметры
     DATA_ROOT = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/dataset/autopilot_behavior_data'
@@ -145,7 +152,7 @@ if __name__ == '__main__':
         depth_channels=1,
         seg_channels=2,
         img_emb_dim=1024,
-        rnn_input=4,
+        rnn_input=5,
         rnn_hidden=512,
         cont_feat_dim=10,
         signal_dim=2,
@@ -153,9 +160,12 @@ if __name__ == '__main__':
         far_cmd_dim=NUM_FAR,
         mlp_hidden=1024
     ).to(DEVICE)
-    checkpoint = torch.load('C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_04loss.pth', map_location=DEVICE)
+    checkpoint = torch.load("C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/model_20_1.pth", map_location=DEVICE)
     model.load_state_dict(checkpoint)
     print("Loaded model")
+    model.eval()
+    batch_size = 1
+    history_len = 20
 
     # Определяем метрики
     metrics = {

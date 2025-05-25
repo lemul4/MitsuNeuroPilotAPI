@@ -3,6 +3,8 @@
 from __future__ import print_function
 
 import math
+from multiprocessing.util import debug
+
 import carla
 import torch
 
@@ -120,8 +122,8 @@ class AutopilotAgent(AutonomousAgent):
             far_cmd_dim=7,
             mlp_hidden=1024
         ).to(self.DEVICE)
-        self.model = torch.jit.load("C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_traced_04loss.pt", map_location=self.DEVICE)
-        # self.model.load_state_dict(torch.load("C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/best_model_last_layer.pth", map_location=self.DEVICE))
+        self.model = torch.jit.load("C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/model2_traced.pt", map_location=self.DEVICE)
+        # self.model.load_state_dict(torch.load("C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/model_2.pth", map_location=self.DEVICE))
         self.model.eval()
 
 
@@ -396,11 +398,6 @@ class AutopilotAgent(AutonomousAgent):
             throttle = pred_throttle.item()
             brake = pred_brake.item()
 
-        # Вывод управления
-        print(f"Predicted steer: {steer:.4f}")
-        print(f"Predicted throttle: {throttle:.4f}")
-        print(f"Predicted brake: {brake:.4f}")
-
         if throttle > 0.1 :
             brake = 0
 
@@ -408,48 +405,54 @@ class AutopilotAgent(AutonomousAgent):
         control.throttle = throttle
         control.brake = brake
 
-        measurement_data_updated = {
-            'timestamp': timestamp,
+        d=False
+        if d:
+            # Вывод управления
+            print(f"Predicted steer: {steer:.4f}")
+            print(f"Predicted throttle: {throttle:.4f}")
+            print(f"Predicted brake: {brake:.4f}")
+            measurement_data_updated = {
+                'timestamp': timestamp,
 
-            'x': vehicle_location.x,
-            'y': vehicle_location.y,
+                'x': vehicle_location.x,
+                'y': vehicle_location.y,
 
-            'speed': current_speed_m_s,
-            'theta': compass_rad,
+                'speed': current_speed_m_s,
+                'theta': compass_rad,
 
-            'near_node_x': log_near_node_coords[0],
-            'near_node_y': log_near_node_coords[1],
-            'near_command': log_near_node_cmd,
+                'near_node_x': log_near_node_coords[0],
+                'near_node_y': log_near_node_coords[1],
+                'near_command': log_near_node_cmd,
 
-            'far_node_x': log_far_node_coords[0],
-            'far_node_y': log_far_node_coords[1],
-            'far_command': log_far_node_cmd,
+                'far_node_x': log_far_node_coords[0],
+                'far_node_y': log_far_node_coords[1],
+                'far_command': log_far_node_cmd,
 
-            'angle_near': self.angle_to_near_waypoint_deg,
-            'angle_far': self.angle_to_far_waypoint_deg,
+                'angle_near': self.angle_to_near_waypoint_deg,
+                'angle_far': self.angle_to_far_waypoint_deg,
 
-            'steer': control.steer,
-            'throttle': control.throttle,
-            'brake': control.brake,
+                'steer': control.steer,
+                'throttle': control.throttle,
+                'brake': control.brake,
 
-            'is_red_light_present': self.is_red_light_present_log,
-            'vehicle_detected_flag': vehicle_detected_flag,
-            'distanse': distanse,
+                'is_red_light_present': self.is_red_light_present_log,
+                'vehicle_detected_flag': vehicle_detected_flag,
+                'distanse': distanse,
 
-            'steer_sequence': np.array(self.steer_sequence, dtype=np.float32).tolist(),
-            'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
-            'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
-            'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
-            'light_sequence': np.array(self.light_sequence, dtype=np.float32).tolist(),
+                'steer_sequence': np.array(self.steer_sequence, dtype=np.float32).tolist(),
+                'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
+                'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
+                'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
+                'light_sequence': np.array(self.light_sequence, dtype=np.float32).tolist(),
 
-            'is_collision_event': self.is_collision,
-        }
+                'is_collision_event': self.is_collision,
+            }
 
-        self.save_data_async(
-                image_depth=depth_front_data,
-                image_seg=inst_seg_data,
-                data=measurement_data_updated
-            )
+            self.save_data_async(
+                    image_depth=depth_front_data,
+                    image_seg=inst_seg_data,
+                    data=measurement_data_updated
+                )
         self.last_steer = float(control.steer)
         self.last_throttle = float(control.throttle)
         self.last_brake = float(control.brake)
