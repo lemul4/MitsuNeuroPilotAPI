@@ -30,21 +30,17 @@ if __name__ == '__main__':
     def build_concat_dataset(root_dir, num_near, num_far, stats=None):
         run_dirs = sorted(glob.glob(os.path.join(root_dir, 'Town*', '*')))
         datasets = []
-        i=1
         for run in run_dirs:
-            if i % 2 == 0:
-                depth = os.path.join(run, 'depth_front')
-                seg = os.path.join(run, 'instance_segmentation_front')
-                meas = os.path.join(run, 'measurements')
-                if os.path.isdir(depth) and os.path.isdir(seg) and os.path.isdir(meas):
-                    datasets.append(
-                        CarlaDatasetLoader(run, num_near_commands=num_near,
-                                           num_far_commands=num_far,
-                                           stats=stats)
-                    )
-            i += 1
+            depth = os.path.join(run, 'depth_front')
+            seg = os.path.join(run, 'instance_segmentation_front')
+            meas = os.path.join(run, 'measurements')
+            if os.path.isdir(depth) and os.path.isdir(seg) and os.path.isdir(meas):
+                datasets.append(
+                    CarlaDatasetLoader(run, num_near_commands=num_near,
+                                       num_far_commands=num_far,
+                                       stats=stats, keep_every_n=2, repeat_count=2)
+                )
         return ConcatDataset(datasets)
-
 
     stats = {
         'x': [-10000.0, 10000.0],  # Пример диапазона X-координаты
@@ -76,6 +72,14 @@ if __name__ == '__main__':
     NUM_NEAR = 7
     NUM_FAR = 7
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Параметры дообучения
+    PRETRAINED_MODEL_PATH = 'C:/Users/igors/PycharmProjects/MitsuNeuroPilotAPI/model_20_1.pth'  # Путь к вашей сохраненной модели
+    NUM_FINETUNE_EPOCHS = 15
+    FINETUNE_MAX_LR = 1e-4  # Уменьшенная скорость обучения для дообучения
+    BEST_FINETUNED_MODEL_SAVE_PATH = 'model_20_finetuned_best.pth'
+    TRACED_FINETUNED_MODEL_SAVE_PATH = 'model_20_finetuned_best_traced.pt'
+
 
     # 4. Построение датасетов и загрузчиков
     train_dataset = build_concat_dataset(TRAIN_ROOT, NUM_NEAR, NUM_FAR, stats)
@@ -109,6 +113,28 @@ if __name__ == '__main__':
         mlp_hidden=1024
     ).to(DEVICE)
 
+    # Загрузка весов предобученной модели
+    if os.path.exists(PRETRAINED_MODEL_PATH):
+        print(f"Загрузка весов из {PRETRAINED_MODEL_PATH} для дообучения...")
+        # Загружаем state_dict. Если модель была сохранена как полный чекпоинт, нужно извлечь model_state_dict
+        # В вашем случае, model_20.pth сохраняется как model.state_dict() напрямую
+        try:
+            model.load_state_dict(torch.load(PRETRAINED_MODEL_PATH, map_location=DEVICE))
+            print("Веса успешно загружены.")
+        except Exception as e:
+            print(
+                f"Ошибка при загрузке весов: {e}. Убедитесь, что файл {PRETRAINED_MODEL_PATH} содержит только state_dict модели.")
+            print("Попытка загрузить как чекпоинт...")
+            try:
+                checkpoint = torch.load(PRETRAINED_MODEL_PATH, map_location=DEVICE)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                print("Веса успешно загружены из чекпоинта.")
+            except Exception as e_chk:
+                print(f"Ошибка при загрузке весов из чекпоинта: {e_chk}. Обучение начнется с нуля.")
+    else:
+        print(
+            f"Предупреждение: Файл модели {PRETRAINED_MODEL_PATH} не найден. Обучение начнется с нуля (или со случайно инициализированными весами).")
+
     model = torch.compile(model, backend='eager')
 
     def create_metrics():
@@ -138,14 +164,14 @@ if __name__ == '__main__':
 
     # 6. Тренировочная функция
     def configure_optimizers(model, lr, total_steps):
-        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-2,)
+        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=5e-3,)
         scheduler = OneCycleLR(
             optimizer,
             max_lr=lr,
             total_steps=total_steps,
-            pct_start=0.1,
+            pct_start=0.2,
             anneal_strategy='cos',
-            final_div_factor=5e3
+            final_div_factor=1e3
         )
         return optimizer, scheduler
 
@@ -177,13 +203,13 @@ if __name__ == '__main__':
             tgt_t = batch['throttle'].unsqueeze(1).to(device)
             tgt_b = batch['brake'].unsqueeze(1).to(device)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             with autocast(device_type='cuda', dtype=torch.float16):
                 pred_steer, pred_throttle, pred_brake = model(depth, seg, hist, cont, sig, near, far)
                 loss_s = criterion(pred_steer, tgt_s)
                 loss_t = criterion(pred_throttle, tgt_t)
                 loss_b = criterion(pred_brake, tgt_b)
-                loss = 1.5 * loss_s + 0.8 * loss_t + 0.4 * loss_b
+                loss = 2.5 * loss_s + 0.8 * loss_t + 0.4 * loss_b
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -255,7 +281,7 @@ if __name__ == '__main__':
                 tgt_b = batch['brake'].unsqueeze(1).to(device)
 
                 pred_steer, pred_throttle, pred_brake = model(depth, seg, hist, cont, sig, near, far)
-                loss = (1.5 * criterion(pred_steer, tgt_s)
+                loss = (2.5 * criterion(pred_steer, tgt_s)
                         + 0.8 * criterion(pred_throttle, tgt_t)
                         + 0.4 * criterion(pred_brake, tgt_b))
                 val_loss += loss.item() * depth.size(0)
@@ -292,9 +318,8 @@ if __name__ == '__main__':
 
 
     # Основной цикл обучения с новыми метриками
-    num_epochs = 80
-    total_steps = num_epochs * len(dtrain)
-    optimizer, scheduler = configure_optimizers(model, 1e-3, total_steps)
+    total_steps = NUM_FINETUNE_EPOCHS * len(dtrain)
+    optimizer, scheduler = configure_optimizers(model, FINETUNE_MAX_LR, total_steps)
     scaler = GradScaler(device='cuda')
 
     train_metrics = create_metrics()
@@ -312,7 +337,7 @@ if __name__ == '__main__':
     dummy_far_cmd = torch.randn(batch_size, 7).to(DEVICE)
 
     best_val = float('inf')
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(1, NUM_FINETUNE_EPOCHS + 1):
         train_loss, train_res = train_one_epoch(
             dtrain, model, optimizer, scheduler,
             nn.MSELoss(), scaler, DEVICE, train_metrics
@@ -331,12 +356,12 @@ if __name__ == '__main__':
         print("  Val metrics:")
         for name, value in val_res.items():
             print(f"    {name}: {value:.4f}")
-
+        if isinstance(model, torch._dynamo.eval_frame.OptimizedModule):
+            model_to_save = model.orig_mod  # Получаем исходную модель
+        else:
+            model_to_save = model
+        torch.save(model_to_save.state_dict(), 'model_' + str(epoch) + '.pth')
         if val_loss < best_val:
-            if isinstance(model, torch._dynamo.eval_frame.OptimizedModule):
-                model_to_save = model.orig_mod  # Получаем исходную модель
-            else:
-                model_to_save = model
             torch.save({
                 'epoch': epoch,
             'model_state_dict': model_to_save.state_dict(),
