@@ -1,0 +1,7 @@
+dictor
+requests
+opencv-python
+pygame
+tabulate
+pexpect
+transforms3d

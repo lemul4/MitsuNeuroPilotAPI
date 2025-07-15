@@ -1,0 +1,26 @@
+# Requires Python 3.9.x
+carla==0.9.15
+py-trees==0.8.3
+torch==2.7.0
+numpy
+psutil
+py-cpuinfo
+pygame
+python-tr
+scikit-image
+tqdm
+dictor
+requests
+opencv-python
+tabulate
+pexpect
+transforms3d
+networkx
+Shapely
+xmlschema
+ephem
+matplotlib
+six
+simple-watchdog-timer
+torchvision
+orjson
