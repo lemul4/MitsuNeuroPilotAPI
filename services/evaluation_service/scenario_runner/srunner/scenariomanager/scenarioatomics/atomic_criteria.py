@@ -21,11 +21,11 @@ import py_trees
 import shapely.geometry
 
 import carla
-from agents.tools.misc import get_speed
+from infrastructure.carla.agents.tools.misc import get_speed
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
-from srunner.scenariomanager.timer import GameTime
-from srunner.scenariomanager.traffic_events import TrafficEvent, TrafficEventType
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.timer import GameTime
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.traffic_events import TrafficEvent, TrafficEventType
 
 
 class Criterion(py_trees.behaviour.Behaviour):

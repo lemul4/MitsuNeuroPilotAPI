@@ -14,7 +14,7 @@ behavior of the sun.
 import py_trees
 import carla
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 
 class RouteLightsBehavior(py_trees.behaviour.Behaviour):

@@ -15,12 +15,12 @@ import os
 import time
 
 import carla
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
-from srunner.scenariomanager.timer import GameTime
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.timer import GameTime
 
-from leaderboard.envs.sensor_interface import CallBack, OpenDriveMapReader, SpeedometerReader, SensorConfigurationInvalid
-from leaderboard.autoagents.autonomous_agent import Track
-from leaderboard.autoagents.ros_base_agent import ROSBaseAgent
+from services.evaluation_service.leaderboard.leaderboard.envs.sensor_interface import CallBack, OpenDriveMapReader, SpeedometerReader, SensorConfigurationInvalid
+from services.evaluation_service.leaderboard.leaderboard.autoagents.autonomous_agent import Track
+from services.evaluation_service.leaderboard.leaderboard.autoagents.ros_base_agent import ROSBaseAgent
 
 MAX_ALLOWED_RADIUS_SENSOR = 3.0
 QUALIFIER_SENSORS_LIMITS = {

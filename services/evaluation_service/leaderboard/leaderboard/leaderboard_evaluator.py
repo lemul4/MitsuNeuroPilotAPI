@@ -23,18 +23,18 @@ import sys
 import carla
 import signal
 
-from srunner.scenariomanager.carla_data_provider import *
-from srunner.scenariomanager.timer import GameTime
-from srunner.scenariomanager.watchdog import Watchdog
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import *
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.timer import GameTime
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.watchdog import Watchdog
 
-from leaderboard.scenarios.scenario_manager import ScenarioManager
-from leaderboard.scenarios.route_scenario import RouteScenario
-from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
-from leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration
-from leaderboard.utils.statistics_manager import StatisticsManager, FAILURE_MESSAGES
-from leaderboard.utils.route_indexer import RouteIndexer
+from services.evaluation_service.leaderboard.leaderboard.scenarios.scenario_manager import ScenarioManager
+from services.evaluation_service.leaderboard.leaderboard.scenarios.route_scenario import RouteScenario
+from services.evaluation_service.leaderboard.leaderboard.envs.sensor_interface import SensorConfigurationInvalid
+from services.evaluation_service.leaderboard.leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration
+from services.evaluation_service.leaderboard.leaderboard.utils.statistics_manager import StatisticsManager, FAILURE_MESSAGES
+from services.evaluation_service.leaderboard.leaderboard.utils.route_indexer import RouteIndexer
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 sensors_to_icons = {
     'sensor.camera.rgb':        'carla_camera',
@@ -51,7 +51,13 @@ sensors_to_icons = {
 
 
 }
-
+def load_agent_from_path(agent_path):
+    agent_path = os.path.abspath(agent_path)
+    module_name = os.path.splitext(os.path.basename(agent_path))[0]
+    spec = importlib.util.spec_from_file_location(module_name, agent_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 class LeaderboardEvaluator(object):
     """
     Main class of the Leaderboard. Everything is handled from here,
@@ -91,9 +97,15 @@ class LeaderboardEvaluator(object):
                 raise ImportError("CARLA version 0.9.10.1 or newer required. CARLA version found: {}".format(dist))
 
         # Load agent
-        module_name = os.path.basename(args.agent).split('.')[0]
+        module_name = args.agent
+
         sys.path.insert(0, os.path.dirname(args.agent))
-        self.module_agent = importlib.import_module(module_name)
+        if os.path.isfile(module_name):
+            self.module_agent = load_agent_from_path(module_name)
+            print("Module Agent 1",str(self.module_agent))
+        else:
+            self.module_agent = importlib.import_module(module_name)
+            print("Module Agent 2", str(self.module_agent))
 
         # Create the ScenarioManager
         self.manager = ScenarioManager(args.timeout, self.statistics_manager, args.debug)
@@ -289,6 +301,10 @@ class LeaderboardEvaluator(object):
         try:
             self._agent_watchdog = Watchdog(args.timeout)
             self._agent_watchdog.start()
+            print(f"module_agent: {self.module_agent}")
+            print(f"module_agent.__file__: {getattr(self.module_agent, '__file__', None)}")
+            print(f"dir(module_agent): {dir(self.module_agent)}")
+
             agent_class_name = getattr(self.module_agent, 'get_entry_point')()
             agent_class_obj = getattr(self.module_agent, agent_class_name)
 

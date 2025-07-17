@@ -14,9 +14,9 @@ from __future__ import print_function
 from dictor import dictor
 import math
 
-from srunner.scenariomanager.traffic_events import TrafficEventType
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.traffic_events import TrafficEventType
 from pathlib import Path
-from leaderboard.utils.checkpoint_tools import fetch_dict, save_dict
+from services.evaluation_service.leaderboard.leaderboard.utils.checkpoint_tools import fetch_dict, save_dict
 
 PENALTY_VALUE_DICT = {
     # Traffic events that substract a set amount of points

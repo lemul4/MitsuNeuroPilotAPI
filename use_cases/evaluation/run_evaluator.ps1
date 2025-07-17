@@ -2,7 +2,8 @@
 
 # Устанавливаем переменные окружения с учётом вложенной структуры
 $env:LEADERBOARD_ROOT = "$PSScriptRoot\..\..\services\evaluation_service\leaderboard\leaderboard"
-$env:TEAM_AGENT = "$PSScriptRoot\..\..\domain\policy\autopilot_agent.py"
+$env:PYTHONPATH = "$PSScriptRoot\..\..\.."
+$env:TEAM_AGENT = "adapters.agents.agents.imitation_agent"
 $env:ROUTES = "$env:LEADERBOARD_ROOT\..\data\merged_routes.xml"
 $env:ROUTES_SUBSET = "88" # номер сценария
 $env:REPETITIONS = "1"

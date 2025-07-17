@@ -3,8 +3,8 @@ from dictor import dictor
 
 import copy
 
-from leaderboard.utils.route_parser import RouteParser
-from leaderboard.utils.checkpoint_tools import fetch_dict
+from services.evaluation_service.leaderboard.leaderboard.utils.route_parser import RouteParser
+from services.evaluation_service.leaderboard.leaderboard.utils.checkpoint_tools import fetch_dict
 
 
 class RouteIndexer():

@@ -10,9 +10,9 @@ import math
 import xml.etree.ElementTree as ET
 
 import carla
-from agents.navigation.local_planner import RoadOption
-from srunner.scenarioconfigs.route_scenario_configuration import RouteScenarioConfiguration
-from srunner.scenarioconfigs.scenario_configuration import ScenarioConfiguration, ActorConfigurationData
+from infrastructure.carla.agents.navigation.local_planner import RoadOption
+from services.evaluation_service.scenario_runner.srunner.scenarioconfigs.route_scenario_configuration import RouteScenarioConfiguration
+from services.evaluation_service.scenario_runner.srunner.scenarioconfigs.scenario_configuration import ScenarioConfiguration, ActorConfigurationData
 
 # Threshold to say if a scenarios trigger position is part of the route
 DIST_THRESHOLD = 2.0

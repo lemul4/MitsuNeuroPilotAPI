@@ -13,11 +13,11 @@ import py_trees
 
 import carla
 
-from agents.navigation.local_planner import RoadOption
+from infrastructure.carla.agents.navigation.local_planner import RoadOption
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
-from srunner.scenariomanager.scenarioatomics.atomic_behaviors import AtomicBehavior
-from srunner.tools.scenario_helper import get_same_dir_lanes, get_opposite_dir_lanes
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.scenarioatomics.atomic_behaviors import AtomicBehavior
+from services.evaluation_service.scenario_runner.srunner.tools.scenario_helper import get_same_dir_lanes, get_opposite_dir_lanes
 
 JUNCTION_ENTRY = 'entry'
 JUNCTION_MIDDLE = 'middle'

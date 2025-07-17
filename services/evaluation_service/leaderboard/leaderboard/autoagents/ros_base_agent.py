@@ -19,9 +19,9 @@ import carla
 import pexpect
 import transforms3d
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
-from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
+from services.evaluation_service.leaderboard.leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
 
 EPSILON = 0.001
 

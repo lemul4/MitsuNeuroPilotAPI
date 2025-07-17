@@ -12,10 +12,10 @@ from __future__ import print_function
 from enum import Enum
 
 import carla
-from srunner.scenariomanager.timer import GameTime
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.timer import GameTime
 
-from leaderboard.utils.route_manipulation import downsample_route
-from leaderboard.envs.sensor_interface import SensorInterface
+from services.evaluation_service.leaderboard.leaderboard.utils.route_manipulation import downsample_route
+from services.evaluation_service.leaderboard.leaderboard.envs.sensor_interface import SensorInterface
 
 
 class Track(Enum):

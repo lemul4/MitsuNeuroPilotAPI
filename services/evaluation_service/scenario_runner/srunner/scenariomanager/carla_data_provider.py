@@ -19,7 +19,7 @@ from numpy import random
 from six import iteritems
 
 import carla
-from agents.navigation.global_route_planner import GlobalRoutePlanner
+from infrastructure.carla.agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 def calculate_velocity(actor):

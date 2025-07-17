@@ -26,14 +26,14 @@ import math
 import py_trees
 import carla
 
-from agents.navigation.global_route_planner import GlobalRoutePlanner
+from infrastructure.carla.agents.navigation.global_route_planner import GlobalRoutePlanner
 
-from srunner.scenariomanager.scenarioatomics.atomic_behaviors import calculate_distance
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
-from srunner.scenariomanager.timer import GameTime
-from srunner.tools.scenario_helper import get_distance_along_route, get_distance_between_actors
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.scenarioatomics.atomic_behaviors import calculate_distance
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.timer import GameTime
+from services.evaluation_service.scenario_runner.srunner.tools.scenario_helper import get_distance_along_route, get_distance_between_actors
 
-import srunner.tools as sr_tools
+import services.evaluation_service.scenario_runner.srunner.tools as sr_tools
 
 EPSILON = 0.001
 

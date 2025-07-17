@@ -7,7 +7,7 @@ import carla
 from agents.navigation.behavior_agent import BehaviorAgent
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
-from agent_utils import base_utils
+from domain.control import base_utils
 import os
 import weakref
 import numpy as np

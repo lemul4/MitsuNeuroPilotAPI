@@ -12,11 +12,11 @@ This module provides an example control for vehicles
 import math
 
 import carla
-from agents.navigation.basic_agent import LocalPlanner
-from agents.navigation.local_planner import RoadOption
+from infrastructure.carla.agents.navigation.basic_agent import LocalPlanner
+from infrastructure.carla.agents.navigation.local_planner import RoadOption
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
-from srunner.scenariomanager.actorcontrols.basic_control import BasicControl
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.actorcontrols.basic_control import BasicControl
 
 
 class NpcVehicleControl(BasicControl):

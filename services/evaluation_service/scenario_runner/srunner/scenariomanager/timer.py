@@ -14,7 +14,7 @@ import datetime
 import operator
 import py_trees
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 
 class GameTime(object):

@@ -11,5 +11,5 @@
 /.venv/
 /recordings/
 /dataset/results.json
-model_2.pth
+adapters/agents/model_2.pth
 /dataset/

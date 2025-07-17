@@ -20,15 +20,15 @@ import py_trees
 import traceback
 
 import carla
-from leaderboard.envs import vehicle_config
-from agents.navigation.local_planner import RoadOption
+from services.evaluation_service.leaderboard.leaderboard.envs import vehicle_config
+from infrastructure.carla.agents.navigation.local_planner import RoadOption
 
-from srunner.scenarioconfigs.scenario_configuration import ActorConfigurationData
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenarioconfigs.scenario_configuration import ActorConfigurationData
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
-from srunner.scenariomanager.scenarioatomics.atomic_behaviors import ScenarioTriggerer, Idle
-from srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import WaitForBlackboardVariable
-from srunner.scenariomanager.scenarioatomics.atomic_criteria import (CollisionTest,
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.scenarioatomics.atomic_behaviors import ScenarioTriggerer, Idle
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import WaitForBlackboardVariable
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.scenarioatomics.atomic_criteria import (CollisionTest,
                                                                      InRouteTest,
                                                                      RouteCompletionTest,
                                                                      OutsideRouteLanesTest,
@@ -37,16 +37,16 @@ from srunner.scenariomanager.scenarioatomics.atomic_criteria import (CollisionTe
                                                                      ActorBlockedTest,
                                                                      MinimumSpeedRouteTest)
 
-from srunner.scenarios.basic_scenario import BasicScenario
-from srunner.scenarios.background_activity import BackgroundBehavior
-from srunner.scenariomanager.weather_sim import RouteWeatherBehavior
-from srunner.scenariomanager.lights_sim import RouteLightsBehavior
-from srunner.scenariomanager.timer import RouteTimeoutBehavior
+from services.evaluation_service.scenario_runner.srunner.scenarios.basic_scenario import BasicScenario
+from services.evaluation_service.scenario_runner.srunner.scenarios.background_activity import BackgroundBehavior
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.weather_sim import RouteWeatherBehavior
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.lights_sim import RouteLightsBehavior
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.timer import RouteTimeoutBehavior
 
-from leaderboard.utils.route_parser import RouteParser, DIST_THRESHOLD
-from leaderboard.utils.route_manipulation import interpolate_trajectory
+from services.evaluation_service.leaderboard.leaderboard.utils.route_parser import RouteParser, DIST_THRESHOLD
+from services.evaluation_service.leaderboard.leaderboard.utils.route_manipulation import interpolate_trajectory
 
-import leaderboard.utils.parked_vehicles as parked_vehicles
+import services.evaluation_service.leaderboard.leaderboard.utils.parked_vehicles as parked_vehicles
 
 
 class RouteScenario(BasicScenario):

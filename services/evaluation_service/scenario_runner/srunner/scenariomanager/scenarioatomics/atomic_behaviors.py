@@ -29,19 +29,19 @@ from py_trees.blackboard import Blackboard
 import networkx
 
 import carla
-from agents.navigation.basic_agent import BasicAgent
-from agents.navigation.constant_velocity_agent import ConstantVelocityAgent
-from agents.navigation.local_planner import RoadOption, LocalPlanner
-from agents.tools.misc import is_within_distance, get_speed
+from infrastructure.carla.agents.navigation.basic_agent import BasicAgent
+from infrastructure.carla.agents.navigation.constant_velocity_agent import ConstantVelocityAgent
+from infrastructure.carla.agents.navigation.local_planner import RoadOption, LocalPlanner
+from infrastructure.carla.agents.tools.misc import is_within_distance, get_speed
 
-from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
-from srunner.scenariomanager.actorcontrols.actor_control import ActorControl
-from srunner.scenariomanager.timer import GameTime
-from srunner.tools.scenario_helper import detect_lane_obstacle
-from srunner.tools.scenario_helper import generate_target_waypoint_list_multilane
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.actorcontrols.actor_control import ActorControl
+from services.evaluation_service.scenario_runner.srunner.scenariomanager.timer import GameTime
+from services.evaluation_service.scenario_runner.srunner.tools.scenario_helper import detect_lane_obstacle
+from services.evaluation_service.scenario_runner.srunner.tools.scenario_helper import generate_target_waypoint_list_multilane
 
 
-import srunner.tools as sr_tools
+import services.evaluation_service.scenario_runner.srunner.tools as sr_tools
 
 EPSILON = 0.001
 
