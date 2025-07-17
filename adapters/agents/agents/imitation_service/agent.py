@@ -23,7 +23,7 @@ from services.training_service.data_directly import DirectlyCarlaDatasetLoader
 
 from .sensors import sensors
 from .data_saver import save_data_async, save_worker
-from .collizions import on_collision
+from .collizions import CollisionHandler
 from .vehicle_utils import HazardDetector
 import carla
 from .constants import DEBUG, stats, SENSOR_CONFIG
@@ -188,7 +188,7 @@ class AutopilotAgent(AutonomousAgent):
         bp_collision = bp_lib.find('sensor.other.collision')
         self.is_collision = False
         self.collision_sensor = self.world.spawn_actor(bp_collision, carla.Transform(), attach_to=self.hero_vehicle)
-        self.collision_sensor.listen(lambda event: on_collision(weakref.ref(self), event))
+        self.collision_sensor.listen(lambda event: CollisionHandler.on_collision(weakref.ref(self), event))
         print("AutopilotAgent: Collision sensor initialized.")
 
     def sensors(self):
