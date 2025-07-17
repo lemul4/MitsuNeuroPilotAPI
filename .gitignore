@@ -14,3 +14,4 @@
 adapters/agents/model_2.pth
 /dataset/
 /use_cases/evaluation/dataset
+**/__pycache__/
