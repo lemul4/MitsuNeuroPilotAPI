@@ -3,9 +3,9 @@
 # Устанавливаем переменные окружения с учётом вложенной структуры
 $env:LEADERBOARD_ROOT = "$PSScriptRoot\..\..\services\evaluation_service\leaderboard\leaderboard"
 $env:PYTHONPATH = "$PSScriptRoot\..\..\.."
-$env:TEAM_AGENT = "adapters.agents.agents.imitation_service.agent"
+$env:TEAM_AGENT = "adapters.agents.agents.autopilot_service.agent"
 $env:ROUTES = "$env:LEADERBOARD_ROOT\..\data\merged_routes.xml"
-$env:ROUTES_SUBSET = "88" # номер сценария
+$env:ROUTES_SUBSET = "20" # номер сценария
 $env:REPETITIONS = "1"
 $env:DEBUG_CHALLENGE = "0"
 $env:CHALLENGE_TRACK_CODENAME = "SENSORS"

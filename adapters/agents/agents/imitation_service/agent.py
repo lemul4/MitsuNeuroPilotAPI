@@ -1,40 +1,33 @@
 #!/usr/bin/env python
-
 from __future__ import print_function
 
-import math
 import os
-import weakref
-import numpy as np
-import torch
-from torch.backends import cudnn
+import math
 import queue
-import carla
 import threading
 from collections import deque
 from datetime import datetime
 
+import numpy as np
+import torch
+from torch.backends import cudnn
+
+import carla
 from infrastructure.carla.agents.navigation.behavior_agent import BehaviorAgent
 from data.carla_autopilot_net import ImprovedCarlaAutopilotNet
 from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from services.evaluation_service.leaderboard.leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
 
-from services.training_service.data_directly import DirectlyCarlaDatasetLoader
+from .constants import DEBUG, SENSOR_CONFIG, stats
+from .sensors import get_sensors_config
+from .data_saver import DataSaver
+from .vehicle_utils import is_vehicle_hazard
 
-from .sensors import sensors
-from .data_saver import save_data_async, save_worker
-from .collizions import on_collision
-from .vehicle_utils import HazardDetector
-import carla
-from .constants import DEBUG, stats, SENSOR_CONFIG
 
 def get_entry_point():
     return 'AutopilotAgent'
 
 class AutopilotAgent(AutonomousAgent):
-    """
-    Autopilot agent that controls the ego vehicle using BehaviorAgent.
-    """
     _agent = None
     _route_assigned = False
     _initialized_behavior_agent = False
@@ -50,8 +43,7 @@ class AutopilotAgent(AutonomousAgent):
         self.initialized_data_saving = False
         self.dataset_save_path = ""
         self._save_queue = queue.Queue()
-        self._worker_thread = threading.Thread(target=lambda: save_worker(self), daemon=True)
-        self._worker_thread.start()
+        self._worker_thread = None
         self.is_collision = False
         self.subfolder_paths = []
 
@@ -101,10 +93,10 @@ class AutopilotAgent(AutonomousAgent):
         self.model.load_state_dict(torch.load(model_path, map_location=self.DEVICE))
         self.model.eval()
 
+        self._data_saver = None
+        self.collision_sensor = None
+
     def setup(self, path_to_conf_file):
-        """
-        Setup the agent parameters.
-        """
         self.track = Track.SENSORS
         self._sensor_data_config = SENSOR_CONFIG
         self.config_path = path_to_conf_file
@@ -127,10 +119,7 @@ class AutopilotAgent(AutonomousAgent):
             route = []
             if self._global_plan_world_coord:
                 map_api = CarlaDataProvider.get_map()
-                route = []
-                print(self._global_plan_world_coord)
                 for transform, road_option in self._global_plan_world_coord:
-                    print(transform)
                     wp = map_api.get_waypoint(transform.location)
                     route.append((wp, road_option))
                 self._agent.set_global_plan(route, False)
@@ -140,7 +129,6 @@ class AutopilotAgent(AutonomousAgent):
 
             self._initialized_behavior_agent = True
             return True
-
         return True
 
     def _init_data_saving_components(self):
@@ -161,38 +149,19 @@ class AutopilotAgent(AutonomousAgent):
             time_info = f"{current_date}-{current_time}"
 
             map_name = self._map.name.split('/')[-1]
-
             self.dataset_save_path = os.path.join("dataset", "autopilot_behavior_data", map_name, time_info)
 
-            self.init_dataset_folders(self.dataset_save_path)
-            self._worker_thread = threading.Thread(target=lambda: save_worker(self), daemon=True)
-            self._worker_thread.start()
+            self._data_saver = DataSaver(self.dataset_save_path)
             self.initialized_data_saving = True
 
-        self.init_privileged_sensors()
-
-    def init_dataset_folders(self, output_dir):
-        os.makedirs(output_dir, exist_ok=True)
-        self.subfolder_paths = []
-        subfolders = [
-            "depth_front", "instance_segmentation_front", "measurements"
-        ]
-        for sub in subfolders:
-            path = os.path.join(output_dir, sub)
-            os.makedirs(path, exist_ok=True)
-            self.subfolder_paths.append(path)
-        print(f"AutopilotAgent: Dataset folders initialized at {output_dir}")
-
-    def init_privileged_sensors(self):
-        bp_lib = self.world.get_blueprint_library()
-        bp_collision = bp_lib.find('sensor.other.collision')
-        self.is_collision = False
-        self.collision_sensor = self.world.spawn_actor(bp_collision, carla.Transform(), attach_to=self.hero_vehicle)
-        self.collision_sensor.listen(lambda event: on_collision(weakref.ref(self), event))
-        print("AutopilotAgent: Collision sensor initialized.")
+        from .collizions import CollisionSensor
+        if not self.collision_sensor:
+            self.collision_sensor = CollisionSensor(self.world, self.hero_vehicle, None)
+            self.collision_sensor.initialize()
+            print("AutopilotAgent: Collision sensor initialized.")
 
     def sensors(self):
-        return sensors(self._sensor_data_config)
+        return get_sensors_config(self._sensor_data_config)
 
     def run_step(self, input_data, timestamp):
         self.step += 1
@@ -228,199 +197,59 @@ class AutopilotAgent(AutonomousAgent):
             if upcoming_waypoints and len(upcoming_waypoints) > 0:
                 near_wp, near_cmd = upcoming_waypoints[0]
                 log_near_node_coords = (near_wp.transform.location.x, near_wp.transform.location.y)
-                log_near_node_cmd = near_cmd.value
-                far_idx = min(3, len(upcoming_waypoints) - 1)
-                if far_idx >= 0:
-                    far_wp, far_cmd = upcoming_waypoints[far_idx]
+                log_near_node_cmd = near_cmd.name
+                if len(upcoming_waypoints) > 5:
+                    far_wp, far_cmd = upcoming_waypoints[5]
                     log_far_node_coords = (far_wp.transform.location.x, far_wp.transform.location.y)
-                    log_far_node_cmd = far_cmd.value
+                    log_far_node_cmd = far_cmd.name
 
-        self.steer_sequence.append(self.last_steer)
-        self.throttle_sequence.append(self.last_throttle)
-        self.brake_sequence.append(self.last_brake)
-        self.speed_sequence.append(self.last_speed)
-        self.light_sequence.append(self.last_light)
+            far_dist = is_vehicle_hazard(self.world, self.hero_vehicle, self._map, max_distance=25.0)
+            far_dist = float(far_dist) if far_dist > 0.0 else -1.0
 
-        self.is_red_light_present_log = 1 if self._agent.is_red_light_present_log else 0
+            if self._data_saver:
+                depth = input_data['depth_front'][1]
+                seg = input_data['instance_segmentation_front'][1]
+                if depth.ndim == 3:
+                    img_depth = depth[:, :, 0]
+                else:
+                    img_depth = depth  # уже 2D
 
-        vehicle_list = self.world.get_actors().filter("*vehicle*")
-        max_dist = 25
-        distanse = HazardDetector.detect_vehicle_hazard(self, vehicle_list, max_dist)
-        vehicle_detected_flag = 1 if distanse >= 0 else 0
-        if vehicle_detected_flag != 1:
-            distanse = max_dist
+                #img_depth = depth[:, :, 0]
+                img_seg = seg[:, :, 0]
 
-        vehicle_forward_vector = vehicle_transform.get_forward_vector()
-        vehicle_heading_rad = math.atan2(vehicle_forward_vector.y, vehicle_forward_vector.x)
+                data_to_save = {
+                    "location": {
+                        "x": vehicle_location.x,
+                        "y": vehicle_location.y,
+                        "z": vehicle_location.z
+                    },
+                    "speed": current_speed_m_s,
+                    "near_node": log_near_node_coords,
+                    "far_node": log_far_node_coords,
+                    "near_cmd": log_near_node_cmd,
+                    "far_cmd": log_far_node_cmd,
+                    "is_red_light_present_log": self.is_red_light_present_log,
+                    "is_stops_present_log": self.is_stops_present_log,
+                    "far_distance_to_object": far_dist,
+                    "target_control": {
+                        "steer": float(bh_control.steer),
+                        "throttle": float(bh_control.throttle),
+                        "brake": float(bh_control.brake)
+                    },
+                    "timestamp": timestamp
+                }
 
-        vec_to_near_wp_x = log_near_node_coords[0] - vehicle_location.x
-        vec_to_near_wp_y = log_near_node_coords[1] - vehicle_location.y
-        angle_to_near_wp_rad = math.atan2(vec_to_near_wp_y, vec_to_near_wp_x)
-        angle_diff_near_rad = angle_to_near_wp_rad - vehicle_heading_rad
-        normalized_angle_near_rad = math.atan2(math.sin(angle_diff_near_rad), math.cos(angle_diff_near_rad))
-        self.angle_to_near_waypoint_deg = math.degrees(normalized_angle_near_rad)
+                self._data_saver.save_async(img_depth, img_seg, data_to_save)
 
-        vec_to_far_wp_x = log_far_node_coords[0] - vehicle_location.x
-        vec_to_far_wp_y = log_far_node_coords[1] - vehicle_location.y
-        angle_to_far_wp_rad = math.atan2(vec_to_far_wp_y, vec_to_far_wp_x)
-        angle_diff_far_rad = angle_to_far_wp_rad - vehicle_heading_rad
-        normalized_angle_far_rad = math.atan2(math.sin(angle_diff_far_rad), math.cos(angle_diff_far_rad))
-        self.angle_to_far_waypoint_deg = math.degrees(normalized_angle_far_rad)
+            return bh_control
 
-        depth_front_data = input_data['depth_front'][1]
-        inst_seg_raw = input_data['instance_segmentation_front'][1]
-        inst_seg_data = inst_seg_raw[:, :, :-1]
+        def destroy(self):
+            print("AutopilotAgent: Cleaning up agent.")
+            if self.collision_sensor:
+                self.collision_sensor.stop()
+                self.collision_sensor.destroy()
+                self.collision_sensor = None
+            if self._data_saver:
+                self._data_saver.shutdown()
+                self._data_saver = None
 
-        measurement_data = {
-            'timestamp': timestamp,
-
-            'x': vehicle_location.x,
-            'y': vehicle_location.y,
-
-            'speed': current_speed_m_s,
-            'theta': compass_rad,
-
-            'near_node_x': log_near_node_coords[0],
-            'near_node_y': log_near_node_coords[1],
-            'near_command': log_near_node_cmd,
-
-            'far_node_x': log_far_node_coords[0],
-            'far_node_y': log_far_node_coords[1],
-            'far_command': log_far_node_cmd,
-
-            'angle_near': self.angle_to_near_waypoint_deg,
-            'angle_far': self.angle_to_far_waypoint_deg,
-
-            'steer': control.steer,
-            'throttle': control.throttle,
-            'brake': control.brake,
-
-            'is_red_light_present': self.is_red_light_present_log,
-            'vehicle_detected_flag': vehicle_detected_flag,
-            'distanse': distanse,
-
-            'steer_sequence': np.array(self.steer_sequence, dtype=np.float32).tolist(),
-            'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
-            'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
-            'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
-            'light_sequence': np.array(self.light_sequence, dtype=np.float32).tolist(),
-            'is_collision_event': self.is_collision,
-        }
-
-        input_data_model = {
-            'depth_front_data': depth_front_data,
-            'instance_segmentation_front_data': inst_seg_data,
-            'measurement_data': measurement_data
-        }
-
-        dataset = DirectlyCarlaDatasetLoader(
-            input_batch_data=[input_data_model],
-            num_near_commands=7,
-            num_far_commands=7,
-            stats=stats
-        )
-
-        sample = dataset[0]
-
-        depth = sample['depth'].unsqueeze(0).to(self.DEVICE)
-        seg = sample['segmentation'].unsqueeze(0).to(self.DEVICE)
-        hist = torch.stack([
-            sample['speed_sequence'],
-            sample['steer_sequence'],
-            sample['throttle_sequence'],
-            sample['brake_sequence'],
-            sample['light_sequence']
-        ], dim=-1).unsqueeze(0).to(self.DEVICE)
-        cont = sample['cont_feats'].unsqueeze(0).to(self.DEVICE)
-        sig = sample['signal_vec'].unsqueeze(0).to(self.DEVICE)
-        near = sample['near_cmd_oh'].unsqueeze(0).to(self.DEVICE)
-        far = sample['far_cmd_oh'].unsqueeze(0).to(self.DEVICE)
-
-        with torch.no_grad():
-            pred_steer, pred_throttle, pred_brake = self.model(depth, seg, hist, cont, sig, near, far)
-            steer = pred_steer.item()
-            throttle = pred_throttle.item()
-            brake = pred_brake.item()
-
-        if throttle > 0.1:
-            brake = 0
-
-        control.steer = steer
-        control.throttle = throttle
-        control.brake = brake
-
-        d = False
-        if d:
-            print(f"Predicted steer: {steer:.4f}")
-            print(f"Predicted throttle: {throttle:.4f}")
-            print(f"Predicted brake: {brake:.4f}")
-            measurement_data_updated = {
-                'timestamp': timestamp,
-
-                'x': vehicle_location.x,
-                'y': vehicle_location.y,
-
-                'speed': current_speed_m_s,
-                'theta': compass_rad,
-
-                'near_node_x': log_near_node_coords[0],
-                'near_node_y': log_near_node_coords[1],
-                'near_command': log_near_node_cmd,
-
-                'far_node_x': log_far_node_coords[0],
-                'far_node_y': log_far_node_coords[1],
-                'far_command': log_far_node_cmd,
-
-                'angle_near': self.angle_to_near_waypoint_deg,
-                'angle_far': self.angle_to_far_waypoint_deg,
-
-                'steer': control.steer,
-                'throttle': control.throttle,
-                'brake': control.brake,
-
-                'is_red_light_present': self.is_red_light_present_log,
-                'vehicle_detected_flag': vehicle_detected_flag,
-                'distanse': distanse,
-
-                'steer_sequence': np.array(self.steer_sequence, dtype=np.float32).tolist(),
-                'throttle_sequence': np.array(self.throttle_sequence, dtype=np.float32).tolist(),
-                'brake_sequence': np.array(self.brake_sequence, dtype=np.float32).tolist(),
-                'speed_sequence': np.array(self.speed_sequence, dtype=np.float32).tolist(),
-                'light_sequence': np.array(self.light_sequence, dtype=np.float32).tolist(),
-
-                'is_collision_event': self.is_collision,
-            }
-
-            save_data_async(
-                self,
-                image_depth=depth_front_data,
-                image_seg=inst_seg_data,
-                data=measurement_data_updated
-            )
-        self.last_steer = float(control.steer)
-        self.last_throttle = float(control.throttle)
-        self.last_brake = float(control.brake)
-        self.last_speed = float(current_speed_m_s)
-        self.last_light = int(self.is_red_light_present_log)
-
-        return control
-
-    def set_global_plan(self, global_plan, clean=False):
-        self._global_plan_world_coord = global_plan
-        if self._agent:
-            route = []
-            map_api = CarlaDataProvider.get_map()
-            for transform, road_option in global_plan:
-                wp = map_api.get_waypoint(transform.location)
-                route.append((wp, road_option))
-            self._agent.set_global_plan(route, clean)
-            self._route_assigned = True
-
-    def destroy(self):
-        if self.collision_sensor is not None:
-            self.collision_sensor.stop()
-            self.collision_sensor.destroy()
-        self._save_queue.put(None)
-        self._worker_thread.join()
-        if self._agent:
-            self._agent.done()
