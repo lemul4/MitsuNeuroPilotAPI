@@ -12,6 +12,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
+from run_scenario import router as scenario_router
 
 from infrastructure.carla.agents.navigation.behavior_agent import BehaviorAgent
 from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_data_provider import CarlaDataProvider
@@ -19,7 +20,7 @@ from services.evaluation_service.scenario_runner.srunner.scenariomanager.carla_d
 from collizions import CollisionHandler
 from sensors import Sensors
 from vehicle_utils import is_vehicle_hazard
-from data_saver import DataSaver  # твой адаптированный модуль сохранения
+from data_saver import DataSaver  # адаптированный модуль сохранения
 from logger import setup_logger
 from car import spawn_hero_vehicle
 logger = setup_logger()
@@ -28,6 +29,7 @@ DEBUG = False
 SENSOR_CONFIG = Sensors.get_sensor_config()
 
 app = FastAPI()
+app.include_router(scenario_router)
 
 
 # Pydantic модели для валидации входных данных
