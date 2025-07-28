@@ -1,0 +1,20 @@
+{
+    "_checkpoint": {
+        "global_record": {},
+        "progress": [
+            0,
+            174
+        ],
+        "records": []
+    },
+    "entry_status": "Started",
+    "eligible": false,
+    "sensors": [
+        "carla_depth",
+        "carla_instance_segmentation",
+        "carla_imu",
+        "carla_speedometer"
+    ],
+    "values": [],
+    "labels": []
+}

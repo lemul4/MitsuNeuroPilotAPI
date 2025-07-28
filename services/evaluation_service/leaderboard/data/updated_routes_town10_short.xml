@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes>
+   <route id="4" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="3.828423" y="-73.556618" z="0.0"/>
+         <position x="-46.171577" y="-23.556618" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="5" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="-81.930841" y="20.301954" z="0.0"/>
+         <position x="-31.930841" y="70.301954" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="6" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="-81.930841" y="20.301954" z="0.0"/>
+         <position x="-31.930841" y="70.301954" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="7" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="-108.715359" y="145.824570" z="0.0"/>
+         <position x="-58.715359" y="95.824570" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="8" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="-8.715359" y="145.824570" z="0.0"/>
+         <position x="-58.715359" y="95.824570" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="9" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="-19.230034" y="5.093152" z="0.0"/>
+         <position x="-119.230034" y="-94.906848" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="10" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="15.449829" y="35.044945" z="0.0"/>
+         <position x="115.449829" y="-64.955055" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="11" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="68.069159" y="20.301954" z="0.0"/>
+         <position x="-31.930841" y="-79.698046" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+   <route id="12" town="Town10HD">
+      <!-- Urbanization route focused on junction crossing vehicles -->
+      <weathers>
+         <weather route_percentage="0" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+         <weather route_percentage="100" cloudiness="0.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0" wind_intensity="0.0" sun_azimuth_angle="90.0" sun_altitude_angle="90.0" fog_density="0.0"/>
+      </weathers>
+      <waypoints>
+         <position x="-158.715359" y="145.824570" z="0.0"/>
+         <position x="-58.715359" y="245.824570" z="0.0"/>
+      </waypoints>
+      <scenarios/>
+   </route>
+</routes>
