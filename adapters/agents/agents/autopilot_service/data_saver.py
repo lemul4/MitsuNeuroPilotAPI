@@ -26,6 +26,7 @@ class DataSaver:
         self._save_queue = queue.Queue()
         self._worker_thread = threading.Thread(target=self._save_worker, daemon=True)
         self._worker_thread.start()
+
         self._worker_thread = None
         self.initialized_data_saving = True
         print(f"DataSaver: Dataset folders initialized at {output_dir}")

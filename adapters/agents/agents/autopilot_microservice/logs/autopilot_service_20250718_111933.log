@@ -1,0 +1,14 @@
+[2025-07-18 11:19:34,006][INFO] AutopilotAgent: initialized
+[2025-07-18 11:19:34,007][INFO] Connecting to CARLA at localhost:2000
+[2025-07-18 11:19:41,233][INFO] AutopilotAgent: initialized
+[2025-07-18 11:19:41,234][INFO] Connecting to CARLA at localhost:2000
+[2025-07-18 11:29:07,119][INFO] API called with sensor_input: speed=2.5 imu=[123456.789, [0.0, 0.0, 9.8, 0.0, 0.0, 0.0, 1.57]] depth_front=[[0.1, 0.2], [0.3, 0.4]] instance_segmentation_front=[[[0, 0, 0], [255, 255, 255]], [[128, 128, 128], [64, 64, 64]]]
+[2025-07-18 11:29:07,120][INFO] Running step at timestamp: 1752812947.120779
+[2025-07-18 11:29:07,121][INFO] Initializing AutopilotAgent...
+[2025-07-18 11:29:10,979][INFO] Agent successfully initialized.
+[2025-07-18 11:29:10,980][DEBUG] Calling behavior_agent.run_step...
+[2025-07-18 11:29:10,997][DEBUG] Control command issued: VehicleControl(throttle=0.750000, steer=0.000620, brake=0.000000, hand_brake=False, reverse=False, manual_gear_shift=False, gear=0)
+[2025-07-18 11:29:12,842][INFO] API called with sensor_input: speed=2.5 imu=[123456.789, [0.0, 0.0, 9.8, 0.0, 0.0, 0.0, 1.57]] depth_front=[[0.1, 0.2], [0.3, 0.4]] instance_segmentation_front=[[[0, 0, 0], [255, 255, 255]], [[128, 128, 128], [64, 64, 64]]]
+[2025-07-18 11:29:12,844][INFO] Running step at timestamp: 1752812952.844111
+[2025-07-18 11:29:12,845][DEBUG] Calling behavior_agent.run_step...
+[2025-07-18 11:29:12,852][DEBUG] Control command issued: VehicleControl(throttle=0.750000, steer=0.000622, brake=0.000000, hand_brake=False, reverse=False, manual_gear_shift=False, gear=0)

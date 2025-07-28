@@ -14,7 +14,8 @@
 adapters/agents/model_2.pth
 /dataset/
 /use_cases/evaluation/dataset
-**/__pycache__/
 /use_cases/evaluation/dataset/
 /adapters/agents/agents/autopilot_microservice/dataset/
 /adapters/agents/agents/autopilot_microservice/logs/
+**/__pycache__/
+
