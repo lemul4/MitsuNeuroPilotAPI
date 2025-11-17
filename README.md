@@ -12,55 +12,74 @@
   - Компьютерного зрения
   - Обработки данных с датчиков
 
-## Установка зависимостей
+## Установка
 
-### Основные требования
-- CARLA 0.9.15 ([официальный сайт](https://carla.org/))
-- Дополнительные карты для CARLA
-- Python 3.10
-- NVIDIA GPU (рекомендуется для лучшей производительности)
+1. Установите Python 3.10 и CARLA (рекомендуется версия 0.9.15).
+2. Установите зависимости:
+    ```bash
+    python -m venv .venv
+     ```
+    ```bash
+    .\.venv\Scripts\activate.bat    # Windows
+     ```
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-### Пошаговая установка
-1. Установите CARLA 0.9.15 и дополнительные карты:
-   ```bash
-   # Пример для Linux
-   wget https://carla-releases.s3.eu-west-3.amazonaws.com/Linux/CARLA_0.9.15.tar.gz
-   tar -xvf CARLA_0.9.15.tar.gz```
-2. Клонируйте репозиторий проекта:
-   ```bash
-   git clone https://github.com/your-repository/carla-autopilot.git
-   ```
-3. Установите Python зависимости:
-  ```bash
-python -m pip install -r requirements.txt
-```
-4. Настройте пути в проекте:
-- Отредактируйте файл project.pth
-- Переместите его в папку:
-<ваше_виртуальное_окружение>/Lib/site-packages/
+## Запуск агента с нейросетью
 
-## Использование
-### Запуск автономного агента
+1. Запустите CARLA (`CarlaUE4.exe`).
+2. Перейдите в папку `use_cases/evaluation`.
+3. Откройте файл `run_evaluator.ps1`.
+4. Замените значение переменной `TEAM_AGENT` на:
 
-1. Запустите сервер CARLA:
-```bash
-./CarlaUE4.sh -world-port=2000
-```
-2. В отдельном терминале выполните:
-```bash
-#для windows
-./run_evaluator.ps1
-```
-или
-```bash
-#для linux
-/.run_evaluator.sh
-```
+    ```
+    adapters\\agents\\agents\\imitation_service.agent.py
+    ```
 
-### Сбор данных для обучения
-1. Запустите сервер CARLA;
-2. Выполните:
+5. Запустите PowerShell в этой папке и выполните:
 
-```bash
-team_code/agents/autopilot_agent.py
-```
+    ```powershell
+    ./run_evaluator.ps1
+    ```
+
+Агент начнет проходить заданные сценарии в симуляции CARLA, управляя автомобилем с помощью нейросетевой модели.
+
+## Сбор данных для обучения
+
+1. Запустите CARLA (`CarlaUE4.exe`).
+2. Перейдите в папку `use_cases/evaluation`.
+3. Откройте файл `run_evaluator.ps1`.
+4. Замените значение переменной `TEAM_AGENT` на:
+
+    ```
+    adapters\\agents\\agents\\autopilot_service.agent.py
+    ```
+
+5. В PowerShell выполните:
+
+    ```powershell
+    ./run_evaluator.ps1
+    ```
+
+Во время проезда агента все данные (изображения, управляющие действия и т.д.) будут сохраняться в папку `dataset`.
+
+## Запуск FastAPI микросервиса с агентом
+
+1. Перейдите в директорию:
+
+    ```
+    adapters/agents/agents/autopilot_microservice
+    ```
+
+2. Запустите FastAPI-сервис:
+
+    ```bash
+    python -m autopilot_service
+    ```
+
+3. Откройте в браузере:
+
+    ```
+    http://localhost:8002/docs
+    ```

@@ -1,0 +1,4 @@
+adapters
+data
+services
+use_cases
