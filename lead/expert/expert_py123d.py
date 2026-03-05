@@ -550,7 +550,8 @@ class ExpertPy123D(Expert):
                             ),
                         )
                     )
-                    LOG.info(f"Parking car detected: {bb['mesh_path']}")
+                    if LOG.isEnabledFor(logging.DEBUG):
+                        LOG.debug("Parking car detected: %s", bb["mesh_path"])
                 elif actor is None:  # static_prob_car that is not spawned as an actor
                     assert bb["class"] == "static_prop_car"
                     box_detections.append(
@@ -584,7 +585,8 @@ class ExpertPy123D(Expert):
                             lambda: DefaultBoxDetectionLabel.VEHICLE,
                             type_id_to_py123d_mapping,
                         )[bb["type_id"]]
-                        LOG.info(f"{bb['type_id']} classified as {label}")
+                        if LOG.isEnabledFor(logging.DEBUG):
+                            LOG.debug("%s classified as %s", bb["type_id"], label)
                         box_detections.append(
                             BoxDetectionSE3(
                                 metadata=BoxDetectionMetadata(

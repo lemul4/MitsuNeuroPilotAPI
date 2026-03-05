@@ -1256,7 +1256,7 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
     @step_cached_property
     @beartype
     def vehicles_inside_bev(self) -> list[carla.Actor]:
-        vehicles = self.carla_world.get_actors().filter("*vehicle*")
+        vehicles = self.actors.filter("*vehicle*")
         vehicles = [
             vehicle for vehicle in vehicles if self.is_actor_inside_bev(vehicle)
         ]
@@ -1280,7 +1280,7 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
     @step_cached_property
     @beartype
     def walkers_inside_bev(self) -> list[carla.Actor]:
-        walkers = self.carla_world.get_actors().filter("*walker*")
+        walkers = self.actors.filter("*walker*")
         walkers = [walker for walker in walkers if self.is_actor_inside_bev(walker)]
         if (
             self.config_expert.datagen
@@ -1299,7 +1299,7 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
     @step_cached_property
     @beartype
     def bikers_inside_bev(self) -> list[carla.Actor]:
-        bikers = self.carla_world.get_actors().filter("*vehicle*")
+        bikers = self.actors.filter("*vehicle*")
         bikers = [
             b
             for b in bikers
@@ -1334,7 +1334,7 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
         Returns:
             list: A list of static actors inside the BEV.
         """
-        static_actors = self.carla_world.get_actors().filter("*static*")
+        static_actors = self.actors.filter("*static*")
         static_actors = [
             actor for actor in static_actors if self.is_actor_inside_bev(actor)
         ]

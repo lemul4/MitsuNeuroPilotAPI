@@ -137,11 +137,23 @@ class Expert(ExpertData):
             and not self.config_expert.py123d_data_format
         ):
             if input_data is not None and "bounding_boxes" in input_data:
+                is_saved_step = self.step % self.config_expert.data_save_freq == 0
+                frame = self.step // self.config_expert.data_save_freq
+                if is_saved_step and self.config_expert.stage_history_to_disk:
+                    self._stage_saved_bounding_boxes(
+                        frame, input_data["bounding_boxes"]
+                    )
+                if is_saved_step and not self.config_expert.stage_history_to_disk:
+                    boxes_for_history = input_data["bounding_boxes"]
+                else:
+                    boxes_for_history = self._compact_bounding_boxes_for_history(
+                        input_data["bounding_boxes"]
+                    )
                 self.bounding_boxes.append(
                     (
                         self.step,
-                        self.step // self.config_expert.data_save_freq,
-                        input_data["bounding_boxes"],
+                        frame,
+                        boxes_for_history,
                     )
                 )
 
@@ -162,6 +174,23 @@ class Expert(ExpertData):
             elapsed_time = time.time() - start_time
             LOG.info(f"Step: {self.step}, Time per step: {elapsed_time * 1000:.2f} ms")
         return control
+
+    @beartype
+    def _compact_bounding_boxes_for_history(self, boxes: list[dict]) -> list[dict]:
+        compact_boxes = []
+        for box in boxes:
+            if box.get("class") not in ["car", "walker"]:
+                continue
+            if "id" not in box or "matrix" not in box:
+                continue
+            compact_boxes.append(
+                {
+                    "id": int(box["id"]),
+                    "class": box["class"],
+                    "matrix": box["matrix"],
+                }
+            )
+        return compact_boxes
 
     @beartype
     def perturbate_camera(self) -> None:
@@ -2844,6 +2873,18 @@ class Expert(ExpertData):
             A dictionary containing the driving data for the current frame.
         """
         frame = self.step // self.config_expert.data_save_freq
+        is_saved_step = self.step % self.config_expert.data_save_freq == 0
+        history_meta = {
+            "speed": tick_data.get("speed", 0.0),
+            "theta": self.ego_orientation_rad,
+            "ego_matrix": np.array(
+                self.ego_vehicle.get_transform().get_matrix(), dtype=np.float32
+            ),
+        }
+
+        if not is_saved_step:
+            self.metas.append((self.step, frame, history_meta))
+            return history_meta
 
         # Extract relevant data from inputs
         previous_target_points = [
@@ -2902,24 +2943,6 @@ class Expert(ExpertData):
             project_to_road=True,
             lane_type=carla.libcarla.LaneType.Any,
         )
-        next_wps = expert_utils.wps_next_until_lane_end(ego_wp)
-        try:
-            next_lane_wps_ego = next_wps[-1].next(1)
-            if len(next_lane_wps_ego) == 0:
-                next_lane_wps_ego = [next_wps[-1]]
-        except:
-            next_lane_wps_ego = []
-        if ego_wp.is_junction:
-            distance_to_junction_ego = 0.0
-            # get distance to ego vehicle
-        elif len(next_lane_wps_ego) > 0 and next_lane_wps_ego[0].is_junction:
-            distance_to_junction_ego = next_lane_wps_ego[0].transform.location.distance(
-                ego_wp.transform.location
-            )
-        else:
-            distance_to_junction_ego = None
-
-        # how far is next junction
         next_wps = expert_utils.wps_next_until_lane_end(ego_wp)
         try:
             next_lane_wps_ego = next_wps[-1].next(1)
@@ -3155,7 +3178,11 @@ class Expert(ExpertData):
         for k, v in next_commands_dict.items():
             data[f"next_commands_{k}"] = v
 
-        self.metas.append((self.step, frame, data))
+        if self.config_expert.stage_history_to_disk:
+            self._stage_saved_meta(frame, data)
+            self.metas.append((self.step, frame, history_meta))
+        else:
+            self.metas.append((self.step, frame, data))
 
         return data
 

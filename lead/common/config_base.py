@@ -357,7 +357,7 @@ class BaseConfig:
 
     # --- Data Storage ---
     # тумблер: отключить все виртуальные сенсоры
-    disable_virtual_sensors = True
+    disable_virtual_sensors = False
 
     # сенсоры
     enable_semantic_sensor = True

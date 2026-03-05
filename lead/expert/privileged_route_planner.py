@@ -359,7 +359,16 @@ class PrivilegedRoutePlanner:
         Returns:
             Index of the closest route point.
         """
-        index = begin_idx
+        num_points = self.original_route_points.shape[0]
+        if num_points == 0:
+            return 0
+        if num_points == 1:
+            return 0
+
+        index = int(np.clip(begin_idx, 0, num_points - 1))
+        if index == num_points - 1:
+            return index
+
         location_np = np.array([location.x, location.y])
 
         # calculate the search direction
@@ -370,23 +379,23 @@ class PrivilegedRoutePlanner:
             direction = -1
 
         # The following is like a gradient descent with a constant gradient.
-        while True:
+        for _ in range(num_points):
             # check if we have reached the first or last route point
-            if (
-                index + direction == 0
-                or index + direction == self.original_route_points.shape[0]
-            ):
+            next_index = index + direction
+            if next_index <= 0 or next_index >= num_points:
                 return int(index)
 
             dist1 = np.linalg.norm(location_np - self.original_route_points[index, :2])
             dist2 = np.linalg.norm(
-                location_np - self.original_route_points[index + direction, :2]
+                location_np - self.original_route_points[next_index, :2]
             )
             # check if we have found the closest route point
             if dist1 < dist2:
                 return int(index)
 
-            index += direction
+            index = next_index
+
+        return int(index)
 
     @beartype
     def shift_route_for_invading_turn(
