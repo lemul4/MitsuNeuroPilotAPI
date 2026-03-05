@@ -108,9 +108,13 @@ class ScenarioSorter:
         for scenario in active_scenarios:
             distance = self._compute_scenario_distance(scenario, ego_location)
             scenario_distances.append((scenario, distance))
-            LOG.debug(
-                f"Scenario '{scenario.name}' (id={scenario.scenario_id}): distance={distance:.2f}m"
-            )
+            if LOG.isEnabledFor(logging.DEBUG):
+                LOG.debug(
+                    "Scenario '%s' (id=%s): distance=%.2fm",
+                    scenario.name,
+                    scenario.scenario_id,
+                    distance,
+                )
 
         # Sort by distance (ascending)
         scenario_distances.sort(key=lambda x: x[1])
@@ -121,7 +125,10 @@ class ScenarioSorter:
         ]
 
         if scenario_distances:
-            LOG.debug(
-                f"Sorted {len(active_scenarios)} scenarios by actor distance. "
-                f"Closest: {scenario_distances[0][0].name} ({scenario_distances[0][1]:.2f}m)"
-            )
+            if LOG.isEnabledFor(logging.DEBUG):
+                LOG.debug(
+                    "Sorted %d scenarios by actor distance. Closest: %s (%.2fm)",
+                    len(active_scenarios),
+                    scenario_distances[0][0].name,
+                    scenario_distances[0][1],
+                )

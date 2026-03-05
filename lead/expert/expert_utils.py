@@ -194,12 +194,31 @@ def intersection_of_routes(
     """
     points_a = np.array(points_a, dtype=np.float32)
     points_b = np.array(points_b, dtype=np.float32)
+    if points_a.shape[0] == 0 or points_b.shape[0] == 0:
+        return None, None
+
+    # Use KDTree when available to avoid materializing an N x M distance matrix.
+    try:
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(points_b[:, :2])
+        for i, point in enumerate(points_a):
+            neighbor_indices = tree.query_ball_point(point[:2], r=float(epsilon))
+            if len(neighbor_indices) == 0:
+                continue
+            j = int(min(neighbor_indices))
+            z = (points_a[i, 2] + points_b[j, 2]) / 2.0
+            x = (points_a[i, 0] + points_b[j, 0]) / 2.0
+            y = (points_a[i, 1] + points_b[j, 1]) / 2.0
+            return carla.Location(x=x, y=y, z=z), int(i)
+        return None, None
+    except Exception:
+        pass
+
     diff = points_a[:, None, :2] - points_b[None, :, :2]  # (N, M, 2)
     dists = np.sqrt((diff**2).sum(axis=-1))  # (N, M)
-
     mask = dists < epsilon
     indices = np.argwhere(mask)
-
     if indices.shape[0] == 0:
         return None, None
 
