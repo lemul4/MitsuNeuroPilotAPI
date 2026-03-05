@@ -78,6 +78,17 @@ class ExpertConfig(BaseConfig):
     # How often we log in the main loop
     log_info_freq = 10
 
+    # Max queued frames in async save worker. Smaller values reduce RAM spikes.
+    save_queue_maxsize = 16
+    # Timeout (seconds) for pushing frame payload into save queue.
+    save_queue_put_timeout_sec = 0.05
+    # Timeout (seconds) for pushing third-person camera frames into save queue.
+    save_queue_put_timeout_third_person_sec = 0.01
+    # Queue occupancy ratio where we start applying stronger backpressure.
+    save_queue_high_watermark_ratio = 0.75
+    # Number of threads to write image files in parallel inside save worker.
+    sensor_image_write_threads = 2
+
     @overridable_property
     def sync_sensor_processing_with_data_save_freq(self):
         """If true, process heavy camera GT payload only every data_save_freq ticks."""
@@ -842,6 +853,9 @@ class ExpertConfig(BaseConfig):
 
     # --- Data Storage Configuration ---
     save_sensors = True
+    # If true, save full meta/bounding-box payloads to .history_cache staging files
+    # and keep lightweight history in RAM. If false, keep full saved-step payloads in RAM.
+    stage_history_to_disk = False
 
     @overridable_property
     def save_3rd_person_camera(self):

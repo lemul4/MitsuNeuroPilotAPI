@@ -1,14 +1,16 @@
 """Class that provides data collection functionalities for expert agents."""
 
-import copy
 import json
 import logging
 import os
 import pathlib
+import pickle
 import queue
 import random
 import threading
+import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import carla
 import cv2
@@ -90,11 +92,27 @@ class ExpertData(ExpertBase):
         self.cutin_vehicle_starting_position = None
 
         # Threading for async data saving
-        self._save_queue = queue.Queue(maxsize=100)  # Large buffer to handle bursts
+        self._save_queue_maxsize = max(1, int(self.config_expert.save_queue_maxsize))
+        self._save_queue = queue.Queue(maxsize=self._save_queue_maxsize)
+        self._save_queue_sentinel = object()
         self._save_thread = None
         self._save_thread_stop = threading.Event()
+        self._image_write_executor: ThreadPoolExecutor | None = None
+        self._save_queue_high_watermark = max(
+            1,
+            int(
+                self._save_queue_maxsize
+                * float(self.config_expert.save_queue_high_watermark_ratio)
+            ),
+        )
         self._camera_image_saving_disabled_warning_logged = False
         self._sensor_save_conflict_warnings: set[str] = set()
+        self._history_cache_dir: pathlib.Path | None = None
+        self._meta_stage_dir: pathlib.Path | None = None
+        self._bboxes_stage_dir: pathlib.Path | None = None
+        self._staged_meta_paths: dict[int, pathlib.Path] = {}
+        self._staged_bboxes_paths: dict[int, pathlib.Path] = {}
+        self._cached_level_bbs_by_class: dict[carla.CityObjectLabel, tuple] = {}
 
         if (
             self.save_path is not None
@@ -167,6 +185,13 @@ class ExpertData(ExpertBase):
                     for camera_idx in range(1, self.config_expert.num_cameras + 1):
                         (self.save_path / modality / f"cam{camera_idx}").mkdir()
 
+            if self.config_expert.stage_history_to_disk:
+                self._history_cache_dir = self.save_path / ".history_cache"
+                self._meta_stage_dir = self._history_cache_dir / "metas"
+                self._bboxes_stage_dir = self._history_cache_dir / "bboxes"
+                self._meta_stage_dir.mkdir(parents=True, exist_ok=True)
+                self._bboxes_stage_dir.mkdir(parents=True, exist_ok=True)
+
         self.weather_setting = "ClearNoon"
         self.semantics_converter = np.uint8(
             list(constants.SEMANTIC_SEGMENTATION_CONVERTER.values())
@@ -174,6 +199,10 @@ class ExpertData(ExpertBase):
 
         # Start background saving thread if saving is enabled
         if self.save_path is not None and self.config_expert.datagen:
+            if self.config_expert.sensor_image_write_threads > 1:
+                self._image_write_executor = ThreadPoolExecutor(
+                    max_workers=self.config_expert.sensor_image_write_threads
+                )
             self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
             self._save_thread.start()
 
@@ -224,23 +253,39 @@ class ExpertData(ExpertBase):
 
             def _save_image(image):
                 frame = self.step // self.config_expert.data_save_freq
-
-                def _save(img, path):
-                    array = np.frombuffer(img.raw_data, dtype=np.uint8)
-                    array = copy.deepcopy(array)
-                    array = np.reshape(array, (img.height, img.width, 4))
-                    bgr = array[:, :, :3]
-                    cv2.imwrite(path, bgr)
-
                 if self.config_expert.is_on_slurm or self.save_path is not None:
+                    if self.save_path is None:
+                        return
                     save_path_3rd_person = str(self.save_path / "3rd_person")
                     os.makedirs(save_path_3rd_person, exist_ok=True)
-                    _save(
-                        image,
-                        os.path.join(
-                            save_path_3rd_person, f"{str(frame).zfill(4)}.jpg"
-                        ),
+                    image_path = os.path.join(
+                        save_path_3rd_person, f"{str(frame).zfill(4)}.jpg"
                     )
+                    array = (
+                        np.frombuffer(image.raw_data, dtype=np.uint8)
+                        .reshape(image.height, image.width, 4)
+                        .copy()
+                    )
+                    bgr = array[:, :, :3]
+                    if (
+                        not self._save_thread_stop.is_set()
+                        and self._save_thread is not None
+                        and self._save_thread.is_alive()
+                    ):
+                        try:
+                            self._save_queue.put(
+                                {
+                                    "kind": "third_person",
+                                    "path": image_path,
+                                    "image": bgr,
+                                },
+                                timeout=self.config_expert.save_queue_put_timeout_third_person_sec,
+                            )
+                        except queue.Full:
+                            # Keep callback non-blocking to avoid stalling CARLA sensor threads.
+                            cv2.imwrite(image_path, bgr)
+                    else:
+                        cv2.imwrite(image_path, bgr)
 
             self._3rd_person_camera.listen(_save_image)
         if self.config_expert.datagen:
@@ -309,6 +354,13 @@ class ExpertData(ExpertBase):
         ransac.remove_ground(
             np.random.rand(1000, 3), self.config_expert, parallel=True
         )  # Pre-compile numba code
+        try:
+            self._cached_level_bbs_by_class[carla.CityObjectLabel.Car] = tuple(
+                self.carla_world.get_level_bbs(carla.CityObjectLabel.Car)
+            )
+        except Exception as e:
+            LOG.warning(f"Failed to pre-cache static level bbs: {e}")
+            self._cached_level_bbs_by_class[carla.CityObjectLabel.Car] = tuple()
 
         self.initialized = True
 
@@ -829,12 +881,14 @@ class ExpertData(ExpertBase):
                 self._set_empty_camera_pc(input_data)
 
         # Bounding box
+        actors_snapshot = self.actors
+        self._actors = actors_snapshot
         input_data["bounding_boxes"] = self.get_bounding_boxes(input_data=input_data)
         self.stored_bounding_boxes_of_this_step = input_data["bounding_boxes"]
         self.id2bb_map = {bb["id"]: bb for bb in input_data["bounding_boxes"]}
         self.id2actor_map = {
             actor.id: actor
-            for actor in self.carla_world.get_actors()
+            for actor in actors_snapshot
             if actor.is_alive and actor.id in self.id2bb_map
         }
         # BEV Semantic
@@ -898,7 +952,7 @@ class ExpertData(ExpertBase):
                     self.ego_matrix,
                     CarlaSemanticSegmentationClass.TrafficSign,
                     self.get_nearby_object(
-                        self.carla_world.get_actors().filter("*traffic.stop*"),
+                        actors_snapshot.filter("*traffic.stop*"),
                         self.config_expert.light_radius,
                     ),
                     input_data["semantics_camera_pc_all"],
@@ -1076,6 +1130,193 @@ class ExpertData(ExpertBase):
         return self.encode_depth(depth)
 
     @beartype
+    def _build_save_payload(self, tick_data: dict) -> dict:
+        payload = {}
+        save_panorama = self._should_save_camera_panorama()
+        save_subfolders = self._should_save_camera_subfolders()
+
+        if save_panorama:
+            if "rgb" in tick_data:
+                payload["rgb"] = tick_data["rgb"]
+            if self.config_expert.perturbate_sensors and "rgb_perturbated" in tick_data:
+                payload["rgb_perturbated"] = tick_data["rgb_perturbated"]
+
+        if save_subfolders:
+            for camera_idx in range(1, self.config_expert.num_cameras + 1):
+                rgb_key = f"rgb_{camera_idx}"
+                if rgb_key in tick_data:
+                    payload[rgb_key] = tick_data[rgb_key]
+                if self.config_expert.perturbate_sensors:
+                    rgb_perturbated_key = f"rgb_{camera_idx}_perturbated"
+                    if rgb_perturbated_key in tick_data:
+                        payload[rgb_perturbated_key] = tick_data[rgb_perturbated_key]
+
+        if self.config_expert.save_camera_pc and self.config_expert.compute_camera_pc:
+            if "semantics_camera_pc" in tick_data:
+                payload["semantics_camera_pc"] = tick_data["semantics_camera_pc"]
+
+        if (
+            self.config_expert.enable_semantic_sensor
+            and self.config_expert.save_semantic_segmentation
+        ):
+            # Keep panorama keys whenever available because _save_sensors_sync
+            # validates their existence before writing either panorama or per-camera files.
+            if "semantics" in tick_data:
+                payload["semantics"] = tick_data["semantics"]
+            if (
+                self.config_expert.perturbate_sensors
+                and "semantics_perturbated" in tick_data
+            ):
+                payload["semantics_perturbated"] = tick_data["semantics_perturbated"]
+            if save_subfolders:
+                for camera_idx in range(1, self.config_expert.num_cameras + 1):
+                    semantics_key = f"semantics_{camera_idx}"
+                    if semantics_key in tick_data:
+                        payload[semantics_key] = tick_data[semantics_key]
+                    if self.config_expert.perturbate_sensors:
+                        semantics_perturbated_key = (
+                            f"semantics_{camera_idx}_perturbated"
+                        )
+                        if semantics_perturbated_key in tick_data:
+                            payload[semantics_perturbated_key] = tick_data[
+                                semantics_perturbated_key
+                            ]
+
+        if self.config_expert.enable_depth_sensor and self.config_expert.save_depth:
+            if "depth" in tick_data:
+                payload["depth"] = tick_data["depth"]
+            if (
+                self.config_expert.perturbate_sensors
+                and "depth_perturbated" in tick_data
+            ):
+                payload["depth_perturbated"] = tick_data["depth_perturbated"]
+            if save_subfolders:
+                for camera_idx in range(1, self.config_expert.num_cameras + 1):
+                    depth_key = f"depth_{camera_idx}"
+                    if depth_key in tick_data:
+                        payload[depth_key] = tick_data[depth_key]
+                    if self.config_expert.perturbate_sensors:
+                        depth_perturbated_key = f"depth_{camera_idx}_perturbated"
+                        if depth_perturbated_key in tick_data:
+                            payload[depth_perturbated_key] = tick_data[
+                                depth_perturbated_key
+                            ]
+
+        if (
+            self.config_expert.enable_instance_sensor
+            and self.config_expert.save_instance_segmentation
+        ):
+            if "instance" in tick_data:
+                payload["instance"] = tick_data["instance"]
+            if (
+                self.config_expert.perturbate_sensors
+                and "instance_perturbated" in tick_data
+            ):
+                payload["instance_perturbated"] = tick_data["instance_perturbated"]
+            if save_subfolders:
+                for camera_idx in range(1, self.config_expert.num_cameras + 1):
+                    instance_key = f"instance_{camera_idx}"
+                    if instance_key in tick_data:
+                        payload[instance_key] = tick_data[instance_key]
+                    if self.config_expert.perturbate_sensors:
+                        instance_perturbated_key = f"instance_{camera_idx}_perturbated"
+                        if instance_perturbated_key in tick_data:
+                            payload[instance_perturbated_key] = tick_data[
+                                instance_perturbated_key
+                            ]
+
+        if "hdmap" in tick_data:
+            payload["hdmap"] = tick_data["hdmap"]
+        if self.config_expert.perturbate_sensors and "hdmap_perturbated" in tick_data:
+            payload["hdmap_perturbated"] = tick_data["hdmap_perturbated"]
+
+        if self.config_expert.use_radars:
+            for sensor_idx in range(1, self.config_expert.num_radar_sensors + 1):
+                radar_key = f"radar{sensor_idx}"
+                if radar_key in tick_data:
+                    payload[radar_key] = tick_data[radar_key]
+                if self.config_expert.perturbate_sensors:
+                    radar_perturbated_key = f"radar{sensor_idx}_perturbated"
+                    if radar_perturbated_key in tick_data:
+                        payload[radar_perturbated_key] = tick_data[
+                            radar_perturbated_key
+                        ]
+
+        return payload
+
+    def _queue_image_write(
+        self,
+        tasks: list[tuple[str, np.ndarray, list[int]]],
+        path: pathlib.Path,
+        image: np.ndarray,
+        params: list[int],
+    ) -> None:
+        tasks.append((str(path), image, params))
+
+    def _flush_image_write_tasks(
+        self, image_write_tasks: list[tuple[str, np.ndarray, list[int]]]
+    ) -> None:
+        if len(image_write_tasks) == 0:
+            return
+
+        if self._image_write_executor is None:
+            for path, image, params in image_write_tasks:
+                cv2.imwrite(path, image, params)
+            return
+
+        futures = [
+            self._image_write_executor.submit(cv2.imwrite, path, image, params)
+            for path, image, params in image_write_tasks
+        ]
+        for future in futures:
+            try:
+                _ = future.result()
+            except Exception as e:
+                LOG.error(f"Image write task failed: {e}")
+
+    def _stage_saved_meta(self, frame: int, data: dict) -> None:
+        if self._meta_stage_dir is None:
+            return
+        stage_path = self._meta_stage_dir / f"{frame:04}.pkl"
+        with open(stage_path, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        self._staged_meta_paths[frame] = stage_path
+
+    def _load_staged_meta(self, frame: int, fallback: dict) -> dict:
+        stage_path = self._staged_meta_paths.get(frame)
+        if stage_path is None:
+            return dict(fallback)
+        try:
+            with open(stage_path, "rb") as f:
+                data = pickle.load(f)
+            return data
+        except Exception as e:
+            LOG.warning(f"Failed to load staged meta for frame {frame:04}: {e}")
+            return dict(fallback)
+
+    def _stage_saved_bounding_boxes(self, frame: int, boxes: list[dict]) -> None:
+        if self._bboxes_stage_dir is None:
+            return
+        stage_path = self._bboxes_stage_dir / f"{frame:04}.pkl"
+        with open(stage_path, "wb") as f:
+            pickle.dump(boxes, f, protocol=pickle.HIGHEST_PROTOCOL)
+        self._staged_bboxes_paths[frame] = stage_path
+
+    def _load_staged_bounding_boxes(
+        self, frame: int, fallback: list[dict]
+    ) -> list[dict]:
+        stage_path = self._staged_bboxes_paths.get(frame)
+        if stage_path is None:
+            return fallback
+        try:
+            with open(stage_path, "rb") as f:
+                data = pickle.load(f)
+            return data
+        except Exception as e:
+            LOG.warning(f"Failed to load staged bboxes for frame {frame:04}: {e}")
+            return fallback
+
+    @beartype
     def save_sensors(self, tick_data: dict) -> None:
         frame = self.step // self.config_expert.data_save_freq
 
@@ -1106,43 +1347,75 @@ class ExpertData(ExpertBase):
             return
 
         # Queue data for background thread.
-        # Shallow-copy dict keys to isolate from accidental key mutation without duplicating large arrays.
+        # Keep only keys used by saving code path to avoid retaining large per-tick state in queue.
         lidar_points = self.accumulate_lidar()
         if (not self.config_expert.use_lidar) and lidar_points.shape[0] == 0:
             lidar_points = None
+        payload = self._build_save_payload(tick_data)
         save_data = {
             "frame": frame,
-            "tick_data": tick_data.copy(),
+            "tick_data": payload,
             "jpeg_quality": self.jpeg_storage_quality,
             "lidar_points": lidar_points,
         }
 
-        # Block until queue has space - never drop frames
-        self._save_queue.put(save_data)
+        queue_size_before_put = self._save_queue.qsize()
+        put_timeout = self.config_expert.save_queue_put_timeout_sec
+        if queue_size_before_put >= self._save_queue_high_watermark:
+            put_timeout = max(put_timeout, 0.2)
+
+        # Never drop frames. If queue is congested, fallback to synchronous save.
+        try:
+            self._save_queue.put(
+                save_data,
+                timeout=put_timeout,
+            )
+        except queue.Full:
+            LOG.warning(
+                "Save queue full after %.3fs; falling back to synchronous save for this frame",
+                put_timeout,
+            )
+            try:
+                self._save_sensors_sync(save_data)
+            except Exception as e:
+                LOG.error(
+                    f"Error while saving sensors synchronously on queue fallback: {e}"
+                )
 
         # Log queue depth occasionally for monitoring
         if frame % 10 == 0:
             queue_size = self._save_queue.qsize()
-            if queue_size > 50:  # Warn if queue is getting large
+            if queue_size >= self._save_queue_high_watermark:
                 LOG.warning(
-                    f"Save queue depth: {queue_size}/100 - disk may be falling behind"
+                    "Save queue depth: %d/%d - disk may be falling behind",
+                    queue_size,
+                    self._save_queue_maxsize,
                 )
 
     def _save_worker(self):
         """Background thread worker for saving sensor data."""
-        while not self._save_thread_stop.is_set():
+        while True:
             try:
-                # Wait for data with timeout to allow clean shutdown
-                save_data = self._save_queue.get(timeout=1.0)
-                self._save_sensors_sync(save_data)
-                self._save_queue.task_done()
+                save_data = self._save_queue.get(timeout=0.2)
             except queue.Empty:
+                if self._save_thread_stop.is_set() and self._save_queue.empty():
+                    return
                 continue
+            try:
+                if save_data is self._save_queue_sentinel:
+                    return
+                self._save_sensors_sync(save_data)
             except Exception as e:
                 LOG.error(f"Error in save worker thread: {e}")
+            finally:
+                self._save_queue.task_done()
 
     def _save_sensors_sync(self, save_data: dict) -> None:
         """Synchronous sensor saving - runs in background thread."""
+        if save_data.get("kind") == "third_person":
+            cv2.imwrite(save_data["path"], save_data["image"])
+            return
+
         frame = save_data["frame"]
         tick_data = save_data["tick_data"]
         jpeg_quality = save_data["jpeg_quality"]
@@ -1160,33 +1433,36 @@ class ExpertData(ExpertBase):
         save_panorama = self._should_save_camera_panorama()
         save_subfolders = self._should_save_camera_subfolders()
         self._warn_if_camera_image_saving_disabled()
+        image_write_tasks: list[tuple[str, np.ndarray, list[int]]] = []
 
         # CARLA images are already in opencv's BGR format.
         if save_panorama:
-            cv2.imwrite(
-                str(self._camera_frame_path("rgb", frame, "jpg")),
+            self._queue_image_write(
+                image_write_tasks,
+                self._camera_frame_path("rgb", frame, "jpg"),
                 tick_data["rgb"],
                 jpeg_params,
             )
             if self.config_expert.perturbate_sensors:
-                cv2.imwrite(
-                    str(self._camera_frame_path("rgb_perturbated", frame, "jpg")),
+                self._queue_image_write(
+                    image_write_tasks,
+                    self._camera_frame_path("rgb_perturbated", frame, "jpg"),
                     tick_data["rgb_perturbated"],
                     jpeg_params,
                 )
         if save_subfolders:
             for camera_idx in range(1, self.config_expert.num_cameras + 1):
-                cv2.imwrite(
-                    str(self._camera_frame_path("rgb", frame, "jpg", camera_idx)),
+                self._queue_image_write(
+                    image_write_tasks,
+                    self._camera_frame_path("rgb", frame, "jpg", camera_idx),
                     tick_data[f"rgb_{camera_idx}"],
                     jpeg_params,
                 )
                 if self.config_expert.perturbate_sensors:
-                    cv2.imwrite(
-                        str(
-                            self._camera_frame_path(
-                                "rgb_perturbated", frame, "jpg", camera_idx
-                            )
+                    self._queue_image_write(
+                        image_write_tasks,
+                        self._camera_frame_path(
+                            "rgb_perturbated", frame, "jpg", camera_idx
                         ),
                         tick_data[f"rgb_{camera_idx}_perturbated"],
                         jpeg_params,
@@ -1221,14 +1497,16 @@ class ExpertData(ExpertBase):
             save_semantic = False
 
         if save_semantic and save_panorama:
-            cv2.imwrite(
-                str(self._camera_frame_path("semantics", frame, "png")),
+            self._queue_image_write(
+                image_write_tasks,
+                self._camera_frame_path("semantics", frame, "png"),
                 self._prepare_semantics_for_saving(tick_data["semantics"]),
                 png_params,
             )
             if self.config_expert.perturbate_sensors:
-                cv2.imwrite(
-                    str(self._camera_frame_path("semantics_perturbated", frame, "png")),
+                self._queue_image_write(
+                    image_write_tasks,
+                    self._camera_frame_path("semantics_perturbated", frame, "png"),
                     self._prepare_semantics_for_saving(
                         tick_data["semantics_perturbated"]
                     ),
@@ -1236,19 +1514,19 @@ class ExpertData(ExpertBase):
                 )
         if save_semantic and save_subfolders:
             for camera_idx in range(1, self.config_expert.num_cameras + 1):
-                cv2.imwrite(
-                    str(self._camera_frame_path("semantics", frame, "png", camera_idx)),
+                self._queue_image_write(
+                    image_write_tasks,
+                    self._camera_frame_path("semantics", frame, "png", camera_idx),
                     self._prepare_semantics_for_saving(
                         tick_data[f"semantics_{camera_idx}"]
                     ),
                     png_params,
                 )
                 if self.config_expert.perturbate_sensors:
-                    cv2.imwrite(
-                        str(
-                            self._camera_frame_path(
-                                "semantics_perturbated", frame, "png", camera_idx
-                            )
+                    self._queue_image_write(
+                        image_write_tasks,
+                        self._camera_frame_path(
+                            "semantics_perturbated", frame, "png", camera_idx
                         ),
                         self._prepare_semantics_for_saving(
                             tick_data[f"semantics_{camera_idx}_perturbated"]
@@ -1277,32 +1555,34 @@ class ExpertData(ExpertBase):
 
         if save_depth:
             if save_panorama:
-                cv2.imwrite(
-                    str(self._camera_frame_path("depth", frame, "png")),
+                self._queue_image_write(
+                    image_write_tasks,
+                    self._camera_frame_path("depth", frame, "png"),
                     self._prepare_depth_for_saving(tick_data["depth"]),
                     png_params,
                 )
                 if self.config_expert.perturbate_sensors:
-                    cv2.imwrite(
-                        str(self._camera_frame_path("depth_perturbated", frame, "png")),
+                    self._queue_image_write(
+                        image_write_tasks,
+                        self._camera_frame_path("depth_perturbated", frame, "png"),
                         self._prepare_depth_for_saving(tick_data["depth_perturbated"]),
                         png_params,
                     )
             if save_subfolders:
                 for camera_idx in range(1, self.config_expert.num_cameras + 1):
-                    cv2.imwrite(
-                        str(self._camera_frame_path("depth", frame, "png", camera_idx)),
+                    self._queue_image_write(
+                        image_write_tasks,
+                        self._camera_frame_path("depth", frame, "png", camera_idx),
                         self._prepare_depth_for_saving(
                             tick_data[f"depth_{camera_idx}"]
                         ),
                         png_params,
                     )
                     if self.config_expert.perturbate_sensors:
-                        cv2.imwrite(
-                            str(
-                                self._camera_frame_path(
-                                    "depth_perturbated", frame, "png", camera_idx
-                                )
+                        self._queue_image_write(
+                            image_write_tasks,
+                            self._camera_frame_path(
+                                "depth_perturbated", frame, "png", camera_idx
                             ),
                             self._prepare_depth_for_saving(
                                 tick_data[f"depth_{camera_idx}_perturbated"]
@@ -1332,57 +1612,54 @@ class ExpertData(ExpertBase):
 
         if save_instance:
             if save_panorama:
-                cv2.imwrite(
-                    str(self._camera_frame_path("instance", frame, "png")),
+                self._queue_image_write(
+                    image_write_tasks,
+                    self._camera_frame_path("instance", frame, "png"),
                     tick_data["instance"],
                     png_params,
                 )
                 if self.config_expert.perturbate_sensors:
-                    cv2.imwrite(
-                        str(
-                            self._camera_frame_path(
-                                "instance_perturbated", frame, "png"
-                            )
-                        ),
+                    self._queue_image_write(
+                        image_write_tasks,
+                        self._camera_frame_path("instance_perturbated", frame, "png"),
                         tick_data["instance_perturbated"],
                         png_params,
                     )
             if save_subfolders:
                 for camera_idx in range(1, self.config_expert.num_cameras + 1):
-                    cv2.imwrite(
-                        str(
-                            self._camera_frame_path(
-                                "instance", frame, "png", camera_idx
-                            )
-                        ),
+                    self._queue_image_write(
+                        image_write_tasks,
+                        self._camera_frame_path("instance", frame, "png", camera_idx),
                         tick_data[f"instance_{camera_idx}"],
                         png_params,
                     )
                     if self.config_expert.perturbate_sensors:
-                        cv2.imwrite(
-                            str(
-                                self._camera_frame_path(
-                                    "instance_perturbated",
-                                    frame,
-                                    "png",
-                                    camera_idx,
-                                )
+                        self._queue_image_write(
+                            image_write_tasks,
+                            self._camera_frame_path(
+                                "instance_perturbated",
+                                frame,
+                                "png",
+                                camera_idx,
                             ),
                             tick_data[f"instance_{camera_idx}_perturbated"],
                             png_params,
                         )
 
-        cv2.imwrite(
-            str(self.save_path / "hdmap" / (f"{frame:04}.png")),
+        self._queue_image_write(
+            image_write_tasks,
+            self.save_path / "hdmap" / (f"{frame:04}.png"),
             tick_data["hdmap"].astype(np.uint8),
             png_params,
         )
         if self.config_expert.perturbate_sensors:
-            cv2.imwrite(
-                str(self.save_path / "hdmap_perturbated" / (f"{frame:04}.png")),
+            self._queue_image_write(
+                image_write_tasks,
+                self.save_path / "hdmap_perturbated" / (f"{frame:04}.png"),
                 tick_data["hdmap_perturbated"].astype(np.uint8),
                 png_params,
             )
+        self._flush_image_write_tasks(image_write_tasks)
 
         if self.config_expert.use_radars:
             # Prepare radar data for saving dynamically
@@ -1445,22 +1722,51 @@ class ExpertData(ExpertBase):
         Args:
             results: Any additional results to be processed or saved.
         """
+        self._save_thread_stop.set()
+
+        if hasattr(self, "_3rd_person_camera"):
+            try:
+                self._3rd_person_camera.stop()
+                self._3rd_person_camera.destroy()
+            except Exception as e:
+                LOG.warning(f"Failed to cleanly destroy 3rd person camera: {e}")
+
         # Clean shutdown of background save thread
         if hasattr(self, "_save_thread") and self._save_thread is not None:
             LOG.info("Shutting down background save thread...")
-            self._save_thread_stop.set()  # Signal the thread to stop
+            sentinel_enqueued = False
+            sentinel_deadline = time.monotonic() + 5.0
+            while not sentinel_enqueued and time.monotonic() < sentinel_deadline:
+                try:
+                    self._save_queue.put(self._save_queue_sentinel, timeout=0.1)
+                    sentinel_enqueued = True
+                except queue.Full:
+                    continue
 
-            # Wait for remaining items in queue to be processed
-            try:
-                self._save_queue.join()  # Wait for queue to be empty
-            except:
-                pass
+            if not sentinel_enqueued:
+                LOG.warning("Could not enqueue save queue sentinel before timeout")
 
-            self._save_thread.join(
-                timeout=10
-            )  # Wait up to 10 seconds for clean shutdown
+            queue_deadline = time.monotonic() + 20.0
+            while (
+                getattr(self._save_queue, "unfinished_tasks", 0) > 0
+                and time.monotonic() < queue_deadline
+            ):
+                time.sleep(0.1)
+
+            unfinished = getattr(self._save_queue, "unfinished_tasks", 0)
+            if unfinished > 0:
+                LOG.warning(
+                    "Save queue still has %d unfinished tasks during shutdown",
+                    unfinished,
+                )
+
+            self._save_thread.join(timeout=10)
             if self._save_thread.is_alive():
                 LOG.warning("Save thread did not shutdown cleanly within timeout")
+
+        if self._image_write_executor is not None:
+            self._image_write_executor.shutdown(wait=True)
+            self._image_write_executor = None
 
         if (
             not self.config_expert.eval_expert
@@ -1468,15 +1774,23 @@ class ExpertData(ExpertBase):
         ):
             self._offline_process_data()
 
-        if hasattr(self, "_3rd_person_camera"):
-            self._3rd_person_camera.stop()
-            self._3rd_person_camera.destroy()
-
         if results is not None and self.save_path is not None:
             with open(
                 os.path.join(self.save_path, "results.json"), "w", encoding="utf-8"
             ) as f:
                 json.dump(results.__dict__, f, indent=2)
+
+        if self._history_cache_dir is not None:
+            for _path in self._staged_meta_paths.values():
+                try:
+                    _path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            for _path in self._staged_bboxes_paths.values():
+                try:
+                    _path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _offline_process_data(self) -> None:
         """
@@ -1498,7 +1812,7 @@ class ExpertData(ExpertBase):
 
             # Enhance metas
             for i in range(N):
-                step, frame, data = self.metas[i]
+                step, frame, state_now = self.metas[i]
 
                 # --- Privileged acceleration and angular velocity, mostly for data filtering ---
                 if (
@@ -1506,15 +1820,17 @@ class ExpertData(ExpertBase):
                 ):  # Very important. Only override data that was saved.
                     continue
 
-                if i < N - 1:
-                    _, _, data_next = self.metas[i + 1]
+                data = self._load_staged_meta(frame, state_now)
+                speed_now = state_now.get("speed", 0.0)
+                yaw_now = state_now.get("theta", 0.0)
 
-                    speed_now = data.get("speed", 0.0)
-                    speed_next = data_next.get("speed", 0.0)
+                if i < N - 1:
+                    _, _, state_next = self.metas[i + 1]
+
+                    speed_next = state_next.get("speed", 0.0)
                     accel = (speed_next - speed_now) / delta_t
 
-                    yaw_now = data.get("theta", 0.0)
-                    yaw_next = data_next.get("theta", 0.0)
+                    yaw_next = state_next.get("theta", 0.0)
                     dyaw = (yaw_next - yaw_now + np.pi) % (2 * np.pi) - np.pi
                     rot_speed = dyaw / delta_t
                 else:
@@ -1532,8 +1848,8 @@ class ExpertData(ExpertBase):
                 ):
                     idx = i + offset
                     if idx < N:
-                        _, _, future_data = self.metas[idx]
-                        future_speeds.append(future_data.get("speed", 0.0))
+                        _, _, future_state = self.metas[idx]
+                        future_speeds.append(future_state.get("speed", 0.0))
                 data["future_speeds"] = np.array(future_speeds, dtype=np.float32)
 
                 # --- Future yaws: from one step after current to furthest future ---
@@ -1543,8 +1859,8 @@ class ExpertData(ExpertBase):
                 ):
                     idx = i + offset
                     if idx < N:
-                        _, _, future_data = self.metas[idx]
-                        yaw_future = future_data.get("theta", 0.0)
+                        _, _, future_state = self.metas[idx]
+                        yaw_future = future_state.get("theta", 0.0)
                         dyaw = (yaw_future - yaw_now + np.pi) % (2 * np.pi) - np.pi
                         future_yaws.append(dyaw)
                 data["future_yaws"] = np.array(future_yaws, dtype=np.float32)
@@ -1557,8 +1873,8 @@ class ExpertData(ExpertBase):
                 ):
                     idx = i + offset
                     if idx < N:
-                        _, _, future_data = self.metas[idx]
-                        T_future = np.array(future_data["ego_matrix"])
+                        _, _, future_state = self.metas[idx]
+                        T_future = np.array(future_state["ego_matrix"])
                         pos_world = np.append(T_future[:3, 3], 1.0)
                         pos_current_ego = T_world_to_current_ego @ pos_world
                         future_positions.append(pos_current_ego[:3].tolist())
@@ -1568,15 +1884,17 @@ class ExpertData(ExpertBase):
                 common_utils.write_pickle(path=metas_dir / f"{frame:04}.pkl", data=data)
 
             # Enhance bounding boxes with temporal information
+            bbox_index_cache: dict[int, dict[int, dict]] = {}
             for i in range(N):
-                step, frame, bounding_boxes = self.bounding_boxes[i]
+                step, frame, compact_boxes = self.bounding_boxes[i]
 
                 if step % self.config_expert.data_save_freq != 0:
                     continue
 
-                _, _, data = self.metas[i]
-                ego_matrix_current = np.array(data["ego_matrix"])
+                _, _, state_now = self.metas[i]
+                ego_matrix_current = np.array(state_now["ego_matrix"])
                 T_world_to_current_ego = np.linalg.inv(ego_matrix_current)
+                bounding_boxes = self._load_staged_bounding_boxes(frame, compact_boxes)
 
                 for box in bounding_boxes:
                     box_id = box["id"]
@@ -1594,10 +1912,20 @@ class ExpertData(ExpertBase):
                     ):
                         idx = i + offset
                         if idx < N:
-                            _, _, future_boxes = self.bounding_boxes[idx]
-                            future_box = next(
-                                (b for b in future_boxes if b["id"] == box_id), None
-                            )
+                            if idx not in bbox_index_cache:
+                                _, future_frame, future_boxes = self.bounding_boxes[idx]
+                                if (
+                                    self.metas[idx][0]
+                                    % self.config_expert.data_save_freq
+                                    == 0
+                                ):
+                                    future_boxes = self._load_staged_bounding_boxes(
+                                        future_frame, future_boxes
+                                    )
+                                bbox_index_cache[idx] = {
+                                    b["id"]: b for b in future_boxes
+                                }
+                            future_box = bbox_index_cache[idx].get(box_id)
                             if future_box:
                                 T_future = np.array(future_box["matrix"])
                                 pos_world = np.append(T_future[:3, 3], 1.0)
@@ -1629,6 +1957,124 @@ class ExpertData(ExpertBase):
                     data=bounding_boxes,
                 )
 
+    def _build_xy_tree(self, points: np.ndarray | None):
+        if points is None or points.shape[0] == 0:
+            return None
+
+        try:
+            from scipy.spatial import cKDTree
+        except Exception:
+            return None
+
+        try:
+            return cKDTree(points[:, :2])
+        except Exception:
+            return None
+
+    def _count_points_in_actor_prefiltered(
+        self,
+        ego_matrix: np.ndarray,
+        actor_matrix: np.ndarray,
+        actor_extent_xyz: np.ndarray,
+        point_cloud: np.ndarray | None,
+        xy_tree,
+        pad: bool = False,
+    ) -> int:
+        if point_cloud is None:
+            return -1
+        if point_cloud.shape[0] == 0:
+            return 0
+
+        candidate_points = point_cloud
+        if xy_tree is not None:
+            ego_rot = ego_matrix[:3, :3]
+            ego_pos = ego_matrix[:3, 3]
+            actor_pos = actor_matrix[:3, 3]
+            actor_center_ego = ego_rot.T @ (actor_pos - ego_pos)
+
+            margin_xy = 0.25 if pad else 0.0
+            query_radius = (
+                np.hypot(
+                    actor_extent_xyz[0] + margin_xy,
+                    actor_extent_xyz[1] + margin_xy,
+                )
+                + 1.0
+            )
+            try:
+                candidate_indices = xy_tree.query_ball_point(
+                    actor_center_ego[:2], r=float(query_radius)
+                )
+            except Exception:
+                candidate_indices = []
+
+            if len(candidate_indices) == 0:
+                return 0
+            candidate_points = point_cloud[candidate_indices]
+
+        points_in_bbox = expert_utils.get_points_in_actor_frame_and_in_bbox(
+            ego_matrix=ego_matrix,
+            actor_matrix=actor_matrix,
+            actor_extent=actor_extent_xyz,
+            ego_point_cloud=candidate_points,
+            pad=pad,
+        )
+        return int(len(points_in_bbox))
+
+    def _precompute_existing_actor_bbs(
+        self,
+        existed_bboxes_ids: set[int],
+        vehicle_list,
+        static_list,
+    ) -> list[tuple[carla.BoundingBox, float]]:
+        existing_bbs: list[tuple[carla.BoundingBox, float]] = []
+        for actor in list(vehicle_list) + list(static_list):
+            if actor.id not in existed_bboxes_ids:
+                continue
+
+            bb = actor.bounding_box
+            try:
+                global_location = actor.get_transform().transform(bb.location)
+            except Exception:
+                continue
+
+            global_bb = carla.BoundingBox(
+                carla.Location(
+                    x=global_location.x,
+                    y=global_location.y,
+                    z=global_location.z,
+                ),
+                bb.extent,
+            )
+            global_bb.rotation = bb.rotation
+            radius = float(np.sqrt(bb.extent.x**2 + bb.extent.y**2 + bb.extent.z**2))
+            existing_bbs.append((global_bb, radius))
+        return existing_bbs
+
+    def _intersects_any_with_broadphase(
+        self,
+        candidate_bb: carla.BoundingBox,
+        existing_bbs: list[tuple[carla.BoundingBox, float]],
+    ) -> bool:
+        candidate_radius = float(
+            np.sqrt(
+                candidate_bb.extent.x**2
+                + candidate_bb.extent.y**2
+                + candidate_bb.extent.z**2
+            )
+        )
+        candidate_location = candidate_bb.location
+
+        for other_bb, other_radius in existing_bbs:
+            dx = candidate_location.x - other_bb.location.x
+            dy = candidate_location.y - other_bb.location.y
+            dz = candidate_location.z - other_bb.location.z
+            radius_sum = candidate_radius + other_radius
+            if dx * dx + dy * dy + dz * dz > radius_sum * radius_sum:
+                continue
+            if expert_utils.check_obb_intersection(candidate_bb, other_bb):
+                return True
+        return False
+
     @beartype
     def get_bounding_boxes(self, input_data: dict) -> list[dict]:
         boxes = []
@@ -1638,6 +2084,7 @@ class ExpertData(ExpertBase):
         ego_velocity = self.ego_vehicle.get_velocity()
         ego_matrix = np.array(ego_transform.get_matrix())
         ego_rotation = ego_transform.rotation
+        ego_location = ego_transform.location
         ego_extent = self.ego_vehicle.bounding_box.extent
         ego_speed = self._get_forward_speed(
             transform=ego_transform, velocity=ego_velocity
@@ -1681,7 +2128,7 @@ class ExpertData(ExpertBase):
 
         # Check for possible vehicle obstacles
         # Retrieve all relevant actors
-        self._actors = self.carla_world.get_actors()
+        self._actors = self.actors
         vehicle_list = self._actors.filter("*vehicle*")
 
         try:
@@ -1711,10 +2158,7 @@ class ExpertData(ExpertBase):
         transfuser_camera_semantics_pc = input_data.get("semantics_camera_pc")
         if transfuser_camera_semantics_pc is None:
             transfuser_camera_semantics_pc = self._empty_camera_pc_numpy()
-        transfuser_camera_semantics_pc = transfuser_camera_semantics_pc.copy()
-        transfuser_camera_semantics_pc_semantics_id = np.array(
-            list(constants.SEMANTIC_SEGMENTATION_CONVERTER.values())
-        )[
+        transfuser_camera_semantics_pc_semantics_id = self.semantics_converter[
             transfuser_camera_semantics_pc[
                 :, CameraPointCloudIndex.UNREAL_SEMANTICS_ID
             ].astype(np.int32)
@@ -1743,10 +2187,15 @@ class ExpertData(ExpertBase):
                 == TransfuserSemanticSegmentationClass.OBSTACLE
             ][:, : CameraPointCloudIndex.Z + 1],
         }
+        lidar_points = input_data.get("lidar")
+        radar_points = input_data.get("radar")
+        lidar_tree = self._build_xy_tree(lidar_points)
+        radar_tree = self._build_xy_tree(radar_points)
 
         for vehicle in vehicle_list:
+            vehicle_location = vehicle.get_location()
             if (
-                vehicle.get_location().distance(self.ego_vehicle.get_location())
+                vehicle_location.distance(ego_location)
                 < self.config_expert.bb_save_radius
             ):
                 if vehicle.id != self.ego_vehicle.id:
@@ -1758,7 +2207,7 @@ class ExpertData(ExpertBase):
                     vehicle_extent = vehicle.bounding_box.extent
                     vehicle_id = vehicle.id
                     vehicle_wp = self.carla_world_map.get_waypoint(
-                        vehicle.get_location(),
+                        vehicle_location,
                         project_to_road=True,
                         lane_type=carla.libcarla.LaneType.Any,
                     )
@@ -1819,16 +2268,14 @@ class ExpertData(ExpertBase):
                         "role_name"
                     ] == "scenario":
                         if self.cutin_vehicle_starting_position is None:
-                            self.cutin_vehicle_starting_position = (
-                                vehicle.get_location()
-                            )
+                            self.cutin_vehicle_starting_position = vehicle_location
 
                         if (
-                            vehicle.get_location().distance(
+                            vehicle_location.distance(
                                 self.cutin_vehicle_starting_position
                             )
                             > 0.2
-                            and vehicle.get_location().distance(
+                            and vehicle_location.distance(
                                 self.cutin_vehicle_starting_position
                             )
                             < 8
@@ -1841,40 +2288,32 @@ class ExpertData(ExpertBase):
                         if vehicle_speed > 1.0 and abs(vehicle_steer) > 0.2:
                             vehicle_cuts_in = True
 
-                    vehicle_extent_list = [
-                        vehicle_extent.x,
-                        vehicle_extent.y,
-                        vehicle_extent.z,
-                    ]
-                    yaw = np.deg2rad(vehicle_rotation.yaw)
-
-                    relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
-                    relative_pos = common_utils.get_relative_transform(
-                        ego_matrix, vehicle_matrix
-                    )
-                    vehicle_speed = self._get_forward_speed(
-                        transform=vehicle_transform, velocity=vehicle_velocity
-                    )
-                    vehicle_brake = vehicle_control.brake
-                    vehicle_steer = vehicle_control.steer
-                    vehicle_throttle = vehicle_control.throttle
-
                     # Computes how many LiDAR hits are on a bounding box. Used to filter invisible boxes during data loading.
-                    if input_data.get("lidar") is not None:
-                        num_in_bbox_points = expert_utils.get_num_points_in_actor(
-                            self.ego_vehicle, vehicle, input_data["lidar"], pad=True
+                    if lidar_points is not None:
+                        num_in_bbox_points = self._count_points_in_actor_prefiltered(
+                            ego_matrix=ego_matrix,
+                            actor_matrix=vehicle_matrix,
+                            actor_extent_xyz=np.array(vehicle_extent_list),
+                            point_cloud=lidar_points,
+                            xy_tree=lidar_tree,
+                            pad=True,
                         )
                     else:
                         num_in_bbox_points = -1
 
-                    if input_data.get("radar") is not None:
-                        num_in_bb_radar_points = expert_utils.get_num_points_in_actor(
-                            self.ego_vehicle, vehicle, input_data["radar"], pad=True
+                    if radar_points is not None:
+                        num_in_bb_radar_points = (
+                            self._count_points_in_actor_prefiltered(
+                                ego_matrix=ego_matrix,
+                                actor_matrix=vehicle_matrix,
+                                actor_extent_xyz=np.array(vehicle_extent_list),
+                                point_cloud=radar_points,
+                                xy_tree=radar_tree,
+                                pad=True,
+                            )
                         )
                     else:
                         num_in_bb_radar_points = -1
-
-                    distance = np.linalg.norm(relative_pos)
 
                     result = {
                         "class": "car",
@@ -1918,8 +2357,9 @@ class ExpertData(ExpertBase):
 
         walkers = self._actors.filter("*walker*")
         for walker in walkers:
+            walker_location = walker.get_location()
             if (
-                walker.get_location().distance(self.ego_vehicle.get_location())
+                walker_location.distance(ego_location)
                 < self.config_expert.bb_save_radius
             ):
                 walker_transform = walker.get_transform()
@@ -1941,16 +2381,26 @@ class ExpertData(ExpertBase):
                 )
 
                 # Computes how many LiDAR hits are on a bounding box. Used to filter invisible boxes during data loading.
-                if input_data.get("lidar") is not None:
-                    num_in_bbox_points = expert_utils.get_num_points_in_actor(
-                        self.ego_vehicle, walker, input_data["lidar"], pad=True
+                if lidar_points is not None:
+                    num_in_bbox_points = self._count_points_in_actor_prefiltered(
+                        ego_matrix=ego_matrix,
+                        actor_matrix=walker_matrix,
+                        actor_extent_xyz=np.array(walker_extent),
+                        point_cloud=lidar_points,
+                        xy_tree=lidar_tree,
+                        pad=True,
                     )
                 else:
                     num_in_bbox_points = -1
 
-                if input_data.get("radar") is not None:
-                    num_in_bb_radar_points = expert_utils.get_num_points_in_actor(
-                        self.ego_vehicle, walker, input_data["radar"], pad=True
+                if radar_points is not None:
+                    num_in_bb_radar_points = self._count_points_in_actor_prefiltered(
+                        ego_matrix=ego_matrix,
+                        actor_matrix=walker_matrix,
+                        actor_extent_xyz=np.array(walker_extent),
+                        point_cloud=radar_points,
+                        xy_tree=radar_tree,
+                        pad=True,
                     )
                 else:
                     num_in_bb_radar_points = -1
@@ -1988,13 +2438,18 @@ class ExpertData(ExpertBase):
 
         # Note this only saves static actors, which does not include static background objects
         if self.config_expert.eval_expert:
-            LOG.info("Skipping static actor bounding boxes in eval_expert mode.")
+            if self.step % max(self.config_expert.log_info_freq, 1) == 0:
+                LOG.debug("Skipping static actor bounding boxes in eval_expert mode.")
         else:
             static_list = self._actors.filter("*static*")
-            LOG.info(f"Found {len(static_list)} static actors in the scene.")
+            if LOG.isEnabledFor(logging.DEBUG) and (
+                self.step % max(self.config_expert.log_info_freq, 1) == 0
+            ):
+                LOG.debug("Found %d static actors in the scene.", len(static_list))
             for static in static_list:
+                static_location = static.get_location()
                 if (
-                    static.get_location().distance(self.ego_vehicle.get_location())
+                    static_location.distance(ego_location)
                     < self.config_expert.bb_save_radius
                 ):
                     static_transform = static.get_transform()
@@ -2004,8 +2459,19 @@ class ExpertData(ExpertBase):
                     static_id = static.id
                     type_id = static.type_id
                     mesh_path = static.attributes.get("mesh_path", None)
-                    static_extent = static.bounding_box.extent
-                    static_extent = [static_extent.x, static_extent.y, static_extent.z]
+                    static_extent_raw = static.bounding_box.extent
+                    static_extent_raw_xyz = np.array(
+                        [
+                            static_extent_raw.x,
+                            static_extent_raw.y,
+                            static_extent_raw.z,
+                        ]
+                    )
+                    static_extent = [
+                        static_extent_raw.x,
+                        static_extent_raw.y,
+                        static_extent_raw.z,
+                    ]
                     if mesh_path is not None and mesh_path in constants.LOOKUP_TABLE:
                         static_extent = constants.LOOKUP_TABLE[mesh_path]
                     if type_id == "static.prop.trafficwarning":
@@ -2031,9 +2497,14 @@ class ExpertData(ExpertBase):
                     )
 
                     # Computes how many LiDAR hits are on a bounding box. Used to filter invisible boxes during data loading.
-                    if input_data.get("lidar") is not None:
-                        num_in_bbox_points = expert_utils.get_num_points_in_actor(
-                            self.ego_vehicle, static, input_data["lidar"], pad=True
+                    if lidar_points is not None:
+                        num_in_bbox_points = self._count_points_in_actor_prefiltered(
+                            ego_matrix=ego_matrix,
+                            actor_matrix=static_matrix,
+                            actor_extent_xyz=static_extent_raw_xyz,
+                            point_cloud=lidar_points,
+                            xy_tree=lidar_tree,
+                            pad=True,
                         )
                     else:
                         num_in_bbox_points = -1
@@ -2268,86 +2739,80 @@ class ExpertData(ExpertBase):
 
         # Others static meshes that dont belong to an actors but are still relevant for perception
         if self.config_expert.eval_expert:
-            LOG.info("Skipping static actor bounding boxes in eval_expert mode.")
+            if self.step % max(self.config_expert.log_info_freq, 1) == 0:
+                LOG.debug("Skipping static actor bounding boxes in eval_expert mode.")
         else:
             static_parking_id_start = 1e8
             found = 0
             existed_bboxes_ids = set([box["id"] for box in boxes])
-            for bb_class in [carla.CityObjectLabel.Car]:
-                for i, vehicle_bounding_box in enumerate(
-                    self.carla_world.get_level_bbs(bb_class)
+            existing_actor_bbs = self._precompute_existing_actor_bbs(
+                existed_bboxes_ids=existed_bboxes_ids,
+                vehicle_list=vehicle_list,
+                static_list=static_list,
+            )
+            radius_sq = float(self.config_expert.bb_save_radius**2)
+            cached_level_bbs = self._cached_level_bbs_by_class.get(
+                carla.CityObjectLabel.Car, tuple()
+            )
+            if len(cached_level_bbs) == 0:
+                cached_level_bbs = tuple(
+                    self.carla_world.get_level_bbs(carla.CityObjectLabel.Car)
+                )
+            for i, vehicle_bounding_box in enumerate(cached_level_bbs):
+                extent = vehicle_bounding_box.extent
+                location = vehicle_bounding_box.location
+                dx = location.x - ego_location.x
+                dy = location.y - ego_location.y
+                dz = location.z - ego_location.z
+                if dx * dx + dy * dy + dz * dz > radius_sq:
+                    continue
+                rotation = vehicle_bounding_box.rotation
+                matrix = carla.Transform(location, rotation).get_matrix()
+                relative_pos = common_utils.get_relative_transform(
+                    ego_matrix, np.array(matrix)
+                )
+                distance = np.linalg.norm(relative_pos)
+
+                if distance > self.config_expert.bb_save_radius:
+                    continue
+                relative_yaw = common_utils.normalize_angle(
+                    np.deg2rad(rotation.yaw) - ego_yaw
+                )
+                result = {
+                    "class": "static_prop_car",
+                    "transfuser_semantics_id": int(
+                        TransfuserSemanticSegmentationClass.VEHICLE
+                    ),
+                    "extent": [extent.x, extent.y, extent.z],
+                    "position": [relative_pos[0], relative_pos[1], relative_pos[2]],
+                    "yaw": relative_yaw,
+                    "distance": distance,
+                    "id": int(static_parking_id_start + i),
+                    "matrix": matrix,
+                }
+
+                # Since we iterate every bounding box in the world, we need to make sure that we dont duplicate anything
+                if self._intersects_any_with_broadphase(
+                    vehicle_bounding_box, existing_actor_bbs
                 ):
-                    extent = vehicle_bounding_box.extent
-                    location = vehicle_bounding_box.location
-                    rotation = vehicle_bounding_box.rotation
-                    matrix = carla.Transform(location, rotation).get_matrix()
-                    relative_pos = common_utils.get_relative_transform(
-                        ego_matrix, np.array(matrix)
+                    continue
+
+                if lidar_points is not None:
+                    result["num_points"] = expert_utils.get_num_points_in_bbox(
+                        self.ego_vehicle, result, lidar_points, pad=True
                     )
-                    distance = np.linalg.norm(relative_pos)
+                else:
+                    result["num_points"] = -1
 
-                    if distance > self.config_expert.bb_save_radius:
-                        continue
-                    relative_yaw = common_utils.normalize_angle(
-                        np.deg2rad(rotation.yaw) - ego_yaw
-                    )
-                    result = {
-                        "class": "static_prop_car",
-                        "transfuser_semantics_id": int(
-                            TransfuserSemanticSegmentationClass.VEHICLE
-                        ),
-                        "extent": [extent.x, extent.y, extent.z],
-                        "position": [relative_pos[0], relative_pos[1], relative_pos[2]],
-                        "yaw": relative_yaw,
-                        "distance": distance,
-                        "id": int(static_parking_id_start + i),
-                        "matrix": matrix,
-                    }
+                result["visible_pixels"] = expert_utils.get_num_points_in_bbox(
+                    self.ego_vehicle,
+                    result,
+                    global_camera_pc[TransfuserSemanticSegmentationClass.VEHICLE],
+                    pad=True,
+                )
 
-                    # Since we iterate every bounding box in the world, we need to make sure that we dont duplicate anything
-                    too_close = False
-                    for other in list(self._actors.filter("*vehicle*")) + list(
-                        self._actors.filter("*static*")
-                    ):
-                        if other.id not in existed_bboxes_ids:
-                            continue
-                        bb = (
-                            other.bounding_box
-                        )  # local-space BB (relative to actor origin)
-                        global_location = other.get_transform().transform(bb.location)
-                        global_location = carla.Location(
-                            x=global_location.x,
-                            y=global_location.y,
-                            z=global_location.z,
-                        )
-                        # copy into a new BoundingBox
-                        other_bb = carla.BoundingBox(global_location, bb.extent)
-                        other_bb.rotation = bb.rotation
-                        if expert_utils.check_obb_intersection(
-                            vehicle_bounding_box, other_bb
-                        ):
-                            too_close = True
-                            break
-
-                    if not too_close:
-                        if input_data.get("lidar") is not None:
-                            result["num_points"] = expert_utils.get_num_points_in_bbox(
-                                self.ego_vehicle, result, input_data["lidar"], pad=True
-                            )
-                        else:
-                            result["num_points"] = -1
-
-                        result["visible_pixels"] = expert_utils.get_num_points_in_bbox(
-                            self.ego_vehicle,
-                            result,
-                            global_camera_pc[
-                                TransfuserSemanticSegmentationClass.VEHICLE
-                            ],
-                            pad=True,
-                        )
-
-                        boxes.append(result)
-                        found += 1
+                boxes.append(result)
+                found += 1
 
         # Filter bounding boxes with duplicate id
         bounding_box_ids = set()
