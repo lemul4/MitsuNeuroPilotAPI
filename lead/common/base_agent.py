@@ -13,6 +13,7 @@ from lead.common.kalman_filter import KalmanFilter
 from lead.common.route_planner import RoutePlanner
 from lead.expert.config_expert import ExpertConfig
 from lead.expert.expert_utils import step_cached_property
+from lead.expert.function_timing_profiler import maybe_start_expert_function_timing
 
 LOG = logging.getLogger(__name__)
 
@@ -31,6 +32,9 @@ class BaseAgent:
             self.noisy_lon_ref,
         )
         self.config_expert = ExpertConfig()
+        self._function_timing_profiler = maybe_start_expert_function_timing(
+            self.config_expert
+        )
         self.kalman_filter = KalmanFilter(self.config_expert)
 
         self.yaws_queue = deque(

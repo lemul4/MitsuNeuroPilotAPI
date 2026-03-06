@@ -73,6 +73,12 @@ class ExpertConfig(BaseConfig):
     # ---- Performance settings ---
     # If true, also run speed benchmarking during expert data collection
     profile_expert = False
+    # If true, log per-function timings and call counters for everything under lead/expert.
+    enable_function_timing_logging = False
+    # Output file path for function timing logs.
+    function_timing_log_file = "outputs/logs/expert_function_timing.log"
+    # Minimum function duration (seconds) required for a per-call log line.
+    function_timing_log_min_seconds = 0.0
     # If true, unproject camera on CUDA. Turning this on will speed up unprojection but use more GPU memory.
     unproject_on_cuda = False
     # How often we log in the main loop
@@ -87,7 +93,7 @@ class ExpertConfig(BaseConfig):
     # Queue occupancy ratio where we start applying stronger backpressure.
     save_queue_high_watermark_ratio = 0.75
     # Number of threads to write image files in parallel inside save worker.
-    sensor_image_write_threads = 2
+    sensor_image_write_threads = 4
 
     @overridable_property
     def sync_sensor_processing_with_data_save_freq(self):

@@ -58,6 +58,7 @@ from lead.common import constants
 from lead.common.logging_config import setup_logging
 from lead.expert import expert_py123d_utils
 from lead.expert.expert import Expert
+from lead.expert.function_timing_profiler import stop_expert_function_timing
 
 setup_logging()
 LOG = logging.getLogger(__name__)
@@ -691,22 +692,25 @@ class ExpertPy123D(Expert):
         Args:
             results: Optional results to pass to parent destroy.
         """
-        LOG.info("Closing Py123D writers...")
-        LOG.info(
-            f"Final log location: {self._py123d_logs_root.absolute()}/{self._log_name}"
-        )
-        LOG.info(f"Final map location: {self._py123d_maps_root.absolute()}")
-        self._py123d_log_writer.close()
-        super().destroy(results)
-        LOG.info("Cleanup complete - data saved to Py123D format")
-        if results is not None and self.save_path is not None:
-            with open(
-                os.path.join(
-                    self._py123d_logs_root.absolute(),
-                    self.config_expert.py123d_split,
-                    self._log_name + ".json",
-                ),
-                "w",
-                encoding="utf-8",
-            ) as f:
-                json.dump(results.__dict__, f, indent=2)
+        try:
+            LOG.info("Closing Py123D writers...")
+            LOG.info(
+                f"Final log location: {self._py123d_logs_root.absolute()}/{self._log_name}"
+            )
+            LOG.info(f"Final map location: {self._py123d_maps_root.absolute()}")
+            self._py123d_log_writer.close()
+            super().destroy(results)
+            LOG.info("Cleanup complete - data saved to Py123D format")
+            if results is not None and self.save_path is not None:
+                with open(
+                    os.path.join(
+                        self._py123d_logs_root.absolute(),
+                        self.config_expert.py123d_split,
+                        self._log_name + ".json",
+                    ),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    json.dump(results.__dict__, f, indent=2)
+        finally:
+            stop_expert_function_timing()
