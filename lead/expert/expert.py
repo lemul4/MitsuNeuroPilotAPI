@@ -741,8 +741,8 @@ class Expert(ExpertData):
 
         for vehicle in self.vehicles_inside_bev:
             # Only consider visible vehicles in the BEV to make TransFuser learn easier
-            if not self.is_actor_inside_bev(vehicle):
-                continue
+            # if not self.is_actor_inside_bev(vehicle):
+            #    continue
 
             # Sort out ego vehicle
             if vehicle.id == self.ego_vehicle.id:

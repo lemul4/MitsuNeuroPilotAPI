@@ -116,6 +116,9 @@ class BaseConfig:
         return True
 
     # --- Camera Configuration ---
+    # Horizontal FOV (degrees) used for forward-sector filtering in expert data processing.
+    target_fov = 200.0
+
     @property
     def num_cameras(self):
         """Number of cameras based on the target dataset."""

@@ -1256,13 +1256,13 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
     @step_cached_property
     @beartype
     def vehicles_inside_bev(self) -> list[carla.Actor]:
-        vehicles = self.actors.filter("*vehicle*")
         vehicles = [
-            vehicle for vehicle in vehicles if self.is_actor_inside_bev(vehicle)
+            self.id2actor_map[vid]
+            for vid, bb in self.id2bb_map.items()
+            if bb["class"] == "car" and vid in self.id2actor_map
         ]
-        if (
-            self.config_expert.datagen and self.config_expert.vehicle_occlusion_check
-        ):  # Can only perform occlusion check if we have sensor data
+
+        if self.config_expert.datagen and self.config_expert.vehicle_occlusion_check:
             vehicles = [
                 vehicle
                 for vehicle in vehicles
@@ -1275,6 +1275,7 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
                     < self.config_expert.vehicle_min_num_visible_pixels
                 )
             ]
+
         return vehicles
 
     @step_cached_property
