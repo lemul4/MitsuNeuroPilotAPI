@@ -91,6 +91,10 @@ class ExpertData(ExpertBase):
 
         self.cutin_vehicle_starting_position = None
 
+        # FOV settings for bounding box filtering
+        self.target_fov = float(self.config_expert.target_fov)
+        self.half_fov_rad = np.deg2rad(self.target_fov / 2.0)
+
         # Threading for async data saving
         self._save_queue_maxsize = max(1, int(self.config_expert.save_queue_maxsize))
         self._save_queue = queue.Queue(maxsize=self._save_queue_maxsize)
@@ -893,14 +897,16 @@ class ExpertData(ExpertBase):
         }
         # BEV Semantic
         self.stop_sign_criteria.tick(self.ego_vehicle)
-        input_data["hdmap"] = self.ss_bev_manager.get_observation(
-            self.close_traffic_lights
-        )["hdmap_classes"]
+        bev_data = self.ss_bev_manager.get_observation(self.close_traffic_lights)
+        # применяем маску
+        input_data["hdmap"] = self._apply_bev_mask(bev_data["hdmap_classes"])
+
         if self.config_expert.perturbate_sensors:
-            input_data["hdmap_perturbated"] = (
-                self.ss_bev_manager_perturbated.get_observation(
-                    self.close_traffic_lights
-                )["hdmap_classes"]
+            bev_data_pert = self.ss_bev_manager_perturbated.get_observation(
+                self.close_traffic_lights
+            )
+            input_data["hdmap_perturbated"] = self._apply_bev_mask(
+                bev_data_pert["hdmap_classes"]
             )
 
         can_enhance_semantics = (
@@ -1046,6 +1052,68 @@ class ExpertData(ExpertBase):
         if self.config_expert.save_depth_bits == 8:
             return common_utils.encode_depth_8bit(depth)
         return common_utils.encode_depth_16bit(depth)
+
+    def _apply_bev_mask(self, bev_image):
+        """
+        Applies an inverted FOV mask to BEV map:
+        keeps only the sector inside self.target_fov,
+        masks everything outside it.
+
+        Mask is cached after first creation.
+        """
+        if bev_image.dtype != np.uint8:
+            bev_image = bev_image.astype(np.uint8)
+
+        h, w = bev_image.shape[:2]
+        bev_manager = getattr(self, "ss_bev_manager", None)
+        if bev_manager is not None and hasattr(bev_manager, "_pixels_ev_to_bottom"):
+            # ObsManager rotates BEV by 90 degrees clockwise.
+            # After this rotation ego center becomes (pixels_ev_to_bottom, height / 2).
+            ego_x = int(round(float(bev_manager._pixels_ev_to_bottom)))
+            ego_y = h // 2
+        else:
+            ego_x = w // 2
+            ego_y = h // 2
+
+        ego_x = int(np.clip(ego_x, 0, w - 1))
+        ego_y = int(np.clip(ego_y, 0, h - 1))
+
+        need_rebuild = (
+            not hasattr(self, "_bev_mask")
+            or self._bev_mask.shape != (h, w)
+            or not hasattr(self, "_bev_mask_fov")
+            or self._bev_mask_fov != self.target_fov
+            or not hasattr(self, "_bev_mask_center")
+            or self._bev_mask_center != (ego_x, ego_y)
+        )
+
+        if need_rebuild:
+            mask = np.zeros((h, w), dtype=np.uint8)
+            radius = int(np.ceil(np.hypot(h, w)))
+            half_fov = self.target_fov / 2.0
+
+            # In rotated BEV forward direction points to the right (+x).
+            center_angle = 0.0
+
+            start_angle = center_angle - half_fov
+            end_angle = center_angle + half_fov
+
+            angles = np.deg2rad(np.linspace(start_angle, end_angle, num=300))
+            points = [(ego_x, ego_y)]
+
+            for angle in angles:
+                x = int(round(ego_x + radius * np.cos(angle)))
+                y = int(round(ego_y + radius * np.sin(angle)))
+                points.append((x, y))
+
+            points = np.array(points, dtype=np.int32)
+            cv2.fillPoly(mask, [points], 255)
+
+            self._bev_mask = mask
+            self._bev_mask_fov = self.target_fov
+            self._bev_mask_center = (ego_x, ego_y)
+
+        return cv2.bitwise_and(bev_image, bev_image, mask=self._bev_mask)
 
     def _should_save_camera_panorama(self) -> bool:
         return bool(self.config_expert.SAVE_CAM_IMAGES_AS_PANORAMA)
@@ -2075,6 +2143,25 @@ class ExpertData(ExpertBase):
                 return True
         return False
 
+    def _is_in_fov(self, relative_pos, extent):
+        x = relative_pos[0]
+        y = relative_pos[1]
+
+        # объект полностью позади машины
+        if x <= -extent[0]:
+            return False
+
+        # ограничение дальности впереди (66 м + половина длины объекта)
+        if x > 66 + extent[0]:
+            return False
+
+        angle = abs(np.arctan2(y, x))
+
+        # расширяем угол на половину ширины объекта
+        extra = np.arctan2(extent[1], max(x, 0.001))
+
+        return angle <= (self.half_fov_rad + extra)
+
     @beartype
     def get_bounding_boxes(self, input_data: dict) -> list[dict]:
         boxes = []
@@ -2249,6 +2336,10 @@ class ExpertData(ExpertBase):
                     relative_pos = common_utils.get_relative_transform(
                         ego_matrix, vehicle_matrix
                     )
+
+                    if not self._is_in_fov(relative_pos, vehicle_extent_list):
+                        continue
+
                     vehicle_speed = self._get_forward_speed(
                         transform=vehicle_transform, velocity=vehicle_velocity
                     )
@@ -2375,6 +2466,8 @@ class ExpertData(ExpertBase):
                 relative_pos = common_utils.get_relative_transform(
                     ego_matrix, walker_matrix
                 )
+                if not self._is_in_fov(relative_pos, walker_extent):
+                    continue
 
                 walker_speed = self._get_forward_speed(
                     transform=walker_transform, velocity=walker_velocity
@@ -2632,6 +2725,9 @@ class ExpertData(ExpertBase):
                         ego_matrix, traffic_light_matrix
                     )
 
+                    if not self._is_in_fov(relative_pos, traffic_light_extent):
+                        continue
+
                     distance = np.linalg.norm(relative_pos)
 
                     # Keep the original distance_to_physical_traffic_light
@@ -2719,6 +2815,8 @@ class ExpertData(ExpertBase):
             relative_pos = common_utils.get_relative_transform(
                 ego_matrix, stop_sign_matrix
             )
+            if not self._is_in_fov(relative_pos, stop_sign_extent):
+                continue
 
             distance = np.linalg.norm(relative_pos)
 
