@@ -23,6 +23,7 @@ from lead.common.constants import WeatherVisibility
 from lead.common.logging_config import setup_logging
 from lead.common.pid_controller import ExpertLateralPIDController
 from lead.expert.expert_data import ExpertData
+from lead.expert.function_timing_profiler import stop_expert_function_timing
 from lead.expert.scenario_sorter import ScenarioSorter
 
 matplotlib.use("Agg")  # non-GUI backend for headless servers
@@ -60,28 +61,46 @@ class Expert(ExpertData):
         # Initialize scenario sorter (will be configured with route in _init)
         self.scenario_sorter = ScenarioSorter()
 
-        if self.config_expert.profile_expert:
+        if (
+            self.config_expert.profile_expert
+            and self.config_expert.enable_function_timing_logging
+        ):
+            LOG.info(
+                "profile_expert is disabled because enable_function_timing_logging uses sys.setprofile."
+            )
+
+        if (
+            self.config_expert.profile_expert
+            and not self.config_expert.enable_function_timing_logging
+        ):
             self.profiler = cProfile.Profile()
             self.profiler.enable()
 
     def destroy(self, results=None) -> None:
-        if self.config_expert.profile_expert:
-            self.profiler.disable()
+        try:
+            if (
+                self.config_expert.profile_expert
+                and not self.config_expert.enable_function_timing_logging
+            ):
+                self.profiler.disable()
 
-            # Save to file for visualization
-            try:
-                self.profiler.dump_stats("expert_profile.prof")
-                LOG.info(
-                    "Profile stats saved to 'expert_profile.prof'. Run 'pip install snakeviz && snakeviz expert_profile.prof' to view."
-                )
-            except Exception as e:
-                LOG.error(f"Failed to dump profile stats: {e}")
+                # Save to file for visualization
+                try:
+                    self.profiler.dump_stats("expert_profile.prof")
+                    LOG.info(
+                        "Profile stats saved to 'expert_profile.prof'. Run 'pip install snakeviz && snakeviz expert_profile.prof' to view."
+                    )
+                except Exception as e:
+                    LOG.error(f"Failed to dump profile stats: {e}")
 
-            s = io.StringIO()
-            ps = pstats.Stats(self.profiler, stream=s).sort_stats("cumulative")
-            ps.print_stats("lead/lead/")
-            print(s.getvalue())
-        super().destroy(results)
+                s = io.StringIO()
+                ps = pstats.Stats(self.profiler, stream=s).sort_stats("cumulative")
+                ps.print_stats("lead/lead/")
+                print(s.getvalue())
+            super().destroy(results)
+        finally:
+            if type(self) is Expert:
+                stop_expert_function_timing()
 
     @beartype
     def _init(self, hd_map) -> None:
