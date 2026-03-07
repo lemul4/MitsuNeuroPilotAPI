@@ -141,7 +141,7 @@ def av_sensor_setup(
             "roll": 0.0,
             "pitch": 0.0,
             "yaw": 0.0,
-            "sensor_tick": 0.01,
+            "sensor_tick": config.carla_fps,
             "id": "gps",
         }
     )
@@ -177,6 +177,17 @@ def camera_sensor_setup(
         List of camera sensor configurations
     """
     result = []
+    camera_tick_seconds = None
+    if getattr(config, "camera_sensor_tick_from_data_save_freq", False):
+        if config.data_save_freq <= 0:
+            raise ValueError(
+                "config.data_save_freq must be > 0 when camera_sensor_tick_from_data_save_freq is enabled."
+            )
+        if config.carla_fps <= 0:
+            raise ValueError(
+                "config.carla_fps must be > 0 when camera_sensor_tick_from_data_save_freq is enabled."
+            )
+        camera_tick_seconds = config.data_save_freq / float(config.carla_fps)
 
     # Use dynamic camera indices based on num_cameras configuration
     camera_indices = list(range(1, config.num_cameras + 1))
@@ -204,6 +215,11 @@ def camera_sensor_setup(
                 "height": cam_height,
                 "fov": camera_fov,
                 "id": f"rgb{suffix}",
+                **(
+                    {"sensor_tick": camera_tick_seconds}
+                    if camera_tick_seconds is not None
+                    else {}
+                ),
             }
         )
         LOG.info(
@@ -234,6 +250,11 @@ def camera_sensor_setup(
                         "height": cam_height,
                         "fov": camera_fov,
                         "id": f"{base_id}{suffix}",
+                        **(
+                            {"sensor_tick": camera_tick_seconds}
+                            if camera_tick_seconds is not None
+                            else {}
+                        ),
                     }
                 )
                 LOG.info(
@@ -269,6 +290,11 @@ def camera_sensor_setup(
                                 "height": cam_height,
                                 "fov": camera_fov,
                                 "id": f"{base_id}{suffix}_perturbated",
+                                **(
+                                    {"sensor_tick": camera_tick_seconds}
+                                    if camera_tick_seconds is not None
+                                    else {}
+                                ),
                             },
                             perturbation_translation,
                             perturbation_rotation,

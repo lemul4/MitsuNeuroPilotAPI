@@ -284,7 +284,8 @@ class CrossJunctionDefectTrafficLight(CrossJunctionDefectTrafficLightBase):
                 2, 
                 self._flow_speed, 
                 initial_actors=True, 
-                parent_scenario_type=type(self).__name__
+                parent_scenario_type=type(self).__name__,
+                parent_scenario_id=id(self),
             ))
         
         root.add_child(ScenarioTimeout(self._scenario_timeout, self.config.name))

@@ -2857,12 +2857,16 @@ class ActorFlow(AtomicBehavior):
     """
 
     def __init__(self, source_wp, sink_wp, spawn_dist_interval, sink_dist=2,
-                 actor_speed=20 / 3.6, initial_actors=False, initial_junction=False, name="ActorFlow", parent_scenario_type: str = None):
+                 actor_speed=20 / 3.6, initial_actors=False, initial_junction=False, name="ActorFlow",
+                 parent_scenario_type: str = None, parent_scenario_id: int | None = None):
         """
         Setup class members
         """
         super().__init__(name)
         self.parent_scenario_type = parent_scenario_type
+        self.parent_scenario_id = parent_scenario_id
+        self._logged_parent_inactive = False
+        self._logged_missing_parent_memory = False
         self._rng = CarlaDataProvider.get_random_seed()
         self._world = CarlaDataProvider.get_world()
         self._tm = CarlaDataProvider.get_client().get_trafficmanager(CarlaDataProvider.get_traffic_manager_port())
@@ -2893,6 +2897,31 @@ class ActorFlow(AtomicBehavior):
 
         self._terminated = False
 
+    def _get_parent_scenario(self):
+        if self.parent_scenario_type is None:
+            return None
+        for scenario in CarlaDataProvider.active_scenarios:
+            if self.parent_scenario_id is not None:
+                if (
+                    scenario.scenario_id == self.parent_scenario_id
+                    and scenario.name == self.parent_scenario_type
+                ):
+                    return scenario
+            elif scenario.name == self.parent_scenario_type:
+                return scenario
+        return None
+
+    def _log_parent_inactive_once(self, reason: str):
+        if self._logged_parent_inactive:
+            return
+        scenario_desc = self.parent_scenario_type
+        if self.parent_scenario_id is not None:
+            scenario_desc = f"{scenario_desc}(id={self.parent_scenario_id})"
+        self.logger.warning(
+            f"ActorFlow: parent scenario {scenario_desc} is not active; {reason}"
+        )
+        self._logged_parent_inactive = True
+
     def initialise(self):
         if self._initial_actors:
             grp = CarlaDataProvider.get_global_route_planner()
@@ -2909,6 +2938,13 @@ class ActorFlow(AtomicBehavior):
                 self._spawn_dist = self._rng.uniform(self._min_spawn_dist, self._max_spawn_dist)
 
     def _spawn_actor(self, transform):
+        parent_scenario = None
+        if self.parent_scenario_type is not None:
+            parent_scenario = self._get_parent_scenario()
+            if parent_scenario is None:
+                self._log_parent_inactive_once("skipping actor spawn request")
+                return py_trees.common.Status.RUNNING
+
         actor = CarlaDataProvider.request_new_actor(
             'vehicle.*', transform, rolename='scenario',
             attribute_filter=self._attribute_filter, tick=False
@@ -2937,8 +2973,18 @@ class ActorFlow(AtomicBehavior):
         self._collision_sensor_list.append(sensor)
         self._actor_list.append(actor)
 
-        if self.parent_scenario_type is not None:
-            CarlaDataProvider.get_current_scenario_memory()["adversarial_actors"] = self._actor_list
+        if parent_scenario is not None:
+            current_scenario_memory = parent_scenario.meta
+            if current_scenario_memory is None:
+                if not self._logged_missing_parent_memory:
+                    self.logger.warning(
+                        "ActorFlow: parent scenario memory is None for "
+                        f"{parent_scenario.name}(id={parent_scenario.scenario_id}); "
+                        "skipping adversarial_actors update"
+                    )
+                    self._logged_missing_parent_memory = True
+            else:
+                current_scenario_memory["adversarial_actors"] = self._actor_list
 
     def update(self):
         """Controls the created actors and creaes / removes other when needed"""
@@ -2964,7 +3010,10 @@ class ActorFlow(AtomicBehavior):
             distance = self._source_location.distance(actor_location) if actor_location else 0
 
         if distance > self._spawn_dist:
-            self._spawn_actor(self._source_transform)
+            if self.parent_scenario_type is not None and self._get_parent_scenario() is None:
+                self._log_parent_inactive_once("skipping new actor spawns")
+            else:
+                self._spawn_actor(self._source_transform)
 
         return py_trees.common.Status.RUNNING
 

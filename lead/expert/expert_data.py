@@ -496,10 +496,14 @@ class ExpertData(ExpertBase):
                     "roll": 0.0,
                     "pitch": 0.0,
                     "yaw": 0.0,
-                    "sensor_tick": 0.05,
+                    "sensor_tick": self.config_expert.carla_frame_rate,
                     "id": "imu",
                 },
-                {"type": "sensor.speedometer", "reading_frequency": 20, "id": "speed"},
+                {
+                    "type": "sensor.speedometer",
+                    "reading_frequency": self.config_expert.carla_fps,
+                    "id": "speed",
+                },
                 {
                     "type": "sensor.other.gnss",
                     "x": 0.0,
