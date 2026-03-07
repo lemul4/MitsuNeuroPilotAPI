@@ -28,10 +28,7 @@ export LEAD_EXPERT_CONFIG="target_dataset=2 save_camera_pc=${SAVE_CAMERA_PC} per
 export SAVE_PATH=data/expert_debug/data/$SCENARIO_NAME
 export CHECKPOINT_ENDPOINT=data/expert_debug/results/${ROUTE_NUMBER}_result.json
 
-# Clean previous data
-rm -rf data/expert_debug/buckets
-rm -rf data/expert_debug/data
-rm -rf data/expert_debug/results
+
 
 # Start the evaluation
 python -u 3rd_party/leaderboard_autopilot/leaderboard/leaderboard_evaluator_local.py \

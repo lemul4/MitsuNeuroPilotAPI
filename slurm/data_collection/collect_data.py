@@ -3,328 +3,567 @@ import glob
 import json
 import os
 import random
+import re
+import signal
 import subprocess
+import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 from tqdm import tqdm
 
+try:
+    import select
+    import termios
+    import tty
 
-def make_bash(
-    data_save_root: str,
-    code_dir: str,
-    route_file_number: str,
-    agent_name: str,
-    route_file: str,
-    ckeckpoint_endpoint: str,
-    save_pth: str,
-    seed: int,
-    carla_root: str,
-    town: str,
-    repetition: int,
-    scenario_name: str,
-    jobname: str,
-    partition_name: str,
-    py123d_format: bool = False,
-    timeout: str = "0-01:00",
-) -> str:
+    HAS_TTY_CONTROL = True
+except ImportError:
+    HAS_TTY_CONTROL = False
+
+RUN_STATUS_SUCCESS = "success"
+RUN_STATUS_FAILURE = "failure"
+RUN_STATUS_SKIPPED = "skipped"
+RUN_STATUS_STOPPED = "stopped"
+
+RESULT_FAILURE_STATUSES = {
+    "Failed - Agent couldn't be set up",
+    "Failed",
+    "Failed - Simulation crashed",
+    "Failed - Agent crashed",
+    "Started",
+}
+
+
+@dataclass(frozen=True)
+class CarlaEndpoint:
+    host: str
+    port: int
+    tm_port: int
+
+
+@dataclass(frozen=True)
+class RouteJob:
+    route: str
+    routefile_number: str
+    checkpoint_endpoint: str
+    save_path: str
+    seed: int
+    town: str
+    repetition: int
+    scenario_type: str
+
+
+class TerminalRouteControls:
+    """Terminal controls:
+    - Ctrl+C: skip current route
+    - Ctrl+X: stop entire program
+    """
+
+    def __init__(self) -> None:
+        self.skip_current_route = threading.Event()
+        self.stop_program = threading.Event()
+        self._shutdown = threading.Event()
+        self._keyboard_thread: threading.Thread | None = None
+        self._previous_sigint_handler = None
+        self._stdin_fd: int | None = None
+        self._old_termios = None
+        self._keyboard_enabled = False
+
+    def _handle_sigint(self, _signum, _frame) -> None:
+        # Keep program alive: Ctrl+C skips only the active route.
+        print(
+            "\n[controls] Ctrl+C detected: skipping current route. "
+            "Use Ctrl+X to stop the whole program."
+        )
+        self.skip_current_route.set()
+
+    def _keyboard_loop(self) -> None:
+        while not self._shutdown.is_set() and not self.stop_program.is_set():
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+            except Exception:
+                break
+            if not ready:
+                continue
+
+            try:
+                key = sys.stdin.read(1)
+            except Exception:
+                break
+
+            if key == "\x18":  # Ctrl+X
+                print("\n[controls] Ctrl+X detected: stopping the program...")
+                self.stop_program.set()
+                self.skip_current_route.set()
+                break
+
+    def start(self) -> None:
+        self._previous_sigint_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self._handle_sigint)
+
+        if not HAS_TTY_CONTROL or not sys.stdin.isatty():
+            return
+
+        try:
+            self._stdin_fd = sys.stdin.fileno()
+            self._old_termios = termios.tcgetattr(self._stdin_fd)
+            tty.setcbreak(self._stdin_fd)
+            self._keyboard_enabled = True
+            self._keyboard_thread = threading.Thread(
+                target=self._keyboard_loop, name="route-controls", daemon=True
+            )
+            self._keyboard_thread.start()
+        except Exception:
+            self._keyboard_enabled = False
+            self._stdin_fd = None
+            self._old_termios = None
+
+    def stop(self) -> None:
+        self._shutdown.set()
+        if self._keyboard_thread is not None:
+            self._keyboard_thread.join(timeout=1.0)
+
+        if (
+            self._keyboard_enabled
+            and self._stdin_fd is not None
+            and self._old_termios is not None
+        ):
+            try:
+                termios.tcsetattr(self._stdin_fd, termios.TCSADRAIN, self._old_termios)
+            except Exception:
+                pass
+
+        if self._previous_sigint_handler is not None:
+            signal.signal(signal.SIGINT, self._previous_sigint_handler)
+
+    def consume_skip_request(self) -> bool:
+        if self.skip_current_route.is_set():
+            self.skip_current_route.clear()
+            return True
+        return False
+
+
+def read_int_config(path: str) -> int:
+    with open(path, encoding="utf-8") as f:
+        return int(f.read().strip())
+
+
+def parse_route_metadata(route_path: str) -> tuple[str, str]:
+    tree = ET.parse(route_path)
+    root = tree.getroot()
+    route_elem = root.find("route")
+    if route_elem is None or "town" not in route_elem.attrib:
+        raise ValueError(f"Route file {route_path} is missing route/town metadata")
+
+    scenario_elem = root.find("route/scenarios/scenario")
+    scenario_type = (
+        scenario_elem.attrib["type"] if scenario_elem is not None else "noScenarios"
+    )
+    return route_elem.attrib["town"], scenario_type
+
+
+def parse_single_carla_endpoint(endpoints_csv: str) -> CarlaEndpoint:
+    entries = [entry.strip() for entry in endpoints_csv.split(",") if entry.strip()]
+    if not entries:
+        raise ValueError("--carla-endpoints must contain exactly one endpoint")
+    if len(entries) != 1:
+        raise ValueError(
+            "--carla-endpoints must contain exactly one endpoint in format host:rpc_port:tm_port"
+        )
+
+    raw = entries[0]
+    parts = [p.strip() for p in raw.split(":")]
+    if len(parts) != 3:
+        raise ValueError(
+            f"Invalid endpoint '{raw}'. Expected format host:rpc_port:tm_port"
+        )
+
+    host = parts[0]
+    if not host:
+        raise ValueError(f"Invalid endpoint '{raw}': host must be non-empty")
+
+    try:
+        port = int(parts[1])
+        tm_port = int(parts[2])
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid endpoint '{raw}': rpc_port and tm_port must be integers"
+        ) from exc
+
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Invalid endpoint '{raw}': rpc_port must be in [1, 65535]")
+    if not (1 <= tm_port <= 65535):
+        raise ValueError(f"Invalid endpoint '{raw}': tm_port must be in [1, 65535]")
+
+    return CarlaEndpoint(host=host, port=port, tm_port=tm_port)
+
+
+def ensure_collection_dirs(data_save_root: str) -> None:
     os.makedirs(f"{data_save_root}/stderr", exist_ok=True)
     os.makedirs(f"{data_save_root}/stdout", exist_ok=True)
     os.makedirs(f"{data_save_root}/scripts", exist_ok=True)
-    jobfile = f"{data_save_root}/scripts/{route_file_number}_Rep{repetition}.sh"
-    with open("slurm/configs/max_sleep.txt", encoding="utf-8") as f:
-        max_sleep = int(f.read())
-    # create folder
-    Path(jobfile).parent.mkdir(parents=True, exist_ok=True)
-
-    # Add py123d environment variables if needed
-    py123d_env_vars = ""
-    if py123d_format:
-        py123d_env_vars = f'''export PY123D_DATA_ROOT="{data_save_root}/"
-export LEAD_EXPERT_CONFIG="target_dataset=6 py123d_data_format=true use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false"'''
-
-    template = f"""#!/bin/bash
-#SBATCH --job-name={jobname}_{route_file_number}
-#SBATCH --partition={partition_name}
-#SBATCH -o {data_save_root}/stdout/{route_file_number}.log
-#SBATCH -e {data_save_root}/stderr/{route_file_number}.log
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=40gb
-#SBATCH --time={timeout}
-#SBATCH --gres=gpu:1080ti:1
-
-echo "SLURMD_NODENAME: $SLURMD_NODENAME"
-echo "SLURM_JOB_ID: $SLURM_JOB_ID"
-echo "SLURM_JOB_NODELIST: $SLURM_JOB_NODELIST"
-scontrol show job $SLURM_JOB_ID
-
-dt=$(date '+%d/%m/%Y %H:%M:%S');
-echo "Job started: $dt"
-
-echo "Current branch:"
-git branch
-echo "Current commit:"
-git log -1
-echo "Current hash:"
-git rev-parse HEAD
 
 
-export FREE_STREAMING_PORT=$(random_free_port.sh)
-export FREE_WORLD_PORT=$(random_free_port.sh)
-export TM_PORT=$(random_free_port.sh)
-
-sleep 2
-
-echo "start python"
-pwd
-
-export SCENARIO_RUNNER_ROOT={code_dir}/3rd_party/scenario_runner_autopilot
-export LEADERBOARD_ROOT={code_dir}/3rd_party/leaderboard_autopilot
-
-# carla
-export CARLA_ROOT={carla_root}
-export CARLA_SERVER={carla_root}/CarlaUE4.sh
-export PYTHONPATH={carla_root}/PythonAPI/carla:$PYTHONPATH
-export PYTHONPATH=3rd_party/leaderboard_autopilot:$PYTHONPATH
-export PYTHONPATH=3rd_party/scenario_runner_autopilot:$PYTHONPATH
-export REPETITIONS=1
-export DEBUG_CHALLENGE=0
-export TEAM_AGENT={agent_name}
-export CHALLENGE_TRACK_CODENAME=MAP
-export ROUTES={route_file}
-export TOWN={town}
-export REPETITION={repetition}
-export TM_SEED={seed}
-export SCENARIO_NAME={scenario_name}
-
-export CHECKPOINT_ENDPOINT={ckeckpoint_endpoint}
-export TEAM_CONFIG={route_file}
-export RESUME=1
-export DATAGEN=1
-export SAVE_PATH={save_pth}
-
-echo "Start python"
-
-echo "FREE_STREAMING_PORT: $FREE_STREAMING_PORT"
-echo "FREE_WORLD_PORT: $FREE_WORLD_PORT"
-echo "TM_PORT: $TM_PORT"
-
-bash {carla_root}/CarlaUE4.sh \
-    --world-port=$FREE_WORLD_PORT \
-    -RenderOffScreen \
-    -nosound \
-    -graphicsadapter=0 \
-    -carla-streaming-port=$FREE_STREAMING_PORT &
-
-sleep {max_sleep}
-
-eval "$(conda shell.bash hook)"
-if [ -z "$CONDA_INTERPRETER" ]; then
-    export CONDA_INTERPRETER="lead" # Check if CONDA_INTERPRETER is not set, then set it to lead
-fi
-source activate "$CONDA_INTERPRETER"
-which python3
-
-{py123d_env_vars}
-
-python 3rd_party/leaderboard_autopilot/leaderboard/leaderboard_evaluator_local.py \
-    --port=${{FREE_WORLD_PORT}} \
-    --traffic-manager-port=${{TM_PORT}} \
-    --traffic-manager-seed=${{TM_SEED}} \
-    --routes=${{ROUTES}} \
-    --repetitions=${{REPETITIONS}} \
-    --track=${{CHALLENGE_TRACK_CODENAME}} \
-    --checkpoint=${{CHECKPOINT_ENDPOINT}} \
-    --agent=${{TEAM_AGENT}} \
-    --agent-config=${{TEAM_CONFIG}} \
-    --debug=0 \
-    --resume=${{RESUME}} \
-    --timeout=600
-"""
-
-    with open(jobfile, "w", encoding="utf-8") as f:
-        f.write(template)
-    return jobfile
-
-
-def get_running_jobs(jobname: str, user_name: str) -> tuple[int, list[str], list[str]]:
-    job_list = (
-        subprocess.check_output(
-            (
-                f"SQUEUE_FORMAT2='jobid:10,username:{len(username)},name:130' squeue --sort V | grep {user_name} | \
-                    grep {jobname} || true"
-            ),
-            shell=True,
-        )
-        .decode("utf-8")
-        .splitlines()
+def configure_expert_env(env: dict[str, str], save_path: str) -> None:
+    env["SAVE_CAMERA_PC"] = "False"
+    env["ENABLE_PERTURBATED_SENSORS"] = "False"
+    env["SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ"] = "True"
+    env["COMPUTE_CAMERA_PC"] = "False"
+    env["COMPRESS_IMAGES"] = "False"
+    env["DATAGEN"] = "0"
+    env["LEAD_EXPERT_CONFIG"] = (
+        "target_dataset=2 "
+        f"save_camera_pc={env['SAVE_CAMERA_PC']} "
+        f"perturbate_sensors={env['ENABLE_PERTURBATED_SENSORS']} "
+        "sync_sensor_processing_with_data_save_freq="
+        f"{env['SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ']} "
+        f"compute_camera_pc={env['COMPUTE_CAMERA_PC']} "
+        f"compress_images={env['COMPRESS_IMAGES']}"
     )
-    currently_num_running_jobs = len(job_list)
-    #  line is sth like "4767364   gwb791 eval_julian_4170_0   "
-    routefile_number_list = [
-        line.split("_")[-2] + "_" + line.split("_")[-1].strip() for line in job_list
-    ]
-    pid_list = [line.split(" ")[0] for line in job_list]
-    return currently_num_running_jobs, routefile_number_list, pid_list
+    env["SAVE_PATH"] = save_path
 
 
-def get_last_line_from_file(
-    filepath: str,
-) -> str:  # this is used to check log files for errors
+def needs_rerun(result_file: str) -> bool:
+    if not os.path.exists(result_file):
+        return True
+
     try:
-        with open(filepath, "rb", encoding="utf-8") as f:
-            try:
-                f.seek(-2, os.SEEK_END)
-                while f.read(1) != b"\n":
-                    f.seek(-2, os.SEEK_CUR)
-            except OSError:
-                f.seek(0)
-            last_line = f.readline().decode()
-    except:
-        last_line = ""
-    return last_line
+        with open(result_file, encoding="utf-8") as f_result:
+            evaluation_data = json.load(f_result)
+    except Exception:
+        return True
 
+    try:
+        checkpoint = evaluation_data["_checkpoint"]
+        progress = checkpoint["progress"]
+        records = checkpoint["records"]
+    except Exception:
+        return True
 
-def cancel_jobs_with_err_in_log(logroot: str, jobname: str, user_name: str) -> None:
-    # check if the log file contains certain error messages, then terminate the job
-    print("Checking logs for errors...")
-    _, routefile_number_list, pid_list = get_running_jobs(jobname, user_name)
-    for i, rf_num in enumerate(routefile_number_list):
-        logfile_path = os.path.join(logroot, f"run_files/logs/qsub_out{rf_num}.log")
-        last_line = get_last_line_from_file(logfile_path)
-        terminate = False
-        if "Actor" in last_line and "not found!" in last_line:
-            terminate = True
-        if "Watchdog exception - Timeout" in last_line:
-            terminate = True
-        if "Engine crash handling finished; re-raising signal 11" in last_line:
-            terminate = True
-        if terminate:
-            print(
-                f"Terminating route {rf_num} with pid {pid_list[i]} due to error in logfile."
-            )
-            subprocess.check_output(f"scancel {pid_list[i]}", shell=True)
+    if len(progress) < 2 or progress[0] < progress[1]:
+        return True
 
+    for record in records:
+        if record.get("scores", {}).get("score_route", 0.0) <= 1e-11:
+            return True
+        if record.get("status") in RESULT_FAILURE_STATUSES:
+            return True
 
-def wait_for_jobs_to_finish(
-    logroot: str, jobname: str, user_name: str, max_n_parallel_jobs: int
-) -> None:
-    currently_running_jobs, _, _ = get_running_jobs(jobname, user_name)
-    print(f"{currently_running_jobs}/{max_n_parallel_jobs} jobs are running...")
-    counter = 0
-    while currently_running_jobs >= max_n_parallel_jobs:
-        if counter == 0:
-            cancel_jobs_with_err_in_log(logroot, jobname, user_name)
-        time.sleep(5)
-        currently_running_jobs, _, _ = get_running_jobs(jobname, user_name)
-        counter = (counter + 1) % 4
-
-
-def get_num_jobs(job_name: str, username: str) -> tuple[int, int]:
-    len_usrn = len(username)
-    num_running_jobs = int(
-        subprocess.check_output(
-            f"SQUEUE_FORMAT2='username:{len_usrn},name:130' squeue --sort V | grep {username} | grep {job_name} | wc -l",
-            shell=True,
-        )
-        .decode("utf-8")
-        .replace("\n", "")
-    )
-    with open(
-        "slurm/configs/max_num_parallel_jobs_collect_data.txt", encoding="utf-8"
-    ) as f:
-        max_num_parallel_jobs = int(f.read())
-
-    return num_running_jobs, max_num_parallel_jobs
+    return False
 
 
 def is_job_done(result_file: str) -> bool:
-    need_run_again = False
-    if os.path.exists(result_file):
-        with open(result_file, encoding="utf-8") as f_result:
-            evaluation_data = json.load(f_result)
-        progress = evaluation_data["_checkpoint"]["progress"]
-        if len(progress) < 2 or progress[0] < progress[1]:
-            need_run_again = True
-        else:
-            for record in evaluation_data["_checkpoint"]["records"]:
-                if record["scores"]["score_route"] <= 0.00000000001:
-                    need_run_again = True
-                if record["status"] == "Failed - Agent couldn't be set up":
-                    need_run_again = True
-                if record["status"] == "Failed":
-                    need_run_again = True
-                if record["status"] == "Failed - Simulation crashed":
-                    need_run_again = True
-                if record["status"] == "Failed - Agent crashed":
-                    need_run_again = True
-                if record["status"] == "Started":
-                    need_run_again = True
-
-        if not need_run_again:
-            # delete old job
-            print(f"Finished job {job_file}")
-    else:
-        need_run_again = True
-    return not need_run_again
+    return not needs_rerun(result_file)
 
 
-def arg_parse() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Collect dataset")
-    parser.add_argument(
-        "--root_folder", type=str, default="data/", help="Root folder for data"
+def sanitize_tag(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value)
+
+
+def build_route_jobs(
+    routes: list[str],
+    repetition_start: int,
+    repetitions: int,
+    scenario_white_lists: list[str],
+    scenario_blacklist: list[str],
+    data_save_directory: Path,
+) -> list[RouteJob]:
+    jobs: list[RouteJob] = []
+    seed_counter = 1000000 * repetition_start - 1
+
+    for repetition in range(repetition_start, repetitions):
+        for route in routes:
+            seed_counter += 1
+
+            try:
+                town, scenario_type = parse_route_metadata(route)
+            except Exception as e:
+                print(f"Error parsing metadata from route {route}: {e}")
+                raise
+
+            if (
+                len(scenario_white_lists) > 0
+                and scenario_type not in scenario_white_lists
+            ):
+                print("Ignoring route with scenario type:", scenario_type)
+                continue
+
+            if len(scenario_blacklist) > 0 and scenario_type in scenario_blacklist:
+                print("Ignoring blacklisted route with scenario type:", scenario_type)
+                continue
+
+            routefile_number = Path(route).stem
+            checkpoint_endpoint = str(
+                data_save_directory
+                / "results"
+                / scenario_type
+                / f"{routefile_number}_result.json"
+            )
+            save_path = str(data_save_directory / "data" / scenario_type)
+            Path(save_path).mkdir(parents=True, exist_ok=True)
+
+            jobs.append(
+                RouteJob(
+                    route=route,
+                    routefile_number=routefile_number,
+                    checkpoint_endpoint=checkpoint_endpoint,
+                    save_path=save_path,
+                    seed=seed_counter,
+                    town=town,
+                    repetition=repetition,
+                    scenario_type=scenario_type,
+                )
+            )
+
+    return jobs
+
+
+def stop_route_process_gracefully(
+    proc: subprocess.Popen, route_id: str, action: str
+) -> None:
+    """Ask evaluator to stop via SIGINT first so destroy/cleanup can run."""
+    try:
+        print(
+            f"[local] {action} route {route_id}: sending SIGINT for graceful shutdown..."
+        )
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=30)
+        return
+    except subprocess.TimeoutExpired:
+        print(
+            f"[local] Route {route_id} did not stop after SIGINT; escalating to SIGTERM."
+        )
+    except Exception as e:
+        print(f"[local] Failed to send SIGINT to route {route_id}: {e}")
+
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            print(f"[local] Route {route_id} still alive after SIGTERM; killing.")
+        except Exception:
+            pass
+
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def run_single_route_local(
+    job: RouteJob,
+    endpoint: CarlaEndpoint,
+    code_root: str,
+    carla_root: str,
+    agent: str,
+    stdout_root: Path,
+    stderr_root: Path,
+    attempt_idx: int,
+    controls: TerminalRouteControls,
+) -> str:
+    endpoint_tag = f"{sanitize_tag(endpoint.host)}_{endpoint.port}_{endpoint.tm_port}"
+    scenario_tag = sanitize_tag(job.scenario_type)
+    log_tag = (
+        f"{scenario_tag}_{job.routefile_number}_Rep{job.repetition}_"
+        f"attempt{attempt_idx}_{endpoint_tag}"
     )
-    parser.add_argument(
-        "--route_folder",
-        type=str,
-        default="data/data_routes",
-        help="Folder containing route files",
+    stdout_path = stdout_root / f"{log_tag}.log"
+    stderr_path = stderr_root / f"{log_tag}.log"
+
+    env = os.environ.copy()
+    env["SCENARIO_RUNNER_ROOT"] = f"{code_root}/3rd_party/scenario_runner_autopilot"
+    env["LEADERBOARD_ROOT"] = f"{code_root}/3rd_party/leaderboard_autopilot"
+    env["CARLA_ROOT"] = carla_root
+
+    pythonpath_entries = [
+        f"{carla_root}/PythonAPI/carla",
+        "3rd_party/leaderboard_autopilot",
+        "3rd_party/scenario_runner_autopilot",
+    ]
+    old_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = ":".join(
+        pythonpath_entries + ([old_pythonpath] if old_pythonpath else [])
     )
-    parser.add_argument(
-        "--py123d",
-        action="store_true",
-        help="Enable Py123D data format for unified dataset compatibility",
+
+    env["REPETITIONS"] = "1"
+    env["DEBUG_CHALLENGE"] = "0"
+    env["TEAM_AGENT"] = agent
+    env["CHALLENGE_TRACK_CODENAME"] = "MAP"
+    env["ROUTES"] = job.route
+    env["TOWN"] = job.town
+    env["REPETITION"] = str(job.repetition)
+    env["TM_SEED"] = str(job.seed)
+    env["SCENARIO_NAME"] = job.scenario_type
+    env["CHECKPOINT_ENDPOINT"] = job.checkpoint_endpoint
+    env["TEAM_CONFIG"] = job.route
+    env["RESUME"] = "1"
+    configure_expert_env(env, job.save_path)
+
+    evaluator_cmd = [
+        "python3",
+        "3rd_party/leaderboard_autopilot/leaderboard/leaderboard_evaluator_local.py",
+        f"--host={endpoint.host}",
+        f"--port={endpoint.port}",
+        f"--traffic-manager-port={endpoint.tm_port}",
+        f"--traffic-manager-seed={job.seed}",
+        f"--routes={job.route}",
+        "--repetitions=1",
+        "--track=MAP",
+        f"--checkpoint={job.checkpoint_endpoint}",
+        f"--agent={agent}",
+        f"--agent-config={job.route}",
+        "--debug=0",
+        "--resume=1",
+        "--timeout=60",
+    ]
+
+    with (
+        open(stdout_path, "w", encoding="utf-8") as stdout_f,
+        open(stderr_path, "w", encoding="utf-8") as stderr_f,
+    ):
+        proc = subprocess.Popen(
+            evaluator_cmd,
+            cwd=code_root,
+            env=env,
+            stdout=stdout_f,
+            stderr=stderr_f,
+        )
+        while True:
+            return_code = proc.poll()
+            if return_code is not None:
+                break
+
+            if controls.stop_program.is_set():
+                stop_route_process_gracefully(
+                    proc=proc, route_id=job.routefile_number, action="Stopping program,"
+                )
+                return RUN_STATUS_STOPPED
+
+            if controls.consume_skip_request():
+                stop_route_process_gracefully(
+                    proc=proc, route_id=job.routefile_number, action="Skipping"
+                )
+                return RUN_STATUS_SKIPPED
+
+            time.sleep(0.5)
+
+    if return_code == 0 and is_job_done(job.checkpoint_endpoint):
+        return RUN_STATUS_SUCCESS
+    return RUN_STATUS_FAILURE
+
+
+def run_local_collection(
+    jobs: list[RouteJob],
+    endpoint: CarlaEndpoint,
+    code_root: str,
+    carla_root: str,
+    agent: str,
+    data_save_directory: Path,
+) -> None:
+    ensure_collection_dirs(str(data_save_directory))
+    stdout_root = data_save_directory / "stdout"
+    stderr_root = data_save_directory / "stderr"
+    max_attempts = 0
+
+    failures: list[RouteJob] = []
+    skipped: list[RouteJob] = []
+    total = len(jobs)
+    interrupted = False
+    controls = TerminalRouteControls()
+    controls.start()
+    print("[controls] Ctrl+C = skip current route, Ctrl+X = stop program.")
+    try:
+        for idx, job in enumerate(jobs, start=1):
+            if controls.stop_program.is_set():
+                interrupted = True
+                break
+
+            # Avoid stale Ctrl+C from affecting the next route.
+            controls.consume_skip_request()
+
+            print(
+                f"[local] {idx}/{total} route={job.routefile_number} "
+                f"scenario={job.scenario_type} endpoint={endpoint.host}:{endpoint.port}"
+            )
+
+            if is_job_done(job.checkpoint_endpoint):
+                print(f"[local] Job {job.routefile_number} already finished. Skipping.")
+                continue
+
+            success = False
+            was_skipped = False
+            for attempt_idx in range(max_attempts + 1):
+                run_status = run_single_route_local(
+                    job=job,
+                    endpoint=endpoint,
+                    code_root=code_root,
+                    carla_root=carla_root,
+                    agent=agent,
+                    stdout_root=stdout_root,
+                    stderr_root=stderr_root,
+                    attempt_idx=attempt_idx,
+                    controls=controls,
+                )
+
+                if run_status == RUN_STATUS_SUCCESS:
+                    success = True
+                    break
+
+                if run_status == RUN_STATUS_SKIPPED:
+                    was_skipped = True
+                    skipped.append(job)
+                    print(f"[local] Route {job.routefile_number} skipped manually.")
+                    break
+
+                if run_status == RUN_STATUS_STOPPED:
+                    interrupted = True
+                    was_skipped = True
+                    skipped.append(job)
+                    print(f"[local] Route {job.routefile_number} stopped by Ctrl+X.")
+                    break
+
+                print(
+                    f"[local] Retry {attempt_idx + 1}/{max_attempts} failed for {job.routefile_number}"
+                )
+
+            if interrupted:
+                break
+
+            if was_skipped:
+                continue
+
+            if not success:
+                failures.append(job)
+                print(f"[local] Exhausted retries for {job.routefile_number}.")
+    finally:
+        controls.stop()
+
+    print(
+        f"Local collection completed. failed={len(failures)} skipped={len(skipped)} total={total}"
     )
-    return parser.parse_args()
+    if interrupted:
+        print("Collection interrupted by user (Ctrl+X).")
 
 
-if __name__ == "__main__":
-    args = arg_parse()
-    repetitions = 1
-    repetition_start = 0
-    shuffle_routes = True
-    partitions = ["day"]
-    job_name = "collect"
-    username = os.environ["USER"]
-    code_root = os.getcwd()
-    carla_root = os.getcwd() + "/3rd_party/CARLA_0915"
-    max_route_per_scenario_type = 40  # -1 means no limit
-
-    # Configure based on data format
-    if args.py123d:
-        agent = f"{code_root}/lead/expert/expert_py123d.py"
-        dataset_name = "carla_py123d"
-    else:
-        agent = f"{code_root}/lead/expert/expert.py"
-        dataset_name = "carla_leaderboard2"
-
-    scenario_white_lists = []  # Empty list = all scenarios allowed
-    scenario_blacklist = ["YieldToEmergencyVehicle"]  # Scenarios to exclude
-    root_folder = args.root_folder  # With ending slash
-    os.makedirs(root_folder, exist_ok=True)
-    data_save_directory = root_folder + dataset_name
-    log_root = f"{data_save_directory}/slurm"
-
-    route_folder = args.route_folder
+def discover_routes(
+    route_folder: str,
+    shuffle_routes: bool,
+    scenario_white_lists: list[str],
+    scenario_blacklist: list[str],
+    max_route_per_scenario_type: int,
+) -> list[str]:
     print("Start looking for routes...")
     routes = glob.glob(f"{route_folder}/**/*.xml", recursive=True)
     if shuffle_routes:
         random.seed(42)
         random.shuffle(routes)
     print(f"Found {len(routes)} routes in total.")
+
     if len(scenario_white_lists) > 0:
         routes = [
             route
@@ -340,235 +579,130 @@ if __name__ == "__main__":
         ]
         print(f"Applied scenario blacklist. Total routes: {len(routes)}")
 
-    # Apply max_route_per_scenario_type constraint
     if max_route_per_scenario_type > 0:
-        scenario_type_counts = {}
-        filtered_routes = []
+        scenario_type_counts: dict[str, int] = {}
+        filtered_routes: list[str] = []
         for route in tqdm(routes, desc="Filtering routes by scenario type"):
             try:
-                tree = ET.parse(route)
-                root = tree.getroot()
-                scenario_elem = root.find("route/scenarios/scenario")
-                scenario_type = (
-                    scenario_elem.attrib["type"]
-                    if scenario_elem is not None
-                    else "noScenarios"
-                )
-
-                if scenario_type not in scenario_type_counts:
-                    scenario_type_counts[scenario_type] = 0
-
+                _, scenario_type = parse_route_metadata(route)
+                scenario_type_counts.setdefault(scenario_type, 0)
                 if scenario_type_counts[scenario_type] < max_route_per_scenario_type:
                     filtered_routes.append(route)
                     scenario_type_counts[scenario_type] += 1
             except Exception as e:
                 print(f"Warning: Could not parse scenario type from route {route}: {e}")
-                # Include route anyway if parsing fails
                 filtered_routes.append(route)
+
         routes = filtered_routes
         print(
             f"Applied max_route_per_scenario_type={max_route_per_scenario_type}. Total routes: {len(routes)}"
         )
 
-    port_offset = 0
-    job_number = 1
-    meta_jobs = {}
+    def town_sort_key(route_path: str) -> tuple[str, str]:
+        try:
+            town, _ = parse_route_metadata(route_path)
+        except Exception:
+            # Keep unreadable routes at the end while preserving deterministic order by path.
+            town = "ZZZ_UNKNOWN_TOWN"
+        return town, route_path
 
-    # shuffle routes
-    random.seed(42)
-    random.shuffle(routes)
-    seed_counter = (
-        1000000 * repetition_start - 1
-    )  # for the traffic manager, which is incremented so that we get different traffic each time
+    routes = sorted(routes, key=town_sort_key)
+    print("Sorted routes by town to minimize map reloads.")
+    return routes
 
-    num_routes = len(routes)
-    for repetition in range(repetition_start, repetitions):
-        for route in routes:
-            seed_counter += 1
 
-            try:
-                tree = ET.parse(route)  # 'route' is the XML filepath
-                root = tree.getroot()
-                town = root.find("route").attrib["town"]
-            except Exception as e:
-                print(f"Error parsing town from route {route}: {e}")
-                raise e
-            scenario_elem = root.find("route/scenarios/scenario")
-            scenario_type = (
-                scenario_elem.attrib["type"]
-                if scenario_elem is not None
-                else "noScenarios"
-            )
+def arg_parse() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Collect dataset")
+    parser.add_argument(
+        "--root_folder", type=str, default="data/", help="Root folder for data"
+    )
+    parser.add_argument(
+        "--route_folder",
+        type=str,
+        default="data/data_routes",
+        help="Folder containing route files",
+    )
+    parser.add_argument(
+        "--carla-endpoints",
+        type=str,
+        default="172.30.96.1:2000:8000",
+        help="Exactly one CARLA endpoint in format host:rpc_port:tm_port",
+    )
+    parser.add_argument(
+        "--carla_root",
+        type=str,
+        default="",
+        help="Path to CARLA root used for PythonAPI import path in WSL.",
+    )
+    parser.add_argument(
+        "--py123d",
+        action="store_true",
+        help="Deprecated. Py123D mode is no longer supported in this script.",
+    )
+    return parser.parse_args()
 
-            if (
-                len(scenario_white_lists) > 0
-                and scenario_type not in scenario_white_lists
-            ):
-                print("Ignoring route with scenario type:", scenario_type)
-                continue
 
-            if len(scenario_blacklist) > 0 and scenario_type in scenario_blacklist:
-                print("Ignoring blacklisted route with scenario type:", scenario_type)
-                continue
+if __name__ == "__main__":
+    args = arg_parse()
+    if args.py123d:
+        raise ValueError(
+            "--py123d is deprecated and no longer supported in slurm/data_collection/collect_data.py. "
+            "This script now always runs lead/expert/expert.py with CARLA_LEADERBOARD2_4CAMERAS overrides."
+        )
 
-            routefile_number = route.split("/")[-1].split(".")[
-                0
-            ]  # this is the number in the xml file name, e.g. 22_0.xml
-            ckpt_endpoint = f"{code_root}/{data_save_directory}/results/{scenario_type}/{routefile_number}_result.json"
+    repetitions = 1
+    repetition_start = 0
+    shuffle_routes = True
+    max_route_per_scenario_type = 40  # -1 means no limit
 
-            save_path = f"{code_root}/{data_save_directory}/data/{scenario_type}"
-            Path(save_path).mkdir(parents=True, exist_ok=True)
+    code_root = os.getcwd()
+    carla_root = (
+        args.carla_root
+        if args.carla_root
+        else os.path.join(code_root, "3rd_party/CARLA_0915")
+    )
 
-            job_file = make_bash(
-                data_save_directory,
-                code_root,
-                routefile_number,
-                agent,
-                route,
-                ckpt_endpoint,
-                save_path,
-                seed_counter,
-                carla_root,
-                town,
-                repetition,
-                scenario_type,
-                job_name,
-                random.choice(partitions),
-                py123d_format=args.py123d,
-            )
+    endpoint = parse_single_carla_endpoint(args.carla_endpoints)
 
-            if is_job_done(ckpt_endpoint):
-                print(f"Job {job_file} already exists and is finished. Skipping...")
-            else:
-                # Wait until submitting new jobs that the #jobs are at below max
-                num_running_jobs, max_num_parallel_jobs = get_num_jobs(
-                    job_name=job_name, username=username
-                )
-                print(f"{num_running_jobs}/{max_num_parallel_jobs} jobs are running...")
-                while num_running_jobs >= max_num_parallel_jobs:
-                    num_running_jobs, max_num_parallel_jobs = get_num_jobs(
-                        job_name=job_name, username=username
-                    )
-                    time.sleep(0.05)
+    agent = f"{code_root}/lead/expert/expert.py"
+    dataset_name = "carla_leaderboard2"
 
-                print(
-                    f"Submitting job {job_number}/{num_routes}: {job_name}_{routefile_number}. "
-                )
-                time.sleep(1)
-                jobid = (
-                    subprocess.check_output(f"sbatch {job_file}", shell=True)
-                    .decode("utf-8")
-                    .strip()
-                    .rsplit(" ", maxsplit=1)[-1]
-                )
-                print(f"Jobid: {jobid}")
-                meta_jobs[jobid] = (
-                    False,
-                    job_file,
-                    ckpt_endpoint,
-                    0,
-                )  # job_finished, job_file, result_file, resubmitted
-            job_number += 1
+    # Keep existing scenario filtering behavior
+    scenario_white_lists = ["NonSignalizedJunctionLeftTurn"]
+    scenario_blacklist = ["YieldToEmergencyVehicle"]
 
-    time.sleep(1)
-    training_finished = False
-    while not training_finished:
-        num_running_jobs, _, _ = get_running_jobs(job_name, username)
-        print(f"{num_running_jobs} jobs are running... Job: {job_name}")
-        cancel_jobs_with_err_in_log(log_root, job_name, username)
-        time.sleep(20)
+    root_folder = Path(args.root_folder).expanduser()
+    if not root_folder.is_absolute():
+        root_folder = Path(code_root) / root_folder
+    data_save_directory = root_folder / dataset_name
+    data_save_directory.mkdir(parents=True, exist_ok=True)
 
-        # resubmit unfinished jobs
-        for k in list(meta_jobs.keys()):
-            job_finished, job_file, result_file, resubmitted = meta_jobs[k]
-            need_to_resubmit = False
-            with open(
-                "slurm/configs/max_num_attempts_collect_data.txt", encoding="utf-8"
-            ) as f:
-                max_attempts = int(f.read())
-            if not job_finished and resubmitted < max_attempts:
-                # check whether job is running
-                if (
-                    int(
-                        subprocess.check_output(
-                            f"squeue | grep {k} | wc -l", shell=True
-                        )
-                        .decode("utf-8")
-                        .strip()
-                    )
-                    == 0
-                ):
-                    # check whether result file is finished?
-                    if os.path.exists(result_file):
-                        with open(result_file, encoding="utf-8") as f_result:
-                            evaluation_data = json.load(f_result)
-                        progress = evaluation_data["_checkpoint"]["progress"]
-                        if len(progress) < 2 or progress[0] < progress[1]:
-                            need_to_resubmit = True
-                        else:
-                            for record in evaluation_data["_checkpoint"]["records"]:
-                                if record["scores"]["score_route"] <= 0.00000000001:
-                                    need_to_resubmit = True
-                                if (
-                                    record["status"]
-                                    == "Failed - Agent couldn't be set up"
-                                ):
-                                    need_to_resubmit = True
-                                if record["status"] == "Failed":
-                                    need_to_resubmit = True
-                                if record["status"] == "Failed - Simulation crashed":
-                                    need_to_resubmit = True
-                                if record["status"] == "Failed - Agent crashed":
-                                    need_to_resubmit = True
+    route_folder = Path(args.route_folder).expanduser()
+    if not route_folder.is_absolute():
+        route_folder = Path(code_root) / route_folder
 
-                        if not need_to_resubmit:
-                            # delete old job
-                            print(f"Finished job {job_file}")
-                            meta_jobs[k] = (True, None, None, 0)
+    routes = discover_routes(
+        route_folder=str(route_folder),
+        shuffle_routes=shuffle_routes,
+        scenario_white_lists=scenario_white_lists,
+        scenario_blacklist=scenario_blacklist,
+        max_route_per_scenario_type=max_route_per_scenario_type,
+    )
 
-                    else:
-                        need_to_resubmit = True
+    jobs = build_route_jobs(
+        routes=routes,
+        repetition_start=repetition_start,
+        repetitions=repetitions,
+        scenario_white_lists=scenario_white_lists,
+        scenario_blacklist=scenario_blacklist,
+        data_save_directory=data_save_directory,
+    )
 
-            if need_to_resubmit:
-                # rename old error files to still access it
-                routefile_number = Path(job_file).stem
-                print(
-                    f"Resubmit job {routefile_number} (previous id: {k}). Waiting for jobs to finish..."
-                )
-
-                with open(
-                    "slurm/configs/max_num_parallel_jobs_collect_data.txt",
-                    encoding="utf-8",
-                ) as f:
-                    max_num_parallel_jobs = int(f.read())
-                wait_for_jobs_to_finish(
-                    log_root, job_name, username, max_num_parallel_jobs
-                )
-
-                time_now_log = time.time()
-                os.system(
-                    f'mkdir -p "{log_root}/run_files/logs_{routefile_number}_{time_now_log}"'
-                )
-                os.system(
-                    f"cp {log_root}/run_files/logs/qsub_err{routefile_number}.log {log_root}/ \
-                          run_files/logs_{routefile_number}_{time_now_log}"
-                )
-                os.system(
-                    f"cp {log_root}/run_files/logs/qsub_out{routefile_number}.log {log_root}/ \
-                          run_files/logs_{routefile_number}_{time_now_log}"
-                )
-
-                jobid = (
-                    subprocess.check_output(f"sbatch {job_file}", shell=True)
-                    .decode("utf-8")
-                    .strip()
-                    .rsplit(" ", maxsplit=1)[-1]
-                )
-                meta_jobs[jobid] = (False, job_file, result_file, resubmitted + 1)
-                meta_jobs[k] = (True, None, None, 0)
-                print(f"resubmitted job {routefile_number}. (new id: {jobid})")
-
-        time.sleep(10)
-
-        if num_running_jobs == 0:
-            training_finished = True
+    run_local_collection(
+        jobs=jobs,
+        endpoint=endpoint,
+        code_root=code_root,
+        carla_root=carla_root,
+        agent=agent,
+        data_save_directory=data_save_directory,
+    )

@@ -134,7 +134,8 @@ class EnterActorFlow(BasicScenario):
             root.add_child(InTriggerDistanceToLocation(self.ego_vehicles[0], sink_wp.transform.location, self._sink_distance))
             root.add_child(ActorFlow(
                 source_wp, sink_wp, self._source_dist_interval, self._sink_distance,
-                self._flow_speed, initial_actors=True, initial_junction=True, parent_scenario_type= type(self).__name__))
+                self._flow_speed, initial_actors=True, initial_junction=True,
+                parent_scenario_type= type(self).__name__, parent_scenario_id=id(self)))
         root.add_child(ScenarioTimeout(self._scenario_timeout, self.config.name))
 
         sequence = py_trees.composites.Sequence()
@@ -223,7 +224,8 @@ class EnterActorFlowV2(EnterActorFlow):
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
         root.add_child(ActorFlow(
                 source_wp, sink_wp, self._source_dist_interval, self._sink_distance,
-                self._flow_speed, initial_actors=True, initial_junction=True, parent_scenario_type=type(self).__name__))
+                self._flow_speed, initial_actors=True, initial_junction=True,
+                parent_scenario_type=type(self).__name__, parent_scenario_id=id(self)))
         for sink_wp in sink_wps:
             root.add_child(InTriggerDistanceToLocation(self.ego_vehicles[0], sink_wp.transform.location, self._sink_distance))
         root.add_child(ScenarioTimeout(self._scenario_timeout, self.config.name))
@@ -686,7 +688,8 @@ class InterurbanActorFlow(BasicScenario):
         root = py_trees.composites.Parallel(
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
         root.add_child(ActorFlow(
-            self._source_wp, self._sink_wp, self._source_dist_interval, self._sink_distance, self._flow_speed, parent_scenario_type= type(self).__name__))
+            self._source_wp, self._sink_wp, self._source_dist_interval, self._sink_distance, self._flow_speed,
+            parent_scenario_type= type(self).__name__, parent_scenario_id=id(self)))
         root.add_child(ScenarioTimeout(self._scenario_timeout, self.config.name))
         root.add_child(WaitEndIntersection(self.ego_vehicles[0]))
 
@@ -867,9 +870,11 @@ class InterurbanAdvancedActorFlow(BasicScenario):
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
         root.add_child(WaitUntilInFrontPosition(self.ego_vehicles[0], self._sink_wp_2.transform))
         root.add_child(ActorFlow(
-            self._source_wp_1, self._sink_wp_1, self._source_dist_interval, self._sink_distance, self._flow_speed, parent_scenario_type=type(self).__name__))
+            self._source_wp_1, self._sink_wp_1, self._source_dist_interval, self._sink_distance, self._flow_speed,
+            parent_scenario_type=type(self).__name__, parent_scenario_id=id(self)))
         root.add_child(ActorFlow(
-            self._source_wp_2, self._sink_wp_2, self._source_dist_interval, self._sink_distance, self._flow_speed, parent_scenario_type=type(self).__name__))
+            self._source_wp_2, self._sink_wp_2, self._source_dist_interval, self._sink_distance, self._flow_speed,
+            parent_scenario_type=type(self).__name__, parent_scenario_id=id(self)))
         root.add_child(ScenarioTimeout(self._scenario_timeout, self.config.name))
 
         sequence = py_trees.composites.Sequence()

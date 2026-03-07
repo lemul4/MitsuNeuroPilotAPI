@@ -228,7 +228,8 @@ class SignalizedJunctionRightTurn(JunctionRightTurn):
         end_condition.add_child(AllowActorGeneration())
         root.add_child(end_condition)
         root.add_child(ActorFlow(
-            self._source_wp, self._sink_wp, self._source_dist_interval, 2, self._flow_speed, initial_actors=True, parent_scenario_type= type(self).__name__,))
+            self._source_wp, self._sink_wp, self._source_dist_interval, 2, self._flow_speed,
+            initial_actors=True, parent_scenario_type= type(self).__name__, parent_scenario_id=id(self),))
         root.add_child(ScenarioTimeout(self._scenario_timeout, self.config.name))
 
         tl_freezer_sequence = py_trees.composites.Sequence("Traffic Light Behavior")
@@ -294,7 +295,8 @@ class NonSignalizedJunctionRightTurn(JunctionRightTurn):
         end_condition.add_child(AllowActorGeneration())
         root.add_child(end_condition)
         root.add_child(ActorFlow(
-            self._source_wp, self._sink_wp, self._source_dist_interval, 2, self._flow_speed, initial_actors=True, parent_scenario_type= type(self).__name__,))
+            self._source_wp, self._sink_wp, self._source_dist_interval, 2, self._flow_speed,
+            initial_actors=True, parent_scenario_type= type(self).__name__, parent_scenario_id=id(self),))
         root.add_child(ScenarioTimeout(self._scenario_timeout, self.config.name))
 
         sequence.add_child(root)
