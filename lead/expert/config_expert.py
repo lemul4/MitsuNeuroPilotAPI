@@ -80,7 +80,7 @@ class ExpertConfig(BaseConfig):
     # Minimum function duration (seconds) required for a per-call log line.
     function_timing_log_min_seconds = 0.0
     # If true, unproject camera on CUDA. Turning this on will speed up unprojection but use more GPU memory.
-    unproject_on_cuda = False
+    unproject_on_cuda = True
     # How often we log in the main loop
     log_info_freq = 10
 
@@ -354,7 +354,7 @@ class ExpertConfig(BaseConfig):
     # Time in seconds to draw the things during debugging
     draw_life_time = 0.051
     # FPS of the simulation
-    fps = 20.0
+    fps = 12.0
     # Inverse of the FPS
     fps_inv = 1.0 / fps
     # Distance to the stop sign when the previous stop sign is uncleared

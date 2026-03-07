@@ -27,7 +27,7 @@ class BaseConfig:
 
     # --- Autopilot ---
     # Frame rate used for the bicycle models in the autopilot
-    bicycle_frame_rate = 20
+    bicycle_frame_rate = 12
     # Number of future route points we save per step
     num_route_points_saved = 50
     # Points sampled per meter when interpolating route
@@ -39,8 +39,8 @@ class BaseConfig:
     longitudinal_max_accelerations = 1.89
 
     # --- Kinematic Bicycle Model ---
-    # Time step for the model (20 frames per second)
-    time_step = 1.0 / 20.0
+    # Time step for the model (12 frames per second)
+    time_step = 1.0 / 12.0
     # Distance from the rear axle to the front axle of the vehicle
     front_wheel_base = -0.090769015
     # Distance from the rear axle to the center of the rear wheels
@@ -56,9 +56,11 @@ class BaseConfig:
 
     # --- Augmentation and Misc ---
     # Frequency (in steps) at which data is saved during data collection
-    data_save_freq = 5
+    data_save_freq = 3
+    # If true, camera sensors use sensor_tick synchronized to data_save_freq cadence.
+    camera_sensor_tick_from_data_save_freq = True
     # If true enable camera perturbation during data collection
-    perturbate_sensors = True
+    perturbate_sensors = False
     # Safety translation perturbation penalty for default scenarios
     default_safety_translation_perturbation_penalty = 0.25
     # Safety translation perturbation penalty for urban scenarios with low speed limits
@@ -88,7 +90,7 @@ class BaseConfig:
 
     # --- Sensor Configuration ---
     # If true use two LiDARs or one
-    use_two_lidars = True
+    use_two_lidars = False
 
     # x, y, z mounting position of the first LiDAR
     @property
@@ -346,7 +348,7 @@ class BaseConfig:
         }
 
     # If true use radar sensors
-    use_radars = True
+    use_radars = False
     # If true save radar point cloud as LiDAR format
     save_radar_pc_as_lidar = True
     # If true save LiDAR data only inside bird's eye view area
@@ -414,7 +416,7 @@ class BaseConfig:
 
     # --- Agent Configuration ---
     # Simulator frames per second
-    carla_fps = 20
+    carla_fps = 12
     # CARLA frame rate in seconds
     carla_frame_rate = 1.0 / carla_fps
     # IoU threshold used for non-maximum suppression on bounding box predictions

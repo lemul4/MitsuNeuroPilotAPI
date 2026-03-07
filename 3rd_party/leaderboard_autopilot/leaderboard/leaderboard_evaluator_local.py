@@ -194,7 +194,11 @@ class LeaderboardEvaluator(object):
         )
         client.get_world().apply_settings(settings)
 
-        traffic_manager_port = self.find_free_port()
+        traffic_manager_port = args.traffic_manager_port
+        if not isinstance(traffic_manager_port, int) or not (1 <= traffic_manager_port <= 65535):
+            traffic_manager_port = self.find_free_port()
+        if traffic_manager_port is None:
+            raise RuntimeError("Unable to allocate a valid Traffic Manager port.")
         traffic_manager = client.get_trafficmanager(traffic_manager_port)
         traffic_manager.set_synchronous_mode(True)
         traffic_manager.set_hybrid_physics_mode(True)
