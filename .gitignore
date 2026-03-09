@@ -197,3 +197,4 @@ visualization/
 .vscode
 /.vscode
 /.vscode/*.json
+/.codex
