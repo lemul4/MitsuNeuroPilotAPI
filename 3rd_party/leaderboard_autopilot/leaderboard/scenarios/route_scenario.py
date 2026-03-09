@@ -430,7 +430,7 @@ class RouteScenario(BasicScenario):
         criteria.add_child(InRouteTest(
             self.ego_vehicles[0], route=self.route, offroad_max=30, terminate_on_failure=True))
         criteria.add_child(ActorBlockedTest(
-            self.ego_vehicles[0], min_speed=0.1, max_time=180.0, terminate_on_failure=True, name="AgentBlockedTest")
+            self.ego_vehicles[0], min_speed=0.1, max_time=90.0, terminate_on_failure=True, name="AgentBlockedTest")
         )
 
         return criteria
