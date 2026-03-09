@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import pathlib
 import pickle
@@ -39,6 +40,37 @@ from lead.expert.hdmap.run_stop_sign import RunStopSign
 from lead.expert.kinematic_bicycle_model import KinematicBicycleModel
 
 LOG = logging.getLogger(__name__)
+
+LOS_RAY_ORIGIN_Z_OFFSET_METERS = 0.3
+LOS_NEAR_ORIGIN_NOISE_METERS = 0.25
+LOS_TARGET_DISTANCE_EPS_METERS = 0.2
+LOS_FRONT_FACE_CENTERS_TO_CHECK = 3
+
+LOS_LOCAL_SAMPLE_CENTER_UNIT = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+LOS_LOCAL_FACE_CENTER_UNIT = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ],
+    dtype=np.float32,
+)
+LOS_LOCAL_CORNERS_UNIT = np.array(
+    [
+        [-1.0, -1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, -1.0],
+        [1.0, 1.0, 1.0],
+    ],
+    dtype=np.float32,
+)
 
 
 class ExpertData(ExpertBase):
@@ -2162,9 +2194,272 @@ class ExpertData(ExpertBase):
         angle = abs(np.arctan2(y, x))
 
         # расширяем угол на половину ширины объекта
-        extra = np.arctan2(extent[1], max(x, 0.001))
+        extra = np.arctan2(extent[0] * 1.2, max(x, 0.001))
 
         return angle <= (self.half_fov_rad + extra)
+
+    def _get_los_ignore_labels(self) -> frozenset:
+        labels = getattr(self, "_los_ignore_labels", None)
+        if labels is not None:
+            return labels
+
+        labels = frozenset(
+            label
+            for name in ("RoadLines", "Roads", "Sidewalks", "Sky", "Ground", "Terrain")
+            if (label := getattr(carla.CityObjectLabel, name, None)) is not None
+        )
+        self._los_ignore_labels = labels
+        return labels
+
+    def _get_or_build_actor_bbox_cache(
+        self, actor: carla.Actor
+    ) -> tuple[np.ndarray, np.ndarray]:
+        bbox_local_cache = getattr(self, "_bbox_local_cache", None)
+        if bbox_local_cache is None:
+            bbox_local_cache = {}
+            self._bbox_local_cache = bbox_local_cache
+
+        actor_id = int(actor.id)
+        cached = bbox_local_cache.get(actor_id)
+        if cached is not None:
+            return cached["local_bbox_matrix"], cached["extent_xyz"]
+
+        bbox = actor.bounding_box
+        local_bbox_matrix = np.asarray(
+            carla.Transform(bbox.location, bbox.rotation).get_matrix(),
+            dtype=np.float32,
+        )
+        extent_xyz = np.array(
+            [bbox.extent.x, bbox.extent.y, bbox.extent.z],
+            dtype=np.float32,
+        )
+
+        bbox_local_cache[actor_id] = {
+            "local_bbox_matrix": local_bbox_matrix,
+            "extent_xyz": extent_xyz,
+        }
+        return local_bbox_matrix, extent_xyz
+
+    def _get_los_ray_origin_world(self, ego_transform: carla.Transform) -> np.ndarray:
+        ego_bbox_center = ego_transform.transform(
+            self.ego_vehicle.bounding_box.location
+        )
+        return np.array(
+            [ego_bbox_center.x, ego_bbox_center.y, ego_bbox_center.z + 2.3],
+            dtype=np.float32,
+        )
+
+    def _numpy_point_to_carla_location(self, point_world: np.ndarray) -> carla.Location:
+        return carla.Location(
+            x=float(point_world[0]),
+            y=float(point_world[1]),
+            z=float(point_world[2]),
+        )
+
+    def _world_location_to_relative_position(
+        self, ego_inverse_matrix: np.ndarray, world_location: carla.Location
+    ) -> np.ndarray:
+        x = float(world_location.x)
+        y = float(world_location.y)
+        z = float(world_location.z)
+
+        return np.array(
+            [
+                ego_inverse_matrix[0, 0] * x
+                + ego_inverse_matrix[0, 1] * y
+                + ego_inverse_matrix[0, 2] * z
+                + ego_inverse_matrix[0, 3],
+                ego_inverse_matrix[1, 0] * x
+                + ego_inverse_matrix[1, 1] * y
+                + ego_inverse_matrix[1, 2] * z
+                + ego_inverse_matrix[1, 3],
+                ego_inverse_matrix[2, 0] * x
+                + ego_inverse_matrix[2, 1] * y
+                + ego_inverse_matrix[2, 2] * z
+                + ego_inverse_matrix[2, 3],
+            ],
+            dtype=np.float32,
+        )
+
+    def _squared_distance_locations(
+        self, a: carla.Location, b: carla.Location
+    ) -> float:
+        dx = float(a.x) - float(b.x)
+        dy = float(a.y) - float(b.y)
+        dz = float(a.z) - float(b.z)
+        return dx * dx + dy * dy + dz * dz
+
+    def _compose_actor_bbox_world_matrix_from_local(
+        self, actor_matrix: np.ndarray, local_bbox_matrix: np.ndarray
+    ) -> np.ndarray:
+        return actor_matrix @ local_bbox_matrix
+
+    def _transform_bbox_local_point_to_world(
+        self, bbox_matrix_world: np.ndarray, local_point: np.ndarray
+    ) -> np.ndarray:
+        rotation = bbox_matrix_world[:3, :3]
+        translation = bbox_matrix_world[:3, 3]
+        return local_point @ rotation.T + translation
+
+    def _transform_bbox_local_points_to_world(
+        self, bbox_matrix_world: np.ndarray, local_points: np.ndarray
+    ) -> np.ndarray:
+        rotation = bbox_matrix_world[:3, :3]
+        translation = bbox_matrix_world[:3, 3]
+        return local_points @ rotation.T + translation[None, :]
+
+    def _get_observer_face_check_order(
+        self,
+        ray_origin_world: np.ndarray,
+        bbox_matrix_world: np.ndarray,
+    ) -> tuple[list[int], list[int]]:
+        rotation = bbox_matrix_world[:3, :3]
+        translation = bbox_matrix_world[:3, 3]
+
+        # local_row = (world_row - translation) @ rotation
+        observer_local = (ray_origin_world - translation) @ rotation
+
+        x_front, x_back = (0, 1) if observer_local[0] >= 0.0 else (1, 0)
+        y_front, y_back = (2, 3) if observer_local[1] >= 0.0 else (3, 2)
+        z_front, z_back = (4, 5) if observer_local[2] >= 0.0 else (5, 4)
+
+        ordered = [x_front, y_front, z_front, x_back, y_back, z_back]
+        front_count = max(0, min(int(LOS_FRONT_FACE_CENTERS_TO_CHECK), len(ordered)))
+        return ordered[:front_count], ordered[front_count:]
+
+    def _is_sample_point_visible_by_cast_ray(
+        self,
+        ray_origin_world: np.ndarray,
+        ray_origin_world_carla: carla.Location,
+        target_point_world: np.ndarray,
+        ignore_labels: frozenset,
+    ) -> bool:
+        ox = float(ray_origin_world[0])
+        oy = float(ray_origin_world[1])
+        oz = float(ray_origin_world[2])
+
+        tx = float(target_point_world[0])
+        ty = float(target_point_world[1])
+        tz = float(target_point_world[2])
+
+        dx = tx - ox
+        dy = ty - oy
+        dz = tz - oz
+
+        target_dist_sq = dx * dx + dy * dy + dz * dz
+        if target_dist_sq <= 1e-12:
+            return True
+
+        target_dist = math.sqrt(target_dist_sq)
+        visible_threshold = max(
+            target_dist - float(LOS_TARGET_DISTANCE_EPS_METERS), 0.0
+        )
+        visible_threshold_sq = visible_threshold * visible_threshold
+        near_origin_noise_sq = float(LOS_NEAR_ORIGIN_NOISE_METERS) * float(
+            LOS_NEAR_ORIGIN_NOISE_METERS
+        )
+
+        ray_target = carla.Location(x=tx, y=ty, z=tz)
+        ray_hits = self.carla_world.cast_ray(ray_origin_world_carla, ray_target)
+
+        for hit in ray_hits:
+            hit_label = getattr(hit, "label", None)
+            if hit_label in ignore_labels:
+                continue
+
+            hit_location = hit.location
+            hx = float(hit_location.x) - ox
+            hy = float(hit_location.y) - oy
+            hz = float(hit_location.z) - oz
+            hit_dist_sq = hx * hx + hy * hy + hz * hz
+
+            if hit_dist_sq <= near_origin_noise_sq:
+                continue
+
+            return hit_dist_sq >= visible_threshold_sq
+
+        # If no relevant hit exists, line of sight is considered clear.
+        return True
+
+    def _is_bbox_partially_visible_by_cast_ray(
+        self,
+        ray_origin_world: np.ndarray,
+        ray_origin_world_carla: carla.Location,
+        bbox_matrix_world: np.ndarray,
+        bbox_extent_xyz: np.ndarray | list[float],
+        ignore_labels: frozenset,
+    ) -> bool:
+        try:
+            extent_xyz = np.asarray(bbox_extent_xyz, dtype=np.float32)
+
+            # 1) center
+            center_local = LOS_LOCAL_SAMPLE_CENTER_UNIT[0] * extent_xyz
+            center_world = self._transform_bbox_local_point_to_world(
+                bbox_matrix_world=bbox_matrix_world,
+                local_point=center_local,
+            )
+            if self._is_sample_point_visible_by_cast_ray(
+                ray_origin_world=ray_origin_world,
+                ray_origin_world_carla=ray_origin_world_carla,
+                target_point_world=center_world,
+                ignore_labels=ignore_labels,
+            ):
+                return True
+
+            # 2) front-facing face centers first, based on observer in bbox-local space
+            face_centers_local = LOS_LOCAL_FACE_CENTER_UNIT * extent_xyz
+            front_face_indices, remaining_face_indices = (
+                self._get_observer_face_check_order(
+                    ray_origin_world=ray_origin_world,
+                    bbox_matrix_world=bbox_matrix_world,
+                )
+            )
+
+            for idx in front_face_indices:
+                face_world = self._transform_bbox_local_point_to_world(
+                    bbox_matrix_world=bbox_matrix_world,
+                    local_point=face_centers_local[idx],
+                )
+                if self._is_sample_point_visible_by_cast_ray(
+                    ray_origin_world=ray_origin_world,
+                    ray_origin_world_carla=ray_origin_world_carla,
+                    target_point_world=face_world,
+                    ignore_labels=ignore_labels,
+                ):
+                    return True
+
+            for idx in remaining_face_indices:
+                face_world = self._transform_bbox_local_point_to_world(
+                    bbox_matrix_world=bbox_matrix_world,
+                    local_point=face_centers_local[idx],
+                )
+                if self._is_sample_point_visible_by_cast_ray(
+                    ray_origin_world=ray_origin_world,
+                    ray_origin_world_carla=ray_origin_world_carla,
+                    target_point_world=face_world,
+                    ignore_labels=ignore_labels,
+                ):
+                    return True
+
+            # 3) corners only if needed
+            corners_local = LOS_LOCAL_CORNERS_UNIT * extent_xyz
+            corners_world = self._transform_bbox_local_points_to_world(
+                bbox_matrix_world=bbox_matrix_world,
+                local_points=corners_local,
+            )
+            for corner_world in corners_world:
+                if self._is_sample_point_visible_by_cast_ray(
+                    ray_origin_world=ray_origin_world,
+                    ray_origin_world_carla=ray_origin_world_carla,
+                    target_point_world=corner_world,
+                    ignore_labels=ignore_labels,
+                ):
+                    return True
+
+            return False
+        except Exception:
+            # Fail-open on bbox-level to keep data generation robust.
+            return True
 
     @beartype
     def get_bounding_boxes(self, input_data: dict) -> list[dict]:
@@ -2173,67 +2468,36 @@ class ExpertData(ExpertBase):
         ego_transform = self.ego_vehicle.get_transform()
         ego_control = self.ego_vehicle.get_control()
         ego_velocity = self.ego_vehicle.get_velocity()
-        ego_matrix = np.array(ego_transform.get_matrix())
+        ego_matrix = np.asarray(ego_transform.get_matrix(), dtype=np.float32)
+        ego_inverse_matrix = np.asarray(
+            ego_transform.get_inverse_matrix(), dtype=np.float32
+        )
         ego_rotation = ego_transform.rotation
         ego_location = ego_transform.location
         ego_extent = self.ego_vehicle.bounding_box.extent
         ego_speed = self._get_forward_speed(
             transform=ego_transform, velocity=ego_velocity
         )
-        ego_dx = np.array([ego_extent.x, ego_extent.y, ego_extent.z])
+        ego_dx = np.array([ego_extent.x, ego_extent.y, ego_extent.z], dtype=np.float32)
         ego_yaw = np.deg2rad(ego_rotation.yaw)
         ego_brake = ego_control.brake
-
-        relative_yaw = 0.0
-        relative_pos = common_utils.get_relative_transform(ego_matrix, ego_matrix)
+        ego_matrix_list = ego_matrix.tolist()
 
         ego_wp = self.carla_world_map.get_waypoint(
-            self.ego_vehicle.get_location(),
+            ego_location,
             project_to_road=True,
             lane_type=carla.libcarla.LaneType.Any,
         )
 
-        # how far is next junction
-        next_wps = expert_utils.wps_next_until_lane_end(ego_wp)
-        try:
-            next_lane_wps_ego = next_wps[-1].next(1)
-            if len(next_lane_wps_ego) == 0:
-                next_lane_wps_ego = [next_wps[-1]]
-        except:
-            next_lane_wps_ego = []
-
-        next_road_ids_ego = []
-        next_next_road_ids_ego = []
-        for wp in next_lane_wps_ego:
-            next_road_ids_ego.append(wp.road_id)
-            next_next_wps = expert_utils.wps_next_until_lane_end(wp)
-            try:
-                next_next_lane_wps_ego = next_next_wps[-1].next(1)
-                if len(next_next_lane_wps_ego) == 0:
-                    next_next_lane_wps_ego = [next_next_wps[-1]]
-            except:
-                next_next_lane_wps_ego = []
-            for wp2 in next_next_lane_wps_ego:
-                if wp2.road_id not in next_next_road_ids_ego:
-                    next_next_road_ids_ego.append(wp2.road_id)
-
-        # Check for possible vehicle obstacles
-        # Retrieve all relevant actors
         self._actors = self.actors
         vehicle_list = self._actors.filter("*vehicle*")
 
-        try:
-            next_action = self.traffic_manager.get_next_action(self.ego_vehicle)[0]
-        except:
-            next_action = None
-
-        # --- Start iterating through actors ---
         result = {
             "class": "ego_car",
             "transfuser_semantics_id": int(
                 TransfuserSemanticSegmentationClass.UNLABELED
             ),
-            "extent": [ego_dx[0], ego_dx[1], ego_dx[2]],
+            "extent": [float(ego_dx[0]), float(ego_dx[1]), float(ego_dx[2])],
             "position": [0, 0, 0],
             "yaw": 0.0,
             "num_points": -1,
@@ -2241,7 +2505,7 @@ class ExpertData(ExpertBase):
             "speed": ego_speed,
             "brake": ego_brake,
             "id": int(self.ego_vehicle.id),
-            "matrix": ego_transform.get_matrix(),
+            "matrix": ego_matrix_list,
             "visible_pixels": -1,
         }
         boxes.append(result)
@@ -2249,6 +2513,7 @@ class ExpertData(ExpertBase):
         transfuser_camera_semantics_pc = input_data.get("semantics_camera_pc")
         if transfuser_camera_semantics_pc is None:
             transfuser_camera_semantics_pc = self._empty_camera_pc_numpy()
+
         transfuser_camera_semantics_pc_semantics_id = self.semantics_converter[
             transfuser_camera_semantics_pc[
                 :, CameraPointCloudIndex.UNREAL_SEMANTICS_ID
@@ -2278,211 +2543,366 @@ class ExpertData(ExpertBase):
                 == TransfuserSemanticSegmentationClass.OBSTACLE
             ][:, : CameraPointCloudIndex.Z + 1],
         }
+
         lidar_points = input_data.get("lidar")
         radar_points = input_data.get("radar")
         lidar_tree = self._build_xy_tree(lidar_points)
         radar_tree = self._build_xy_tree(radar_points)
 
+        los_ray_origin_world = self._get_los_ray_origin_world(ego_transform)
+        los_ray_origin_world_carla = self._numpy_point_to_carla_location(
+            los_ray_origin_world
+        )
+        los_ignore_labels = self._get_los_ignore_labels()
+
+        bb_save_radius = float(self.config_expert.bb_save_radius)
+        bb_save_radius_sq = bb_save_radius * bb_save_radius
+
+        # -------------------------------------------------------------------------
+        # Vehicles
+        # -------------------------------------------------------------------------
         for vehicle in vehicle_list:
-            vehicle_location = vehicle.get_location()
+            if vehicle.id == self.ego_vehicle.id:
+                continue
+
+            vehicle_transform = vehicle.get_transform()
+            vehicle_location = vehicle_transform.location
+
             if (
-                vehicle_location.distance(ego_location)
-                < self.config_expert.bb_save_radius
+                self._squared_distance_locations(vehicle_location, ego_location)
+                >= bb_save_radius_sq
             ):
-                if vehicle.id != self.ego_vehicle.id:
-                    vehicle_transform = vehicle.get_transform()
-                    vehicle_rotation = vehicle_transform.rotation
-                    vehicle_matrix = np.array(vehicle_transform.get_matrix())
-                    vehicle_control: carla.VehicleControl = vehicle.get_control()
-                    vehicle_velocity = vehicle.get_velocity()
-                    vehicle_extent = vehicle.bounding_box.extent
-                    vehicle_id = vehicle.id
-                    vehicle_wp = self.carla_world_map.get_waypoint(
-                        vehicle_location,
-                        project_to_road=True,
-                        lane_type=carla.libcarla.LaneType.Any,
-                    )
+                continue
 
-                    next_wps = expert_utils.wps_next_until_lane_end(vehicle_wp)
-                    next_lane_wps = next_wps[-1].next(1)
-                    if len(next_lane_wps) == 0:
-                        next_lane_wps = [next_wps[-1]]
+            vehicle_rotation = vehicle_transform.rotation
+            yaw = np.deg2rad(vehicle_rotation.yaw)
+            relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
 
-                    next_next_wps = []
-                    for wp in next_lane_wps:
-                        next_next_wps = expert_utils.wps_next_until_lane_end(wp)
+            relative_pos = self._world_location_to_relative_position(
+                ego_inverse_matrix=ego_inverse_matrix,
+                world_location=vehicle_location,
+            )
 
-                    try:
-                        next_next_lane_wps = next_next_wps[-1].next(1)
-                        if len(next_next_lane_wps) == 0:
-                            next_next_lane_wps = [next_next_wps[-1]]
-                    except:
-                        next_next_lane_wps = []
+            local_bbox_matrix, vehicle_extent_xyz = self._get_or_build_actor_bbox_cache(
+                vehicle
+            )
+            vehicle_extent_list = vehicle_extent_xyz.tolist()
 
-                    next_road_ids = []
-                    for wp in next_lane_wps:
-                        if wp.road_id not in next_road_ids:
-                            next_road_ids.append(wp.road_id)
+            if not self._is_in_fov(relative_pos, vehicle_extent_list):
+                continue
 
-                    next_next_road_ids = []
-                    for wp in next_next_lane_wps:
-                        if wp.road_id not in next_next_road_ids:
-                            next_next_road_ids.append(wp.road_id)
+            vehicle_matrix = np.asarray(
+                vehicle_transform.get_matrix(), dtype=np.float32
+            )
+            vehicle_bbox_matrix = self._compose_actor_bbox_world_matrix_from_local(
+                actor_matrix=vehicle_matrix,
+                local_bbox_matrix=local_bbox_matrix,
+            )
 
-                    vehicle_extent_list = [
-                        vehicle_extent.x,
-                        vehicle_extent.y,
-                        vehicle_extent.z,
-                    ]
-                    yaw = np.deg2rad(vehicle_rotation.yaw)
+            if not self._is_bbox_partially_visible_by_cast_ray(
+                ray_origin_world=los_ray_origin_world,
+                ray_origin_world_carla=los_ray_origin_world_carla,
+                bbox_matrix_world=vehicle_bbox_matrix,
+                bbox_extent_xyz=vehicle_extent_xyz,
+                ignore_labels=los_ignore_labels,
+            ):
+                continue
 
-                    relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
-                    relative_pos = common_utils.get_relative_transform(
-                        ego_matrix, vehicle_matrix
-                    )
+            # Survivors only
+            vehicle_control: carla.VehicleControl = vehicle.get_control()
+            vehicle_velocity = vehicle.get_velocity()
+            vehicle_id = vehicle.id
 
-                    if not self._is_in_fov(relative_pos, vehicle_extent_list):
-                        continue
+            vehicle_wp = self.carla_world_map.get_waypoint(
+                vehicle_location,
+                project_to_road=True,
+                lane_type=carla.libcarla.LaneType.Any,
+            )
 
-                    vehicle_speed = self._get_forward_speed(
-                        transform=vehicle_transform, velocity=vehicle_velocity
-                    )
-                    vehicle_brake = vehicle_control.brake
-                    vehicle_steer = vehicle_control.steer
-                    vehicle_throttle = vehicle_control.throttle
+            vehicle_speed = self._get_forward_speed(
+                transform=vehicle_transform,
+                velocity=vehicle_velocity,
+            )
+            vehicle_brake = vehicle_control.brake
+            vehicle_steer = vehicle_control.steer
+            vehicle_throttle = vehicle_control.throttle
 
-                    distance = np.linalg.norm(relative_pos)
+            rel_x = float(relative_pos[0])
+            rel_y = float(relative_pos[1])
+            rel_z = float(relative_pos[2])
+            distance = math.sqrt(rel_x * rel_x + rel_y * rel_y + rel_z * rel_z)
 
-                    try:
-                        next_action = self.traffic_manager.get_next_action(vehicle)[0]
-                    except:
-                        next_action = None
+            try:
+                next_action = self.traffic_manager.get_next_action(vehicle)[0]
+            except Exception:
+                next_action = None
 
-                    vehicle_cuts_in = False
-                    if (self.scenario_name == "ParkingCutIn") and vehicle.attributes[
-                        "role_name"
-                    ] == "scenario":
-                        if self.cutin_vehicle_starting_position is None:
-                            self.cutin_vehicle_starting_position = vehicle_location
+            vehicle_cuts_in = False
+            if (
+                self.scenario_name == "ParkingCutIn"
+                and vehicle.attributes["role_name"] == "scenario"
+            ):
+                if self.cutin_vehicle_starting_position is None:
+                    self.cutin_vehicle_starting_position = vehicle_location
 
-                        if (
-                            vehicle_location.distance(
-                                self.cutin_vehicle_starting_position
-                            )
-                            > 0.2
-                            and vehicle_location.distance(
-                                self.cutin_vehicle_starting_position
-                            )
-                            < 8
-                        ):  # to make sure the vehicle drives
-                            vehicle_cuts_in = True
+                moved_distance = vehicle_location.distance(
+                    self.cutin_vehicle_starting_position
+                )
+                if 0.2 < moved_distance < 8.0:
+                    vehicle_cuts_in = True
 
-                    elif (self.scenario_name == "StaticCutIn") and vehicle.attributes[
-                        "role_name"
-                    ] == "scenario":
-                        if vehicle_speed > 1.0 and abs(vehicle_steer) > 0.2:
-                            vehicle_cuts_in = True
+            elif (
+                self.scenario_name == "StaticCutIn"
+                and vehicle.attributes["role_name"] == "scenario"
+            ):
+                if vehicle_speed > 1.0 and abs(vehicle_steer) > 0.2:
+                    vehicle_cuts_in = True
 
-                    # Computes how many LiDAR hits are on a bounding box. Used to filter invisible boxes during data loading.
-                    if lidar_points is not None:
-                        num_in_bbox_points = self._count_points_in_actor_prefiltered(
-                            ego_matrix=ego_matrix,
-                            actor_matrix=vehicle_matrix,
-                            actor_extent_xyz=np.array(vehicle_extent_list),
-                            point_cloud=lidar_points,
-                            xy_tree=lidar_tree,
-                            pad=True,
-                        )
-                    else:
-                        num_in_bbox_points = -1
+            if lidar_points is not None:
+                num_in_bbox_points = self._count_points_in_actor_prefiltered(
+                    ego_matrix=ego_matrix,
+                    actor_matrix=vehicle_matrix,
+                    actor_extent_xyz=vehicle_extent_xyz,
+                    point_cloud=lidar_points,
+                    xy_tree=lidar_tree,
+                    pad=True,
+                )
+            else:
+                num_in_bbox_points = -1
 
-                    if radar_points is not None:
-                        num_in_bb_radar_points = (
-                            self._count_points_in_actor_prefiltered(
-                                ego_matrix=ego_matrix,
-                                actor_matrix=vehicle_matrix,
-                                actor_extent_xyz=np.array(vehicle_extent_list),
-                                point_cloud=radar_points,
-                                xy_tree=radar_tree,
-                                pad=True,
-                            )
-                        )
-                    else:
-                        num_in_bb_radar_points = -1
+            if radar_points is not None:
+                num_in_bb_radar_points = self._count_points_in_actor_prefiltered(
+                    ego_matrix=ego_matrix,
+                    actor_matrix=vehicle_matrix,
+                    actor_extent_xyz=vehicle_extent_xyz,
+                    point_cloud=radar_points,
+                    xy_tree=radar_tree,
+                    pad=True,
+                )
+            else:
+                num_in_bb_radar_points = -1
 
-                    result = {
-                        "class": "car",
-                        "ego_velocity": expert_utils.get_vehicle_velocity_in_ego_frame(
-                            self.ego_vehicle, vehicle
-                        ),
-                        "next_action": next_action,
-                        "vehicle_cuts_in": vehicle_cuts_in,
-                        "road_id": vehicle_wp.road_id,
-                        "lane_id": vehicle_wp.lane_id,
-                        "lane_type_str": str(vehicle_wp.lane_type),
-                        "base_type": vehicle.attributes["base_type"],
-                        "transfuser_semantics_id": int(
-                            TransfuserSemanticSegmentationClass.VEHICLE
-                        ),
-                        "extent": vehicle_extent_list,
-                        "position": [relative_pos[0], relative_pos[1], relative_pos[2]],
-                        "yaw": relative_yaw,
-                        "num_points": int(num_in_bbox_points),
-                        "num_radar_points": int(num_in_bb_radar_points),
-                        "distance": distance,
-                        "speed": vehicle_speed,
-                        "brake": vehicle_brake,
-                        "steer": vehicle_steer,
-                        "throttle": vehicle_throttle,
-                        "id": int(vehicle_id),
-                        "role_name": vehicle.attributes["role_name"],
-                        "type_id": vehicle.type_id,
-                        "matrix": vehicle_transform.get_matrix(),
-                        "speed_limit": vehicle.get_speed_limit(),
-                        "visible_pixels": expert_utils.get_num_points_in_actor(
-                            self.ego_vehicle,
-                            vehicle,
-                            global_camera_pc[
-                                TransfuserSemanticSegmentationClass.VEHICLE
-                            ],
-                            pad=True,
-                        ),
-                    }
-                    boxes.append(result)
+            result = {
+                "class": "car",
+                "ego_velocity": expert_utils.get_vehicle_velocity_in_ego_frame(
+                    self.ego_vehicle, vehicle
+                ),
+                "next_action": next_action,
+                "vehicle_cuts_in": vehicle_cuts_in,
+                "road_id": vehicle_wp.road_id,
+                "lane_id": vehicle_wp.lane_id,
+                "lane_type_str": str(vehicle_wp.lane_type),
+                "base_type": vehicle.attributes["base_type"],
+                "transfuser_semantics_id": int(
+                    TransfuserSemanticSegmentationClass.VEHICLE
+                ),
+                "extent": vehicle_extent_list,
+                "position": [rel_x, rel_y, rel_z],
+                "yaw": relative_yaw,
+                "num_points": int(num_in_bbox_points),
+                "num_radar_points": int(num_in_bb_radar_points),
+                "distance": distance,
+                "speed": vehicle_speed,
+                "brake": vehicle_brake,
+                "steer": vehicle_steer,
+                "throttle": vehicle_throttle,
+                "id": int(vehicle_id),
+                "role_name": vehicle.attributes["role_name"],
+                "type_id": vehicle.type_id,
+                "matrix": vehicle_matrix.tolist(),
+                "speed_limit": vehicle.get_speed_limit(),
+                "visible_pixels": expert_utils.get_num_points_in_actor(
+                    self.ego_vehicle,
+                    vehicle,
+                    global_camera_pc[TransfuserSemanticSegmentationClass.VEHICLE],
+                    pad=True,
+                ),
+            }
+            boxes.append(result)
 
+        # -------------------------------------------------------------------------
+        # Walkers
+        # -------------------------------------------------------------------------
         walkers = self._actors.filter("*walker*")
         for walker in walkers:
-            walker_location = walker.get_location()
-            if (
-                walker_location.distance(ego_location)
-                < self.config_expert.bb_save_radius
-            ):
-                walker_transform = walker.get_transform()
-                walker_velocity = walker.get_velocity()
-                walker_rotation = walker.get_transform().rotation
-                walker_matrix = np.array(walker_transform.get_matrix())
-                walker_id = walker.id
-                walker_extent = walker.bounding_box.extent
-                walker_extent = [walker_extent.x, walker_extent.y, walker_extent.z]
-                yaw = np.deg2rad(walker_rotation.yaw)
+            walker_transform = walker.get_transform()
+            walker_location = walker_transform.location
 
-                relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
-                relative_pos = common_utils.get_relative_transform(
-                    ego_matrix, walker_matrix
+            if (
+                self._squared_distance_locations(walker_location, ego_location)
+                >= bb_save_radius_sq
+            ):
+                continue
+
+            walker_rotation = walker_transform.rotation
+            yaw = np.deg2rad(walker_rotation.yaw)
+            relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
+
+            relative_pos = self._world_location_to_relative_position(
+                ego_inverse_matrix=ego_inverse_matrix,
+                world_location=walker_location,
+            )
+
+            local_bbox_matrix, walker_extent_xyz = self._get_or_build_actor_bbox_cache(
+                walker
+            )
+            walker_extent_list = walker_extent_xyz.tolist()
+
+            if not self._is_in_fov(relative_pos, walker_extent_list):
+                continue
+
+            walker_matrix = np.asarray(walker_transform.get_matrix(), dtype=np.float32)
+            walker_bbox_matrix = self._compose_actor_bbox_world_matrix_from_local(
+                actor_matrix=walker_matrix,
+                local_bbox_matrix=local_bbox_matrix,
+            )
+
+            if not self._is_bbox_partially_visible_by_cast_ray(
+                ray_origin_world=los_ray_origin_world,
+                ray_origin_world_carla=los_ray_origin_world_carla,
+                bbox_matrix_world=walker_bbox_matrix,
+                bbox_extent_xyz=walker_extent_xyz,
+                ignore_labels=los_ignore_labels,
+            ):
+                continue
+
+            # Survivors only
+            walker_velocity = walker.get_velocity()
+            walker_id = walker.id
+            walker_speed = self._get_forward_speed(
+                transform=walker_transform,
+                velocity=walker_velocity,
+            )
+
+            if lidar_points is not None:
+                num_in_bbox_points = self._count_points_in_actor_prefiltered(
+                    ego_matrix=ego_matrix,
+                    actor_matrix=walker_matrix,
+                    actor_extent_xyz=walker_extent_xyz,
+                    point_cloud=lidar_points,
+                    xy_tree=lidar_tree,
+                    pad=True,
                 )
-                if not self._is_in_fov(relative_pos, walker_extent):
+            else:
+                num_in_bbox_points = -1
+
+            if radar_points is not None:
+                num_in_bb_radar_points = self._count_points_in_actor_prefiltered(
+                    ego_matrix=ego_matrix,
+                    actor_matrix=walker_matrix,
+                    actor_extent_xyz=walker_extent_xyz,
+                    point_cloud=radar_points,
+                    xy_tree=radar_tree,
+                    pad=True,
+                )
+            else:
+                num_in_bb_radar_points = -1
+
+            rel_x = float(relative_pos[0])
+            rel_y = float(relative_pos[1])
+            rel_z = float(relative_pos[2])
+            distance = math.sqrt(rel_x * rel_x + rel_y * rel_y + rel_z * rel_z)
+
+            result = {
+                "class": "walker",
+                "ego_velocity": expert_utils.get_vehicle_velocity_in_ego_frame(
+                    self.ego_vehicle, walker
+                ),
+                "role_name": walker.attributes["role_name"],
+                "transfuser_semantics_id": int(
+                    TransfuserSemanticSegmentationClass.PEDESTRIAN
+                ),
+                "extent": walker_extent_list,
+                "position": [rel_x, rel_y, rel_z],
+                "yaw": relative_yaw,
+                "num_points": int(num_in_bbox_points),
+                "num_radar_points": int(num_in_bb_radar_points),
+                "distance": distance,
+                "speed": walker_speed,
+                "id": int(walker_id),
+                "matrix": walker_matrix.tolist(),
+                "visible_pixels": expert_utils.get_num_points_in_actor(
+                    self.ego_vehicle,
+                    walker,
+                    global_camera_pc[TransfuserSemanticSegmentationClass.PEDESTRIAN],
+                    pad=True,
+                ),
+            }
+            boxes.append(result)
+
+        # -------------------------------------------------------------------------
+        # Static actors (без изменений по LOS, но с float32 и без лишних get_transform())
+        # -------------------------------------------------------------------------
+        if self.config_expert.eval_expert:
+            if self.step % max(self.config_expert.log_info_freq, 1) == 0:
+                LOG.debug("Skipping static actor bounding boxes in eval_expert mode.")
+            static_list = []
+        else:
+            static_list = self._actors.filter("*static*")
+            if LOG.isEnabledFor(logging.DEBUG) and (
+                self.step % max(self.config_expert.log_info_freq, 1) == 0
+            ):
+                LOG.debug("Found %d static actors in the scene.", len(static_list))
+
+            for static in static_list:
+                static_transform = static.get_transform()
+                static_location = static_transform.location
+
+                if (
+                    self._squared_distance_locations(static_location, ego_location)
+                    >= bb_save_radius_sq
+                ):
                     continue
 
-                walker_speed = self._get_forward_speed(
-                    transform=walker_transform, velocity=walker_velocity
+                static_velocity = static.get_velocity()
+                static_rotation = static_transform.rotation
+                static_matrix = np.asarray(
+                    static_transform.get_matrix(), dtype=np.float32
+                )
+                static_id = static.id
+                type_id = static.type_id
+                mesh_path = static.attributes.get("mesh_path", None)
+
+                static_extent_raw = static.bounding_box.extent
+                static_extent_raw_xyz = np.array(
+                    [static_extent_raw.x, static_extent_raw.y, static_extent_raw.z],
+                    dtype=np.float32,
+                )
+                static_extent = [
+                    float(static_extent_raw.x),
+                    float(static_extent_raw.y),
+                    float(static_extent_raw.z),
+                ]
+
+                if mesh_path is not None and mesh_path in constants.LOOKUP_TABLE:
+                    static_extent = constants.LOOKUP_TABLE[mesh_path]
+                if type_id == "static.prop.trafficwarning":
+                    static_extent[0], static_extent[1] = (
+                        self.config_expert.traffic_warning_bb_size[0],
+                        self.config_expert.traffic_warning_bb_size[1],
+                    )
+                elif type_id == "static.prop.constructioncone":
+                    static_extent[0], static_extent[1] = (
+                        self.config_expert.construction_cone_bb_size[0],
+                        self.config_expert.construction_cone_bb_size[1],
+                    )
+
+                yaw = np.deg2rad(static_rotation.yaw)
+                relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
+                relative_pos = common_utils.get_relative_transform(
+                    ego_matrix, static_matrix
                 )
 
-                # Computes how many LiDAR hits are on a bounding box. Used to filter invisible boxes during data loading.
+                static_speed = self._get_forward_speed(
+                    transform=static_transform,
+                    velocity=static_velocity,
+                )
+
                 if lidar_points is not None:
                     num_in_bbox_points = self._count_points_in_actor_prefiltered(
                         ego_matrix=ego_matrix,
-                        actor_matrix=walker_matrix,
-                        actor_extent_xyz=np.array(walker_extent),
+                        actor_matrix=static_matrix,
+                        actor_extent_xyz=static_extent_raw_xyz,
                         point_cloud=lidar_points,
                         xy_tree=lidar_tree,
                         pad=True,
@@ -2490,169 +2910,53 @@ class ExpertData(ExpertBase):
                 else:
                     num_in_bbox_points = -1
 
-                if radar_points is not None:
-                    num_in_bb_radar_points = self._count_points_in_actor_prefiltered(
-                        ego_matrix=ego_matrix,
-                        actor_matrix=walker_matrix,
-                        actor_extent_xyz=np.array(walker_extent),
-                        point_cloud=radar_points,
-                        xy_tree=radar_tree,
+                rel_x = float(relative_pos[0])
+                rel_y = float(relative_pos[1])
+                rel_z = float(relative_pos[2])
+                distance = math.sqrt(rel_x * rel_x + rel_y * rel_y + rel_z * rel_z)
+
+                result = {
+                    "class": "static",
+                    "transfuser_semantics_id": int(
+                        TransfuserSemanticSegmentationClass.UNLABELED
+                    ),
+                    "extent": static_extent,
+                    "position": [rel_x, rel_y, rel_z],
+                    "yaw": relative_yaw,
+                    "num_points": int(num_in_bbox_points),
+                    "distance": distance,
+                    "speed": static_speed,
+                    "id": int(static_id),
+                    "matrix": static_matrix.tolist(),
+                    "type_id": type_id,
+                    "mesh_path": mesh_path,
+                }
+                if result["mesh_path"] is not None and "Car" in result["mesh_path"]:
+                    result["transfuser_semantics_id"] = int(
+                        TransfuserSemanticSegmentationClass.VEHICLE
+                    )
+                    result["visible_pixels"] = expert_utils.get_num_points_in_bbox(
+                        self.ego_vehicle,
+                        result,
+                        global_camera_pc[TransfuserSemanticSegmentationClass.VEHICLE],
                         pad=True,
                     )
                 else:
-                    num_in_bb_radar_points = -1
-
-                distance = np.linalg.norm(relative_pos)
-
-                result = {
-                    "class": "walker",
-                    "ego_velocity": expert_utils.get_vehicle_velocity_in_ego_frame(
-                        self.ego_vehicle, walker
-                    ),
-                    "role_name": walker.attributes["role_name"],
-                    "transfuser_semantics_id": int(
-                        TransfuserSemanticSegmentationClass.PEDESTRIAN
-                    ),
-                    "extent": walker_extent,
-                    "position": [relative_pos[0], relative_pos[1], relative_pos[2]],
-                    "yaw": relative_yaw,
-                    "num_points": int(num_in_bbox_points),
-                    "num_radar_points": int(num_in_bb_radar_points),
-                    "distance": distance,
-                    "speed": walker_speed,
-                    "id": int(walker_id),
-                    "matrix": walker_transform.get_matrix(),
-                    "visible_pixels": expert_utils.get_num_points_in_actor(
+                    result["transfuser_semantics_id"] = int(
+                        TransfuserSemanticSegmentationClass.OBSTACLE
+                    )
+                    result["visible_pixels"] = expert_utils.get_num_points_in_bbox(
                         self.ego_vehicle,
-                        walker,
-                        global_camera_pc[
-                            TransfuserSemanticSegmentationClass.PEDESTRIAN
-                        ],
+                        result,
+                        global_camera_pc[TransfuserSemanticSegmentationClass.OBSTACLE],
                         pad=True,
-                    ),
-                }
+                    )
+
                 boxes.append(result)
 
-        # Note this only saves static actors, which does not include static background objects
-        if self.config_expert.eval_expert:
-            if self.step % max(self.config_expert.log_info_freq, 1) == 0:
-                LOG.debug("Skipping static actor bounding boxes in eval_expert mode.")
-        else:
-            static_list = self._actors.filter("*static*")
-            if LOG.isEnabledFor(logging.DEBUG) and (
-                self.step % max(self.config_expert.log_info_freq, 1) == 0
-            ):
-                LOG.debug("Found %d static actors in the scene.", len(static_list))
-            for static in static_list:
-                static_location = static.get_location()
-                if (
-                    static_location.distance(ego_location)
-                    < self.config_expert.bb_save_radius
-                ):
-                    static_transform = static.get_transform()
-                    static_velocity = static.get_velocity()
-                    static_rotation = static.get_transform().rotation
-                    static_matrix = np.array(static_transform.get_matrix())
-                    static_id = static.id
-                    type_id = static.type_id
-                    mesh_path = static.attributes.get("mesh_path", None)
-                    static_extent_raw = static.bounding_box.extent
-                    static_extent_raw_xyz = np.array(
-                        [
-                            static_extent_raw.x,
-                            static_extent_raw.y,
-                            static_extent_raw.z,
-                        ]
-                    )
-                    static_extent = [
-                        static_extent_raw.x,
-                        static_extent_raw.y,
-                        static_extent_raw.z,
-                    ]
-                    if mesh_path is not None and mesh_path in constants.LOOKUP_TABLE:
-                        static_extent = constants.LOOKUP_TABLE[mesh_path]
-                    if type_id == "static.prop.trafficwarning":
-                        static_extent[0], static_extent[1] = (
-                            self.config_expert.traffic_warning_bb_size[0],
-                            self.config_expert.traffic_warning_bb_size[1],
-                        )
-                    elif type_id == "static.prop.constructioncone":
-                        static_extent[0], static_extent[1] = (
-                            self.config_expert.construction_cone_bb_size[0],
-                            self.config_expert.construction_cone_bb_size[1],
-                        )
-
-                    yaw = np.deg2rad(static_rotation.yaw)
-
-                    relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
-                    relative_pos = common_utils.get_relative_transform(
-                        ego_matrix, static_matrix
-                    )
-
-                    static_speed = self._get_forward_speed(
-                        transform=static_transform, velocity=static_velocity
-                    )
-
-                    # Computes how many LiDAR hits are on a bounding box. Used to filter invisible boxes during data loading.
-                    if lidar_points is not None:
-                        num_in_bbox_points = self._count_points_in_actor_prefiltered(
-                            ego_matrix=ego_matrix,
-                            actor_matrix=static_matrix,
-                            actor_extent_xyz=static_extent_raw_xyz,
-                            point_cloud=lidar_points,
-                            xy_tree=lidar_tree,
-                            pad=True,
-                        )
-                    else:
-                        num_in_bbox_points = -1
-
-                    distance = np.linalg.norm(relative_pos)
-
-                    result = {
-                        "class": "static",
-                        "transfuser_semantics_id": int(
-                            TransfuserSemanticSegmentationClass.UNLABELED
-                        ),
-                        "extent": static_extent,
-                        "position": [relative_pos[0], relative_pos[1], relative_pos[2]],
-                        "yaw": relative_yaw,
-                        "num_points": int(num_in_bbox_points),
-                        "distance": distance,
-                        "speed": static_speed,
-                        "id": int(static_id),
-                        "matrix": static_transform.get_matrix(),
-                        "type_id": type_id,
-                        "mesh_path": mesh_path,
-                    }
-                    if result["mesh_path"] is not None and "Car" in result["mesh_path"]:
-                        result["transfuser_semantics_id"] = int(
-                            TransfuserSemanticSegmentationClass.VEHICLE
-                        )
-                        result["visible_pixels"] = expert_utils.get_num_points_in_bbox(
-                            self.ego_vehicle,
-                            result,
-                            global_camera_pc[
-                                TransfuserSemanticSegmentationClass.VEHICLE
-                            ],
-                            pad=True,
-                        )
-                    else:
-                        result["transfuser_semantics_id"] = int(
-                            TransfuserSemanticSegmentationClass.OBSTACLE
-                        )
-                        result["visible_pixels"] = expert_utils.get_num_points_in_bbox(
-                            self.ego_vehicle,
-                            result,
-                            global_camera_pc[
-                                TransfuserSemanticSegmentationClass.OBSTACLE
-                            ],
-                            pad=True,
-                        )
-
-                    boxes.append(result)
-
-        # --- Traffic light ---
-        # New logic needed to handle some weird traffic lights in Town12 and Town13
+        # -------------------------------------------------------------------------
+        # Traffic lights
+        # -------------------------------------------------------------------------
         for (
             traffic_light,
             original_traffic_light_bounding_box,
@@ -2663,11 +2967,13 @@ class ExpertData(ExpertBase):
             original_waypoint = self.carla_world_map.get_waypoint(
                 original_traffic_light_bounding_box.location
             )
-            waypoint_transform_matrix = np.array(
-                original_waypoint.transform.get_matrix()
+            waypoint_transform_matrix = np.asarray(
+                original_waypoint.transform.get_matrix(),
+                dtype=np.float32,
             )
-            traffic_light_transform_matrix = np.array(
-                traffic_light.get_transform().get_matrix()
+            traffic_light_transform_matrix = np.asarray(
+                traffic_light.get_transform().get_matrix(),
+                dtype=np.float32,
             )
 
             traffic_light_in_waypoint = common_utils.get_relative_transform(
@@ -2693,34 +2999,38 @@ class ExpertData(ExpertBase):
                 ]
                 and abs(traffic_light_in_waypoint[0]) < 4.0
             )
+
             if traffic_light_affects_ego:
                 red_light_stop_waypoints = expert_utils.get_stop_waypoints(
-                    self.ego_wp, traffic_light
+                    ego_wp, traffic_light
                 )
 
-                # Create bounding boxes for each additional lane
                 for i, red_light_stop_waypoint in enumerate(red_light_stop_waypoints):
-                    # Create bounding box for this waypoint
                     duplicated_traffic_light_bounding_box = (
                         expert_utils.create_bounding_box_for_waypoint(
-                            original_traffic_light_bounding_box, red_light_stop_waypoint
+                            original_traffic_light_bounding_box,
+                            red_light_stop_waypoint,
                         )
                     )
 
-                    traffic_light_extent = [
-                        duplicated_traffic_light_bounding_box.extent.x,
-                        duplicated_traffic_light_bounding_box.extent.y,
-                        duplicated_traffic_light_bounding_box.extent.z,
-                    ]
+                    traffic_light_extent = np.array(
+                        [
+                            duplicated_traffic_light_bounding_box.extent.x,
+                            duplicated_traffic_light_bounding_box.extent.y,
+                            duplicated_traffic_light_bounding_box.extent.z,
+                        ],
+                        dtype=np.float32,
+                    )
+                    traffic_light_extent_list = traffic_light_extent.tolist()
 
-                    # Keep original rotation/yaw, only change position
                     traffic_light_transform = carla.Transform(
                         duplicated_traffic_light_bounding_box.location,
                         original_traffic_light_bounding_box.rotation,
                     )
                     traffic_light_rotation = traffic_light_transform.rotation
-                    traffic_light_matrix = np.array(
-                        traffic_light_transform.get_matrix()
+                    traffic_light_matrix = np.asarray(
+                        traffic_light_transform.get_matrix(),
+                        dtype=np.float32,
                     )
                     yaw = np.deg2rad(traffic_light_rotation.yaw)
 
@@ -2729,42 +3039,44 @@ class ExpertData(ExpertBase):
                         ego_matrix, traffic_light_matrix
                     )
 
-                    if not self._is_in_fov(relative_pos, traffic_light_extent):
+                    if not self._is_in_fov(relative_pos, traffic_light_extent_list):
+                        continue
+                    if not self._is_bbox_partially_visible_by_cast_ray(
+                        ray_origin_world=los_ray_origin_world,
+                        ray_origin_world_carla=los_ray_origin_world_carla,
+                        bbox_matrix_world=traffic_light_matrix,
+                        bbox_extent_xyz=traffic_light_extent,
+                        ignore_labels=los_ignore_labels,
+                    ):
                         continue
 
-                    distance = np.linalg.norm(relative_pos)
+                    rel_x = float(relative_pos[0])
+                    rel_y = float(relative_pos[1])
+                    rel_z = float(relative_pos[2])
+                    distance = math.sqrt(rel_x * rel_x + rel_y * rel_y + rel_z * rel_z)
 
-                    # Keep the original distance_to_physical_traffic_light
-                    distance_traffic_light_to_bounding_box = np.linalg.norm(
-                        np.array(
-                            [
-                                traffic_light.get_transform().location.x
-                                - duplicated_traffic_light_bounding_box.location.x,
-                                traffic_light.get_transform().location.y
-                                - duplicated_traffic_light_bounding_box.location.y,
-                            ]
-                        )
+                    traffic_light_loc = traffic_light.get_transform().location
+                    bbox_loc = duplicated_traffic_light_bounding_box.location
+                    tl_dx = float(traffic_light_loc.x) - float(bbox_loc.x)
+                    tl_dy = float(traffic_light_loc.y) - float(bbox_loc.y)
+                    distance_traffic_light_to_bounding_box = math.sqrt(
+                        tl_dx * tl_dx + tl_dy * tl_dy
                     )
 
-                    # Duplicated bounding box result
                     if i == 0:
                         result = {
                             "class": "traffic_light",
                             "transfuser_semantics_id": int(
                                 TransfuserSemanticSegmentationClass.TRAFFIC_LIGHT
                             ),
-                            "extent": traffic_light_extent,
-                            "position": [
-                                relative_pos[0],
-                                relative_pos[1],
-                                relative_pos[2],
-                            ],
+                            "extent": traffic_light_extent_list,
+                            "position": [rel_x, rel_y, rel_z],
                             "yaw": relative_yaw,
                             "distance": distance,
                             "state": str(traffic_light_state),
-                            "id": int(traffic_light_id),  # Keep original ID
+                            "id": int(traffic_light_id),
                             "affects_ego": traffic_light_affects_ego,
-                            "matrix": traffic_light_transform.get_matrix(),
+                            "matrix": traffic_light_matrix.tolist(),
                             "distance_to_physical_traffic_light": distance_traffic_light_to_bounding_box,
                             "dummy_traffic_light_bounding_box": False,
                             "same_lane_as_ego": red_light_stop_waypoint.lane_id
@@ -2778,20 +3090,14 @@ class ExpertData(ExpertBase):
                             "transfuser_semantics_id": int(
                                 TransfuserSemanticSegmentationClass.TRAFFIC_LIGHT
                             ),
-                            "extent": traffic_light_extent,
-                            "position": [
-                                relative_pos[0],
-                                relative_pos[1],
-                                relative_pos[2],
-                            ],
+                            "extent": traffic_light_extent_list,
+                            "position": [rel_x, rel_y, rel_z],
                             "yaw": relative_yaw,
                             "distance": distance,
                             "state": str(traffic_light_state),
-                            "id": self.negative_id_counter(
-                                traffic_light.id
-                            ),  # Use negative ID counter for duplicates
+                            "id": self.negative_id_counter(traffic_light.id),
                             "affects_ego": traffic_light_affects_ego,
-                            "matrix": traffic_light_transform.get_matrix(),
+                            "matrix": traffic_light_matrix.tolist(),
                             "distance_to_physical_traffic_light": distance_traffic_light_to_bounding_box,
                             "dummy_traffic_light_bounding_box": True,
                             "same_lane_as_ego": red_light_stop_waypoint.lane_id
@@ -2801,58 +3107,77 @@ class ExpertData(ExpertBase):
                         }
                     boxes.append(result)
 
+        # -------------------------------------------------------------------------
+        # Stop signs
+        # -------------------------------------------------------------------------
         for stop_sign in self.close_stop_signs:
-            stop_sign_extent = [
-                stop_sign[0].extent.x,
-                stop_sign[0].extent.y,
-                stop_sign[0].extent.z,
-            ]
+            stop_sign_extent = np.array(
+                [stop_sign[0].extent.x, stop_sign[0].extent.y, stop_sign[0].extent.z],
+                dtype=np.float32,
+            )
+            stop_sign_extent_list = stop_sign_extent.tolist()
 
             stop_sign_transform = carla.Transform(
                 stop_sign[0].location, stop_sign[0].rotation
             )
             stop_sign_rotation = stop_sign_transform.rotation
-            stop_sign_matrix = np.array(stop_sign_transform.get_matrix())
+            stop_sign_matrix = np.asarray(
+                stop_sign_transform.get_matrix(), dtype=np.float32
+            )
             yaw = np.deg2rad(stop_sign_rotation.yaw)
 
             relative_yaw = common_utils.normalize_angle(yaw - ego_yaw)
             relative_pos = common_utils.get_relative_transform(
                 ego_matrix, stop_sign_matrix
             )
-            if not self._is_in_fov(relative_pos, stop_sign_extent):
+
+            if not self._is_in_fov(relative_pos, stop_sign_extent_list):
+                continue
+            if not self._is_bbox_partially_visible_by_cast_ray(
+                ray_origin_world=los_ray_origin_world,
+                ray_origin_world_carla=los_ray_origin_world_carla,
+                bbox_matrix_world=stop_sign_matrix,
+                bbox_extent_xyz=stop_sign_extent,
+                ignore_labels=los_ignore_labels,
+            ):
                 continue
 
-            distance = np.linalg.norm(relative_pos)
+            rel_x = float(relative_pos[0])
+            rel_y = float(relative_pos[1])
+            rel_z = float(relative_pos[2])
+            distance = math.sqrt(rel_x * rel_x + rel_y * rel_y + rel_z * rel_z)
 
             result = {
                 "class": "stop_sign",
                 "transfuser_semantics_id": int(
                     TransfuserSemanticSegmentationClass.UNLABELED
                 ),
-                "extent": stop_sign_extent,
-                "position": [relative_pos[0], relative_pos[1], relative_pos[2]],
+                "extent": stop_sign_extent_list,
+                "position": [rel_x, rel_y, rel_z],
                 "yaw": relative_yaw,
                 "distance": distance,
                 "id": int(stop_sign[1]),
                 "affects_ego": stop_sign[2],
-                "matrix": stop_sign_transform.get_matrix(),
+                "matrix": stop_sign_matrix.tolist(),
             }
             boxes.append(result)
 
-        # Others static meshes that dont belong to an actors but are still relevant for perception
+        # -------------------------------------------------------------------------
+        # Static meshes from level bbs (static_prop_car)
+        # -------------------------------------------------------------------------
         if self.config_expert.eval_expert:
             if self.step % max(self.config_expert.log_info_freq, 1) == 0:
                 LOG.debug("Skipping static actor bounding boxes in eval_expert mode.")
         else:
             static_parking_id_start = 1e8
             found = 0
-            existed_bboxes_ids = set([box["id"] for box in boxes])
+            existed_bboxes_ids = {box["id"] for box in boxes}
             existing_actor_bbs = self._precompute_existing_actor_bbs(
                 existed_bboxes_ids=existed_bboxes_ids,
                 vehicle_list=vehicle_list,
                 static_list=static_list,
             )
-            radius_sq = float(self.config_expert.bb_save_radius**2)
+
             cached_level_bbs = self._cached_level_bbs_by_class.get(
                 carla.CityObjectLabel.Car, tuple()
             )
@@ -2860,23 +3185,31 @@ class ExpertData(ExpertBase):
                 cached_level_bbs = tuple(
                     self.carla_world.get_level_bbs(carla.CityObjectLabel.Car)
                 )
+
             for i, vehicle_bounding_box in enumerate(cached_level_bbs):
                 extent = vehicle_bounding_box.extent
                 location = vehicle_bounding_box.location
-                dx = location.x - ego_location.x
-                dy = location.y - ego_location.y
-                dz = location.z - ego_location.z
-                if dx * dx + dy * dy + dz * dz > radius_sq:
+                dx = float(location.x) - float(ego_location.x)
+                dy = float(location.y) - float(ego_location.y)
+                dz = float(location.z) - float(ego_location.z)
+                if dx * dx + dy * dy + dz * dz > bb_save_radius_sq:
                     continue
-                rotation = vehicle_bounding_box.rotation
-                matrix = carla.Transform(location, rotation).get_matrix()
-                relative_pos = common_utils.get_relative_transform(
-                    ego_matrix, np.array(matrix)
-                )
-                distance = np.linalg.norm(relative_pos)
 
-                if distance > self.config_expert.bb_save_radius:
+                rotation = vehicle_bounding_box.rotation
+                matrix = np.asarray(
+                    carla.Transform(location, rotation).get_matrix(),
+                    dtype=np.float32,
+                )
+                relative_pos = common_utils.get_relative_transform(ego_matrix, matrix)
+
+                rel_x = float(relative_pos[0])
+                rel_y = float(relative_pos[1])
+                rel_z = float(relative_pos[2])
+                distance = math.sqrt(rel_x * rel_x + rel_y * rel_y + rel_z * rel_z)
+
+                if distance > bb_save_radius:
                     continue
+
                 relative_yaw = common_utils.normalize_angle(
                     np.deg2rad(rotation.yaw) - ego_yaw
                 )
@@ -2886,14 +3219,13 @@ class ExpertData(ExpertBase):
                         TransfuserSemanticSegmentationClass.VEHICLE
                     ),
                     "extent": [extent.x, extent.y, extent.z],
-                    "position": [relative_pos[0], relative_pos[1], relative_pos[2]],
+                    "position": [rel_x, rel_y, rel_z],
                     "yaw": relative_yaw,
                     "distance": distance,
                     "id": int(static_parking_id_start + i),
-                    "matrix": matrix,
+                    "matrix": matrix.tolist(),
                 }
 
-                # Since we iterate every bounding box in the world, we need to make sure that we dont duplicate anything
                 if self._intersects_any_with_broadphase(
                     vehicle_bounding_box, existing_actor_bbs
                 ):
@@ -2901,7 +3233,10 @@ class ExpertData(ExpertBase):
 
                 if lidar_points is not None:
                     result["num_points"] = expert_utils.get_num_points_in_bbox(
-                        self.ego_vehicle, result, lidar_points, pad=True
+                        self.ego_vehicle,
+                        result,
+                        lidar_points,
+                        pad=True,
                     )
                 else:
                     result["num_points"] = -1
@@ -2916,18 +3251,20 @@ class ExpertData(ExpertBase):
                 boxes.append(result)
                 found += 1
 
-        # Filter bounding boxes with duplicate id
+        # -------------------------------------------------------------------------
+        # Deduplicate and sort
+        # -------------------------------------------------------------------------
         bounding_box_ids = set()
         filtered_bounding_boxes = []
         for box in boxes:
             if box["id"] not in bounding_box_ids:
                 bounding_box_ids.add(box["id"])
                 filtered_bounding_boxes.append(box)
-        # Sort by distances to ego
-        filtered_bounding_boxes = sorted(
-            filtered_bounding_boxes, key=lambda x: x["distance"]
-        )
 
+        filtered_bounding_boxes = sorted(
+            filtered_bounding_boxes,
+            key=lambda x: x["distance"],
+        )
         return filtered_bounding_boxes
 
     @beartype
