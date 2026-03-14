@@ -385,11 +385,6 @@ class Expert(ExpertData):
                     self.visibility_range_camera_2,
                     self.visibility_range_camera_3,
                 ]
-                if (
-                    self.config_expert.target_dataset
-                    == constants.TargetDataset.CARLA_LEADERBOARD2_4CAMERAS
-                ):
-                    occlusion_scores.append(self.visibility_range_camera_4)
                 if self.distance_to_next_junction < 20 and min(occlusion_scores) < 0.2:
                     self.slower_occluded_junction = True
                     self.target_speed_limit -= 4.0

@@ -126,7 +126,7 @@ class BaseConfig:
         """Number of cameras based on the target dataset."""
         return {
             TargetDataset.CARLA_LEADERBOARD2_6CAMERAS: 6,
-            TargetDataset.CARLA_LEADERBOARD2_4CAMERAS: 4,
+            TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS: 3,
             TargetDataset.CARLA_LEADERBOARD2_3CAMERAS: 3,
             TargetDataset.CARLA_LEADERBOARD2_1CAMERA: 1,
             TargetDataset.CARLA_PY123D_1CAMERA: 1,
@@ -188,18 +188,18 @@ class BaseConfig:
                     "fov": 60,
                 },
             }
-        elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_4CAMERAS:
+        elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
             return {
                 1: {
-                    "pos": [0.1, -0.4, 2.25],
-                    "rot": [0.0, 0.0, -54.5],
+                    "pos": [0.0, -0.15, 2.25],
+                    "rot": [0.0, 0.0, -40.0],
                     "width": 512,
                     "height": 512,
                     "cropped_height": 512,
                     "fov": 90,
                 },
                 2: {
-                    "pos": [0.35, -0.1, 2.25],
+                    "pos": [0.0, 0.0, 2.25],
                     "rot": [0.0, 0.0, 0.0],
                     "width": 512,
                     "height": 512,
@@ -207,16 +207,8 @@ class BaseConfig:
                     "fov": 60,
                 },
                 3: {
-                    "pos": [0.35, 0.1, 2.25],
-                    "rot": [0.0, 0.0, 0.0],
-                    "width": 512,
-                    "height": 512,
-                    "cropped_height": 512,
-                    "fov": 60,
-                },
-                4: {
-                    "pos": [0.1, 0.4, 2.25],
-                    "rot": [0.0, 0.0, 54.5],
+                    "pos": [0.0, 0.15, 2.25],
+                    "rot": [0.0, 0.0, 40.0],
                     "width": 512,
                     "height": 512,
                     "cropped_height": 512,
@@ -388,9 +380,9 @@ class BaseConfig:
         save_depth_files = False
 
     # If true save camera images per-camera into modality/camX/ subfolders
-    SAVE_CAM_IMAGES_IN_SUBFOLDERS: bool = True
+    SAVE_CAM_IMAGES_IN_SUBFOLDERS: bool = False
     # If true save camera images as stitched panorama (legacy behavior)
-    SAVE_CAM_IMAGES_AS_PANORAMA: bool = False
+    SAVE_CAM_IMAGES_AS_PANORAMA: bool = True
     # If true save depth images at lower resolution
     save_depth_lower_resolution = True
 

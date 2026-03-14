@@ -15,7 +15,7 @@ export TEAM_CONFIG=$ROUTES
 export DATAGEN=0
 
 # Expert config overrides:
-# TargetDataset.CARLA_LEADERBOARD2_4CAMERAS == 2
+# TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS == 2
 # One-line toggles:
 export SAVE_CAMERA_PC=False
 export ENABLE_PERTURBATED_SENSORS=False

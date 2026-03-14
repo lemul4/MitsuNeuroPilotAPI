@@ -43,14 +43,14 @@ class ExpertConfig(BaseConfig):
     @overridable_property
     def use_lidar(self):
         """Whether to attach/process LiDAR for the current target dataset."""
-        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_4CAMERAS:
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
             return False
         return True
 
     @overridable_property
     def use_radars(self):
         """Whether to attach/process radars for the current target dataset."""
-        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_4CAMERAS:
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
             return False
         return True
 
