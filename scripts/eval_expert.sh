@@ -21,7 +21,7 @@ export SAVE_CAMERA_PC=False
 export ENABLE_PERTURBATED_SENSORS=False
 export SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ=True
 export COMPUTE_CAMERA_PC=False
-export COMPRESS_IMAGES=False
+export COMPRESS_IMAGES=True
 export LEAD_EXPERT_CONFIG="target_dataset=2 save_camera_pc=${SAVE_CAMERA_PC} perturbate_sensors=${ENABLE_PERTURBATED_SENSORS} sync_sensor_processing_with_data_save_freq=${SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ} compute_camera_pc=${COMPUTE_CAMERA_PC} compress_images=${COMPRESS_IMAGES}"
 
 # Set paths for saving data and results
