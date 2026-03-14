@@ -2598,15 +2598,15 @@ class ExpertData(ExpertBase):
                 actor_matrix=vehicle_matrix,
                 local_bbox_matrix=local_bbox_matrix,
             )
-
-            if not self._is_bbox_partially_visible_by_cast_ray(
-                ray_origin_world=los_ray_origin_world,
-                ray_origin_world_carla=los_ray_origin_world_carla,
-                bbox_matrix_world=vehicle_bbox_matrix,
-                bbox_extent_xyz=vehicle_extent_xyz,
-                ignore_labels=los_ignore_labels,
-            ):
-                continue
+            if self.config_expert.cast_ray:
+                if not self._is_bbox_partially_visible_by_cast_ray(
+                    ray_origin_world=los_ray_origin_world,
+                    ray_origin_world_carla=los_ray_origin_world_carla,
+                    bbox_matrix_world=vehicle_bbox_matrix,
+                    bbox_extent_xyz=vehicle_extent_xyz,
+                    ignore_labels=los_ignore_labels,
+                ):
+                    continue
 
             # Survivors only
             vehicle_control: carla.VehicleControl = vehicle.get_control()
@@ -2682,6 +2682,9 @@ class ExpertData(ExpertBase):
             else:
                 num_in_bb_radar_points = -1
 
+            if num_in_bbox_points == 0 or num_in_bb_radar_points == 0:
+                continue
+
             result = {
                 "class": "car",
                 "ego_velocity": expert_utils.get_vehicle_velocity_in_ego_frame(
@@ -2756,15 +2759,15 @@ class ExpertData(ExpertBase):
                 actor_matrix=walker_matrix,
                 local_bbox_matrix=local_bbox_matrix,
             )
-
-            if not self._is_bbox_partially_visible_by_cast_ray(
-                ray_origin_world=los_ray_origin_world,
-                ray_origin_world_carla=los_ray_origin_world_carla,
-                bbox_matrix_world=walker_bbox_matrix,
-                bbox_extent_xyz=walker_extent_xyz,
-                ignore_labels=los_ignore_labels,
-            ):
-                continue
+            if self.config_expert.cast_ray:
+                if not self._is_bbox_partially_visible_by_cast_ray(
+                    ray_origin_world=los_ray_origin_world,
+                    ray_origin_world_carla=los_ray_origin_world_carla,
+                    bbox_matrix_world=walker_bbox_matrix,
+                    bbox_extent_xyz=walker_extent_xyz,
+                    ignore_labels=los_ignore_labels,
+                ):
+                    continue
 
             # Survivors only
             walker_velocity = walker.get_velocity()
@@ -2797,6 +2800,9 @@ class ExpertData(ExpertBase):
                 )
             else:
                 num_in_bb_radar_points = -1
+
+            if num_in_bbox_points == 0 or num_in_bb_radar_points == 0:
+                continue
 
             rel_x = float(relative_pos[0])
             rel_y = float(relative_pos[1])
@@ -2892,6 +2898,8 @@ class ExpertData(ExpertBase):
                 relative_pos = common_utils.get_relative_transform(
                     ego_matrix, static_matrix
                 )
+                if not self._is_in_fov(relative_pos, static_extent):
+                    continue
 
                 static_speed = self._get_forward_speed(
                     transform=static_transform,
@@ -2909,6 +2917,9 @@ class ExpertData(ExpertBase):
                     )
                 else:
                     num_in_bbox_points = -1
+
+                if num_in_bbox_points == 0:
+                    continue
 
                 rel_x = float(relative_pos[0])
                 rel_y = float(relative_pos[1])
@@ -3041,14 +3052,15 @@ class ExpertData(ExpertBase):
 
                     if not self._is_in_fov(relative_pos, traffic_light_extent_list):
                         continue
-                    if not self._is_bbox_partially_visible_by_cast_ray(
-                        ray_origin_world=los_ray_origin_world,
-                        ray_origin_world_carla=los_ray_origin_world_carla,
-                        bbox_matrix_world=traffic_light_matrix,
-                        bbox_extent_xyz=traffic_light_extent,
-                        ignore_labels=los_ignore_labels,
-                    ):
-                        continue
+                    if self.config_expert.cast_ray:
+                        if not self._is_bbox_partially_visible_by_cast_ray(
+                            ray_origin_world=los_ray_origin_world,
+                            ray_origin_world_carla=los_ray_origin_world_carla,
+                            bbox_matrix_world=traffic_light_matrix,
+                            bbox_extent_xyz=traffic_light_extent,
+                            ignore_labels=los_ignore_labels,
+                        ):
+                            continue
 
                     rel_x = float(relative_pos[0])
                     rel_y = float(relative_pos[1])
@@ -3133,14 +3145,15 @@ class ExpertData(ExpertBase):
 
             if not self._is_in_fov(relative_pos, stop_sign_extent_list):
                 continue
-            if not self._is_bbox_partially_visible_by_cast_ray(
-                ray_origin_world=los_ray_origin_world,
-                ray_origin_world_carla=los_ray_origin_world_carla,
-                bbox_matrix_world=stop_sign_matrix,
-                bbox_extent_xyz=stop_sign_extent,
-                ignore_labels=los_ignore_labels,
-            ):
-                continue
+            if self.config_expert.cast_ray:
+                if not self._is_bbox_partially_visible_by_cast_ray(
+                    ray_origin_world=los_ray_origin_world,
+                    ray_origin_world_carla=los_ray_origin_world_carla,
+                    bbox_matrix_world=stop_sign_matrix,
+                    bbox_extent_xyz=stop_sign_extent,
+                    ignore_labels=los_ignore_labels,
+                ):
+                    continue
 
             rel_x = float(relative_pos[0])
             rel_y = float(relative_pos[1])
@@ -3202,6 +3215,9 @@ class ExpertData(ExpertBase):
                 )
                 relative_pos = common_utils.get_relative_transform(ego_matrix, matrix)
 
+                if not self._is_in_fov(relative_pos, [extent.x, extent.y, extent.z]):
+                    continue
+
                 rel_x = float(relative_pos[0])
                 rel_y = float(relative_pos[1])
                 rel_z = float(relative_pos[2])
@@ -3240,6 +3256,9 @@ class ExpertData(ExpertBase):
                     )
                 else:
                     result["num_points"] = -1
+
+                if num_in_bbox_points == 0:
+                    continue
 
                 result["visible_pixels"] = expert_utils.get_num_points_in_bbox(
                     self.ego_vehicle,

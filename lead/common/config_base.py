@@ -57,8 +57,8 @@ class BaseConfig:
     # --- Augmentation and Misc ---
     # Frequency (in steps) at which data is saved during data collection
     data_save_freq = 3
-    # If true, camera sensors use sensor_tick synchronized to data_save_freq cadence.
-    camera_sensor_tick_from_data_save_freq = True
+    # If true, camera and LiDAR sensors use sensor_tick synchronized to data_save_freq cadence.
+    camera_lidar_sensor_tick_from_data_save_freq = True
     # If true enable camera perturbation during data collection
     perturbate_sensors = False
     # Safety translation perturbation penalty for default scenarios
@@ -100,7 +100,7 @@ class BaseConfig:
     # Roll, pitch, yaw rotation of first LiDAR (degrees)
     @property
     def lidar_rot_1(self):
-        return [0.0, 0.0, -90.0]
+        return [0.0, 0.0, 0.0]
 
     # x, y, z mounting position of the second LiDAR
     @property
@@ -119,7 +119,7 @@ class BaseConfig:
 
     # --- Camera Configuration ---
     # Horizontal FOV (degrees) used for forward-sector filtering in expert data processing.
-    target_fov = 200.0
+    target_fov = 150.0
 
     @property
     def num_cameras(self):
@@ -358,8 +358,8 @@ class BaseConfig:
 
     # сенсоры
     enable_semantic_sensor = True
-    enable_instance_sensor = True
-    enable_depth_sensor = True
+    enable_instance_sensor = False
+    enable_depth_sensor = False
 
     # сохранение файлов (исходные значения)
     save_semantic_files = True
@@ -380,9 +380,9 @@ class BaseConfig:
         save_depth_files = False
 
     # If true save camera images per-camera into modality/camX/ subfolders
-    SAVE_CAM_IMAGES_IN_SUBFOLDERS: bool = False
+    SAVE_CAM_IMAGES_IN_SUBFOLDERS: bool = True
     # If true save camera images as stitched panorama (legacy behavior)
-    SAVE_CAM_IMAGES_AS_PANORAMA: bool = True
+    SAVE_CAM_IMAGES_AS_PANORAMA: bool = False
     # If true save depth images at lower resolution
     save_depth_lower_resolution = True
 

@@ -160,7 +160,7 @@ class BaseAgent:
             # Remove lidar points inside ego bounding boxes. We already need LiDAR for expert.
             input_data["lidar"] = input_data["lidar"][
                 (np.abs(lidar_x) > self.config_expert.ego_extent_x)
-                & (np.abs(lidar_y) > self.config_expert.ego_extent_y)
+                | (np.abs(lidar_y) > self.config_expert.ego_extent_y)
             ]
             original_lidar_num_points = input_data["lidar"].shape[0]
 

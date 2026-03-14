@@ -44,7 +44,7 @@ class ExpertConfig(BaseConfig):
     def use_lidar(self):
         """Whether to attach/process LiDAR for the current target dataset."""
         if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
-            return False
+            return True
         return True
 
     @overridable_property
@@ -83,6 +83,8 @@ class ExpertConfig(BaseConfig):
     unproject_on_cuda = True
     # How often we log in the main loop
     log_info_freq = 10
+
+    cast_ray = False
 
     # Max queued frames in async save worker. Smaller values reduce RAM spikes.
     save_queue_maxsize = 16
@@ -914,101 +916,21 @@ class ExpertConfig(BaseConfig):
             dict: Weather condition to compression quality distribution mapping.
         """
 
-        # For non-leaderboard datasets, use default high level compression
-        if self.target_dataset not in [TargetDataset.NAVSIM_4CAMERAS]:
-            return defaultdict(lambda: {30: 1.0})
-        elif self.target_dataset == TargetDataset.WAYMO_E2E_2025_3CAMERAS:
-            return defaultdict(lambda: {30: 1.0})
-
         def normalize(d):
             return {k: v / sum(d.values()) for k, v in d.items()}
 
-        LOW_COMPRESSION = normalize({80: 0.25, 85: 0.5, 90: 0.25})
+        LOW_COMPRESSION = normalize({85: 0.5, 90: 0.5})
+        """LOW_COMPRESSION = normalize({80: 0.25, 85: 0.5, 90: 0.25})
         MILD_COMPRESSION = normalize({70: 0.1, 75: 0.25, 80: 0.4, 90: 0.2})
         MEDIUM_COMPRESSION = normalize({70: 0.2, 75: 0.2, 80: 0.15, 90: 0.2})
         HIGH_COMPRESION = normalize(
             {60: 0.05, 65: 0.1, 70: 0.1, 75: 0.2, 80: 0.1, 90: 0.2}
         )
         VERY_HIGH_COMPRESION = normalize({55: 0.15, 65: 0.4, 75: 0.15, 90: 0.2})
-        EXTREME_COMPRESSION = normalize({30: 0.2, 40: 0.35, 50: 0.15, 90: 0.2})
+        EXTREME_COMPRESSION = normalize({30: 0.2, 40: 0.35, 50: 0.15, 90: 0.2})"""
 
-        if self.num_cameras == 6:
-            LOW_COMPRESSION = normalize({80: 0.30, 85: 0.5, 90: 0.2})
-            MILD_COMPRESSION = normalize({70: 0.15, 75: 0.25, 80: 0.4, 90: 0.15})
-            MEDIUM_COMPRESSION = normalize({70: 0.25, 75: 0.2, 80: 0.15, 90: 0.15})
-            HIGH_COMPRESION = normalize(
-                {60: 0.10, 65: 0.1, 70: 0.1, 75: 0.2, 80: 0.1, 90: 0.15}
-            )
-            VERY_HIGH_COMPRESION = normalize({55: 0.20, 65: 0.4, 75: 0.15, 90: 0.15})
-            EXTREME_COMPRESSION = normalize({30: 0.25, 40: 0.35, 50: 0.15, 90: 0.15})
-
-        return {
-            "ClearNight": MEDIUM_COMPRESSION,
-            "ClearNoon": EXTREME_COMPRESSION,
-            "ClearSunset": EXTREME_COMPRESSION,
-            "ClearSunrise": EXTREME_COMPRESSION,
-            # Cloudy weather
-            "CloudyNight": MILD_COMPRESSION,
-            "CloudyNoon": EXTREME_COMPRESSION,
-            "CloudySunset": EXTREME_COMPRESSION,
-            "CloudySunrise": EXTREME_COMPRESSION,
-            # Dust storm
-            "DustStorm": VERY_HIGH_COMPRESION,
-            # Hard rain
-            "HardRainNight": LOW_COMPRESSION,
-            "HardRainNoon": MEDIUM_COMPRESSION,
-            "HardRainSunset": MEDIUM_COMPRESSION,
-            "HardRainSunrise": MEDIUM_COMPRESSION,
-            # Mid rain
-            "MidRainyNight": LOW_COMPRESSION,
-            "MidRainyNoon": HIGH_COMPRESION,
-            "MidRainSunset": HIGH_COMPRESION,
-            "MidRainSunrise": HIGH_COMPRESION,
-            # Soft rain
-            "SoftRainNight": MILD_COMPRESSION,
-            "SoftRainNoon": VERY_HIGH_COMPRESION,
-            "SoftRainSunset": VERY_HIGH_COMPRESION,
-            "SoftRainSunrise": VERY_HIGH_COMPRESION,
-            # Wet cloudy
-            "WetCloudyNight": LOW_COMPRESSION,
-            "WetCloudyNoon": VERY_HIGH_COMPRESION,
-            "WetCloudySunset": VERY_HIGH_COMPRESION,
-            "WetCloudySunrise": VERY_HIGH_COMPRESION,
-            # Wet
-            "WetNight": MILD_COMPRESSION,
-            "WetNoon": VERY_HIGH_COMPRESION,
-            # Foggy cloudy
-            "FoggyCloudyNight": MEDIUM_COMPRESSION,
-            "FoggyCloudyNoon": MEDIUM_COMPRESSION,
-            "FoggyCloudySunset": MEDIUM_COMPRESSION,
-            "FoggyCloudySunrise": MEDIUM_COMPRESSION,
-            # Foggy Wet cloudy
-            "FoggyWetCloudyNight": MEDIUM_COMPRESSION,
-            "FoggyWetCloudyNoon": MEDIUM_COMPRESSION,
-            "FoggyWetCloudySunset": MEDIUM_COMPRESSION,
-            "FoggyWetCloudySunrise": MEDIUM_COMPRESSION,
-            # Foggy Wet
-            "FoggyWetNoon": MEDIUM_COMPRESSION,
-            # Foggy Soft Rain
-            "FoggySoftRainNight": MEDIUM_COMPRESSION,
-            "FoggySoftRainNoon": MEDIUM_COMPRESSION,
-            "FoggySoftRainSunset": MEDIUM_COMPRESSION,
-            "FoggySoftRainSunrise": MEDIUM_COMPRESSION,
-            # Foggy Hard Rain
-            "FoggyHardRainNight": LOW_COMPRESSION,
-            # Custom weather
-            "Custom0": HIGH_COMPRESION,
-            "Custom9": HIGH_COMPRESION,
-            "Custom10": LOW_COMPRESSION,
-            "Custom11": HIGH_COMPRESION,
-            "Custom12": HIGH_COMPRESION,
-            "Custom13": LOW_COMPRESSION,
-            "Custom14": HIGH_COMPRESION,
-            "Custom15": HIGH_COMPRESION,
-            "Custom19": LOW_COMPRESSION,
-            "Custom20": LOW_COMPRESSION,
-            "Custom21": LOW_COMPRESSION,
-        }
+        # Always use the same JPEG quality distribution across all weather conditions.
+        return defaultdict(lambda: LOW_COMPRESSION)
 
     @property
     def weather_settings(self):
