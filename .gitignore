@@ -198,3 +198,5 @@ visualization/
 /.vscode
 /.vscode/*.json
 /.codex
+/data/carla_leaderboard2
+/data/expert_debug

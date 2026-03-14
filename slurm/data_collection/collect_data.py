@@ -647,7 +647,7 @@ if __name__ == "__main__":
     if args.py123d:
         raise ValueError(
             "--py123d is deprecated and no longer supported in slurm/data_collection/collect_data.py. "
-            "This script now always runs lead/expert/expert.py with CARLA_LEADERBOARD2_4CAMERAS overrides."
+            "This script now always runs lead/expert/expert.py with CARLA_LEADERBOARD2_ONLY3CAMERAS overrides."
         )
 
     repetitions = 1
