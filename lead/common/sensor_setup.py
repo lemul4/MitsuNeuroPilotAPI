@@ -43,6 +43,19 @@ def av_sensor_setup(
         perturbate,
         sensor_agent,
     )
+
+    lidar_tick_seconds = None
+    if getattr(config, "camera_lidar_sensor_tick_from_data_save_freq", False):
+        if config.data_save_freq <= 0:
+            raise ValueError(
+                "config.data_save_freq must be > 0 when camera_lidar_sensor_tick_from_data_save_freq is enabled."
+            )
+        if config.carla_fps <= 0:
+            raise ValueError(
+                "config.carla_fps must be > 0 when camera_lidar_sensor_tick_from_data_save_freq is enabled."
+            )
+        lidar_tick_seconds = config.data_save_freq / float(config.carla_fps)
+
     if lidar:
         result.append(
             {
@@ -54,6 +67,11 @@ def av_sensor_setup(
                 "pitch": config.lidar_rot_1[1],
                 "yaw": config.lidar_rot_1[2],
                 "id": "lidar1",
+                **(
+                    {"sensor_tick": lidar_tick_seconds}
+                    if lidar_tick_seconds is not None
+                    else {}
+                ),
             }
         )
         LOG.info(
@@ -70,6 +88,11 @@ def av_sensor_setup(
                     "pitch": config.lidar_rot_2[1],
                     "yaw": config.lidar_rot_2[2],
                     "id": "lidar2",
+                    **(
+                        {"sensor_tick": lidar_tick_seconds}
+                        if lidar_tick_seconds is not None
+                        else {}
+                    ),
                 }
             )
             LOG.info(
@@ -178,14 +201,14 @@ def camera_sensor_setup(
     """
     result = []
     camera_tick_seconds = None
-    if getattr(config, "camera_sensor_tick_from_data_save_freq", False):
+    if getattr(config, "camera_lidar_sensor_tick_from_data_save_freq", False):
         if config.data_save_freq <= 0:
             raise ValueError(
-                "config.data_save_freq must be > 0 when camera_sensor_tick_from_data_save_freq is enabled."
+                "config.data_save_freq must be > 0 when camera_lidar_sensor_tick_from_data_save_freq is enabled."
             )
         if config.carla_fps <= 0:
             raise ValueError(
-                "config.carla_fps must be > 0 when camera_sensor_tick_from_data_save_freq is enabled."
+                "config.carla_fps must be > 0 when camera_lidar_sensor_tick_from_data_save_freq is enabled."
             )
         camera_tick_seconds = config.data_save_freq / float(config.carla_fps)
 

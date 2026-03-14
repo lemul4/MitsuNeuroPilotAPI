@@ -183,8 +183,9 @@ class AgentWrapper(object):
                                              yaw=sensor_spec['yaw'])
 
         elif type_ == 'sensor.lidar.ray_cast':
-            attributes['range'] = str(85)
-            attributes['rotation_frequency'] = str(10)
+            attributes['range'] = str(80)
+            attributes['rotation_frequency'] = str(12)
+            attributes['horizontal_fov'] = str(150)
             attributes['points_per_second'] = str(600000)
             attributes['channels'] = str(64)
             attributes['upper_fov'] = str(10)
