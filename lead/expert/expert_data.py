@@ -73,6 +73,151 @@ LOS_LOCAL_CORNERS_UNIT = np.array(
 )
 
 
+class SemanticPanoramaStitcher:
+    """Geometric semantic panorama stitcher using camera calibration from config."""
+
+    def __init__(self, config):
+        self.config = config
+        self.W_pano = int(config.semantic_panorama_width)
+        self.H_pano = int(config.semantic_panorama_height)
+        self.pano_fov = np.deg2rad(float(config.semantic_panorama_fov_deg))
+        self.vertical_fov = np.deg2rad(float(config.semantic_panorama_vertical_fov_deg))
+        self.projection_dist = float(config.semantic_panorama_projection_dist)
+
+        configured_camera_ids = tuple(config.semantic_panorama_camera_ids)
+        if len(configured_camera_ids) == 0:
+            configured_camera_ids = tuple(sorted(config.camera_calibration.keys()))
+        self.camera_ids = list(configured_camera_ids)
+
+        configured_center_id = int(config.semantic_panorama_center_camera_id)
+        self.center_camera_id = (
+            configured_center_id
+            if configured_center_id in self.camera_ids
+            else self.camera_ids[len(self.camera_ids) // 2]
+        )
+
+        configured_render_order = tuple(config.semantic_panorama_render_order)
+        if len(configured_render_order) > 0:
+            self.render_order = [
+                camera_id
+                for camera_id in configured_render_order
+                if camera_id in self.camera_ids
+            ]
+        else:
+            self.render_order = [
+                camera_id
+                for camera_id in self.camera_ids
+                if camera_id != self.center_camera_id
+            ] + [self.center_camera_id]
+
+        self.center_dilate_kernel = max(
+            1, int(config.semantic_panorama_center_dilate_kernel)
+        )
+        self.center_dilate_iterations = max(
+            0, int(config.semantic_panorama_center_dilate_iterations)
+        )
+
+        center_camera_cfg = config.camera_calibration[self.center_camera_id]
+        self.reference_camera_z = float(center_camera_cfg["pos"][2])
+
+        self.maps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self.valid_masks: dict[int, np.ndarray] = {}
+        self._precompute_maps()
+
+    def _precompute_maps(self) -> None:
+        theta = np.linspace(-self.pano_fov / 2.0, self.pano_fov / 2.0, self.W_pano)
+        phi = np.linspace(
+            -self.vertical_fov / 2.0,
+            self.vertical_fov / 2.0,
+            self.H_pano,
+        )
+        theta_grid, phi_grid = np.meshgrid(theta, phi)
+
+        x_world = self.projection_dist * np.sin(theta_grid)
+        y_world = self.projection_dist * np.tan(phi_grid)
+        z_world = self.projection_dist * np.cos(theta_grid)
+
+        for camera_id in self.camera_ids:
+            camera_cfg = self.config.camera_calibration[camera_id]
+            camera_pos = np.asarray(camera_cfg["pos"], dtype=np.float32)
+            yaw = np.deg2rad(float(camera_cfg["rot"][2]))
+            width = int(camera_cfg["width"])
+            height = int(camera_cfg["height"])
+            camera_fov = np.deg2rad(float(camera_cfg["fov"]))
+
+            focal = (width / 2.0) / np.tan(camera_fov / 2.0)
+
+            dx = x_world - camera_pos[1]
+            dy = y_world - (camera_pos[2] - self.reference_camera_z)
+            dz = z_world - camera_pos[0]
+
+            cos_yaw = np.cos(-yaw)
+            sin_yaw = np.sin(-yaw)
+            x_local = cos_yaw * dx + sin_yaw * dz
+            y_local = dy
+            z_local = -sin_yaw * dx + cos_yaw * dz
+
+            z_positive = z_local > 0.1
+            z_safe = np.where(z_positive, z_local, 0.1)
+            u = focal * (x_local / z_safe) + width / 2.0
+            v = focal * (y_local / z_safe) + height / 2.0
+
+            valid = z_positive & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+
+            self.maps[camera_id] = (u.astype(np.float32), v.astype(np.float32))
+
+            if (
+                camera_id == self.center_camera_id
+                and self.center_dilate_iterations > 0
+                and self.center_dilate_kernel > 1
+            ):
+                kernel = np.ones(
+                    (self.center_dilate_kernel, self.center_dilate_kernel),
+                    dtype=np.uint8,
+                )
+                valid = cv2.dilate(
+                    valid.astype(np.uint8),
+                    kernel,
+                    iterations=self.center_dilate_iterations,
+                ).astype(bool)
+
+            self.valid_masks[camera_id] = valid
+
+    def stitch(self, img_dict: dict[int, np.ndarray]) -> np.ndarray:
+        if len(img_dict) == 0:
+            raise ValueError("img_dict must contain at least one camera image")
+
+        first_image = next(iter(img_dict.values()))
+        if first_image.ndim == 2:
+            panorama = np.zeros((self.H_pano, self.W_pano), dtype=first_image.dtype)
+        else:
+            panorama = np.zeros(
+                (self.H_pano, self.W_pano, first_image.shape[2]),
+                dtype=first_image.dtype,
+            )
+
+        warped_images: dict[int, np.ndarray] = {}
+        for camera_id in self.camera_ids:
+            if camera_id not in img_dict:
+                continue
+            map_u, map_v = self.maps[camera_id]
+            warped_images[camera_id] = cv2.remap(
+                img_dict[camera_id],
+                map_u,
+                map_v,
+                interpolation=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+
+        for camera_id in self.render_order:
+            if camera_id not in warped_images:
+                continue
+            valid_mask = self.valid_masks[camera_id]
+            panorama[valid_mask] = warped_images[camera_id][valid_mask]
+
+        return panorama
+
+
 class ExpertData(ExpertBase):
     def expert_setup(
         self,
@@ -126,6 +271,9 @@ class ExpertData(ExpertBase):
         # FOV settings for bounding box filtering
         self.target_fov = float(self.config_expert.target_fov)
         self.half_fov_rad = np.deg2rad(self.target_fov / 2.0)
+
+        # Pre-initialize stitcher once so remap grids are not recomputed per frame.
+        self.semantic_panorama_stitcher = self._init_semantic_panorama_stitcher()
 
         # Threading for async data saving
         self._save_queue_maxsize = max(1, int(self.config_expert.save_queue_maxsize))
@@ -294,8 +442,10 @@ class ExpertData(ExpertBase):
                         return
                     save_path_3rd_person = str(self.save_path / "3rd_person")
                     os.makedirs(save_path_3rd_person, exist_ok=True)
+                    use_png = bool(self.config_expert.save_jpeg_images_as_png)
+                    extension = "png" if use_png else "jpg"
                     image_path = os.path.join(
-                        save_path_3rd_person, f"{str(frame).zfill(4)}.jpg"
+                        save_path_3rd_person, f"{str(frame).zfill(4)}.{extension}"
                     )
                     array = (
                         np.frombuffer(image.raw_data, dtype=np.uint8)
@@ -303,6 +453,14 @@ class ExpertData(ExpertBase):
                         .copy()
                     )
                     bgr = array[:, :, :3]
+                    third_person_params: list[int] | None = None
+                    if use_png:
+                        third_person_params = [
+                            int(cv2.IMWRITE_PNG_COMPRESSION),
+                            self.config_expert.png_storage_compression_level
+                            if self.config_expert.compress_images
+                            else 0,
+                        ]
                     if (
                         not self._save_thread_stop.is_set()
                         and self._save_thread is not None
@@ -314,14 +472,21 @@ class ExpertData(ExpertBase):
                                     "kind": "third_person",
                                     "path": image_path,
                                     "image": bgr,
+                                    "params": third_person_params,
                                 },
                                 timeout=self.config_expert.save_queue_put_timeout_third_person_sec,
                             )
                         except queue.Full:
                             # Keep callback non-blocking to avoid stalling CARLA sensor threads.
-                            cv2.imwrite(image_path, bgr)
+                            if third_person_params is None:
+                                cv2.imwrite(image_path, bgr)
+                            else:
+                                cv2.imwrite(image_path, bgr, third_person_params)
                     else:
-                        cv2.imwrite(image_path, bgr)
+                        if third_person_params is None:
+                            cv2.imwrite(image_path, bgr)
+                        else:
+                            cv2.imwrite(image_path, bgr, third_person_params)
 
             self._3rd_person_camera.listen(_save_image)
         if self.config_expert.datagen:
@@ -772,19 +937,19 @@ class ExpertData(ExpertBase):
 
                 if can_process_semantic:
                     # Standard semantics with some details we don't learn but will be useful to enhance the depth map
-                    semantics_standard_cameras = []
+                    semantics_standard_by_camera = {}
                     for camera_idx in range(1, self.config_expert.num_cameras + 1):
                         semantics_standard = input_data[f"semantics_{camera_idx}"][1][
                             :, :, 2
                         ]
                         input_data[f"semantics_{camera_idx}"] = semantics_standard
-                        semantics_standard_cameras.append(semantics_standard)
-                    input_data["semantics"] = np.concatenate(
-                        semantics_standard_cameras, axis=1
+                        semantics_standard_by_camera[camera_idx] = semantics_standard
+                    input_data["semantics"] = self._build_semantic_panorama(
+                        semantics_standard_by_camera
                     )
 
                     if self.config_expert.perturbate_sensors:
-                        semantics_perturbated_standard_cameras = []
+                        semantics_perturbated_standard_by_camera = {}
                         for camera_idx in range(1, self.config_expert.num_cameras + 1):
                             semantics_perturbated_standard = input_data[
                                 f"semantics_{camera_idx}_perturbated"
@@ -792,11 +957,13 @@ class ExpertData(ExpertBase):
                             input_data[f"semantics_{camera_idx}_perturbated"] = (
                                 semantics_perturbated_standard
                             )
-                            semantics_perturbated_standard_cameras.append(
+                            semantics_perturbated_standard_by_camera[camera_idx] = (
                                 semantics_perturbated_standard
                             )
-                        input_data["semantics_perturbated"] = np.concatenate(
-                            semantics_perturbated_standard_cameras, axis=1
+                        input_data["semantics_perturbated"] = (
+                            self._build_semantic_panorama(
+                                semantics_perturbated_standard_by_camera
+                            )
                         )
                 else:
                     self._warn_sensor_save_conflict_once(
@@ -846,17 +1013,19 @@ class ExpertData(ExpertBase):
                 # Semantics segmentation using first channel of instance segmentation
                 # After enhancing the depth map, we use the first channel of instance segmentation which has cleaner labels
                 if can_process_instance:
-                    semantics_cameras = []
+                    semantics_by_camera = {}
                     for camera_idx in range(1, self.config_expert.num_cameras + 1):
                         semantics = input_data[f"converted_instance_{camera_idx}"][
                             ..., 0
                         ]
                         input_data[f"semantics_{camera_idx}"] = semantics
-                        semantics_cameras.append(semantics)
-                    input_data["semantics"] = np.concatenate(semantics_cameras, axis=1)
+                        semantics_by_camera[camera_idx] = semantics
+                    input_data["semantics"] = self._build_semantic_panorama(
+                        semantics_by_camera
+                    )
 
                     if self.config_expert.perturbate_sensors:
-                        semantics_perturbated_cameras = []
+                        semantics_perturbated_by_camera = {}
                         for camera_idx in range(1, self.config_expert.num_cameras + 1):
                             semantics_perturbated = input_data[
                                 f"converted_instance_{camera_idx}_perturbated"
@@ -864,9 +1033,13 @@ class ExpertData(ExpertBase):
                             input_data[f"semantics_{camera_idx}_perturbated"] = (
                                 semantics_perturbated
                             )
-                            semantics_perturbated_cameras.append(semantics_perturbated)
-                        input_data["semantics_perturbated"] = np.concatenate(
-                            semantics_perturbated_cameras, axis=1
+                            semantics_perturbated_by_camera[camera_idx] = (
+                                semantics_perturbated
+                            )
+                        input_data["semantics_perturbated"] = (
+                            self._build_semantic_panorama(
+                                semantics_perturbated_by_camera
+                            )
                         )
 
                 if self._can_compute_camera_pc():
@@ -1036,12 +1209,11 @@ class ExpertData(ExpertBase):
                     )
                 )
 
-            # Concatenate semantics from all cameras
-            semantics_cameras = [
-                input_data[f"semantics_{i}"]
-                for i in range(1, self.config_expert.num_cameras + 1)
-            ]
-            input_data["semantics"] = np.concatenate(semantics_cameras, axis=1)
+            semantics_by_camera = {
+                camera_idx: input_data[f"semantics_{camera_idx}"]
+                for camera_idx in range(1, self.config_expert.num_cameras + 1)
+            }
+            input_data["semantics"] = self._build_semantic_panorama(semantics_by_camera)
 
             if self.config_expert.perturbate_sensors:
                 for camera_idx in range(1, self.config_expert.num_cameras + 1):
@@ -1070,13 +1242,12 @@ class ExpertData(ExpertBase):
                         )
                     )
 
-                # Concatenate perturbated semantics from all cameras
-                semantics_perturbated_cameras = [
-                    input_data[f"semantics_{i}_perturbated"]
-                    for i in range(1, self.config_expert.num_cameras + 1)
-                ]
-                input_data["semantics_perturbated"] = np.concatenate(
-                    semantics_perturbated_cameras, axis=1
+                semantics_perturbated_by_camera = {
+                    camera_idx: input_data[f"semantics_{camera_idx}_perturbated"]
+                    for camera_idx in range(1, self.config_expert.num_cameras + 1)
+                }
+                input_data["semantics_perturbated"] = self._build_semantic_panorama(
+                    semantics_perturbated_by_camera
                 )
 
         self.tick_data = input_data
@@ -1157,6 +1328,53 @@ class ExpertData(ExpertBase):
     def _should_save_camera_subfolders(self) -> bool:
         return bool(self.config_expert.SAVE_CAM_IMAGES_IN_SUBFOLDERS)
 
+    def _use_png_for_jpeg_images(self) -> bool:
+        return bool(self.config_expert.save_jpeg_images_as_png)
+
+    def _rgb_image_extension(self) -> str:
+        return "png" if self._use_png_for_jpeg_images() else "jpg"
+
+    def _rgb_image_write_params(
+        self, jpeg_quality: int, png_params: list[int]
+    ) -> list[int]:
+        if self._use_png_for_jpeg_images():
+            return png_params
+        return [
+            int(cv2.IMWRITE_JPEG_QUALITY),
+            jpeg_quality if self.config_expert.compress_images else 100,
+        ]
+
+    def _should_process_semantic_panorama(self) -> bool:
+        if not bool(self.config_expert.enable_semantic_panorama_stitching):
+            return False
+        # Panorama processing should be disabled when camera panorama/subfolder
+        # pipelines are fully disabled.
+        return (
+            self._should_save_camera_panorama() or self._should_save_camera_subfolders()
+        )
+
+    def _semantic_save_modes(self) -> tuple[bool, bool]:
+        """Return (save_panorama, save_subfolders) for semantic outputs.
+
+        Rules:
+        - Default follows global camera save modes.
+                - If semantic panorama stitching is enabled, semantic subfolder saving
+                    is always disabled.
+        """
+        save_panorama = self._should_save_camera_panorama()
+        save_subfolders = self._should_save_camera_subfolders()
+        semantic_stitching = bool(self.config_expert.enable_semantic_panorama_stitching)
+
+        save_semantic_panorama = bool(save_panorama)
+        save_semantic_subfolders = bool(save_subfolders)
+
+        if semantic_stitching:
+            # Keep semantic panorama enabled whenever at least one camera save mode is on.
+            save_semantic_panorama = bool(save_panorama or save_subfolders)
+            save_semantic_subfolders = False
+
+        return save_semantic_panorama, save_semantic_subfolders
+
     def _warn_if_camera_image_saving_disabled(self) -> None:
         if (
             not self._should_save_camera_panorama()
@@ -1214,6 +1432,41 @@ class ExpertData(ExpertBase):
             return False
         return True
 
+    def _init_semantic_panorama_stitcher(self) -> SemanticPanoramaStitcher | None:
+        if not self._should_process_semantic_panorama():
+            return None
+
+        if self.config_expert.num_cameras < 2:
+            LOG.warning(
+                "Semantic panorama stitching is enabled but num_cameras=%d. "
+                "Falling back to horizontal concatenation.",
+                self.config_expert.num_cameras,
+            )
+            return None
+
+        try:
+            return SemanticPanoramaStitcher(self.config_expert)
+        except Exception as e:
+            LOG.warning(
+                "Failed to initialize SemanticPanoramaStitcher (%s). "
+                "Falling back to horizontal concatenation.",
+                e,
+            )
+            return None
+
+    def _build_semantic_panorama(
+        self, semantics_by_camera: dict[int, np.ndarray]
+    ) -> np.ndarray:
+        if self.semantic_panorama_stitcher is None:
+            return np.concatenate(
+                [
+                    semantics_by_camera[idx]
+                    for idx in sorted(semantics_by_camera.keys())
+                ],
+                axis=1,
+            )
+        return self.semantic_panorama_stitcher.stitch(semantics_by_camera)
+
     @beartype
     def _prepare_semantics_for_saving(self, semantics: np.ndarray) -> np.ndarray:
         if self.config_expert.save_grouped_semantic:
@@ -1238,6 +1491,7 @@ class ExpertData(ExpertBase):
         payload = {}
         save_panorama = self._should_save_camera_panorama()
         save_subfolders = self._should_save_camera_subfolders()
+        save_semantic_panorama, save_semantic_subfolders = self._semantic_save_modes()
 
         if save_panorama:
             if "rgb" in tick_data:
@@ -1263,16 +1517,15 @@ class ExpertData(ExpertBase):
             self.config_expert.enable_semantic_sensor
             and self.config_expert.save_semantic_segmentation
         ):
-            # Keep panorama keys whenever available because _save_sensors_sync
-            # validates their existence before writing either panorama or per-camera files.
-            if "semantics" in tick_data:
+            if save_semantic_panorama and "semantics" in tick_data:
                 payload["semantics"] = tick_data["semantics"]
             if (
-                self.config_expert.perturbate_sensors
+                save_semantic_panorama
+                and self.config_expert.perturbate_sensors
                 and "semantics_perturbated" in tick_data
             ):
                 payload["semantics_perturbated"] = tick_data["semantics_perturbated"]
-            if save_subfolders:
+            if save_semantic_subfolders:
                 for camera_idx in range(1, self.config_expert.num_cameras + 1):
                     semantics_key = f"semantics_{camera_idx}"
                     if semantics_key in tick_data:
@@ -1429,23 +1682,34 @@ class ExpertData(ExpertBase):
             jpeg_quality = (
                 self.jpeg_storage_quality if self.config_expert.compress_images else 100
             )
-            jpeg_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+            png_params = [
+                int(cv2.IMWRITE_PNG_COMPRESSION),
+                self.config_expert.png_storage_compression_level
+                if self.config_expert.compress_images
+                else 0,
+            ]
+            rgb_extension = self._rgb_image_extension()
+            rgb_params = self._rgb_image_write_params(jpeg_quality, png_params)
             save_panorama = self._should_save_camera_panorama()
             save_subfolders = self._should_save_camera_subfolders()
             self._warn_if_camera_image_saving_disabled()
 
             if save_panorama:
                 cv2.imwrite(
-                    str(self._camera_frame_path("rgb", frame, "jpg")),
+                    str(self._camera_frame_path("rgb", frame, rgb_extension)),
                     tick_data["rgb"],
-                    jpeg_params,
+                    rgb_params,
                 )
             if save_subfolders:
                 for camera_idx in range(1, self.config_expert.num_cameras + 1):
                     cv2.imwrite(
-                        str(self._camera_frame_path("rgb", frame, "jpg", camera_idx)),
+                        str(
+                            self._camera_frame_path(
+                                "rgb", frame, rgb_extension, camera_idx
+                            )
+                        ),
                         tick_data[f"rgb_{camera_idx}"],
-                        jpeg_params,
+                        rgb_params,
                     )
             LOG.info("Evaluation mode: not saving more sensor data.")
             return
@@ -1517,25 +1781,28 @@ class ExpertData(ExpertBase):
     def _save_sensors_sync(self, save_data: dict) -> None:
         """Synchronous sensor saving - runs in background thread."""
         if save_data.get("kind") == "third_person":
-            cv2.imwrite(save_data["path"], save_data["image"])
+            params = save_data.get("params")
+            if params is None:
+                cv2.imwrite(save_data["path"], save_data["image"])
+            else:
+                cv2.imwrite(save_data["path"], save_data["image"], params)
             return
 
         frame = save_data["frame"]
         tick_data = save_data["tick_data"]
         jpeg_quality = save_data["jpeg_quality"]
         points = save_data["lidar_points"]
-        jpeg_params = [
-            int(cv2.IMWRITE_JPEG_QUALITY),
-            jpeg_quality if self.config_expert.compress_images else 100,
-        ]
         png_params = [
             int(cv2.IMWRITE_PNG_COMPRESSION),
             self.config_expert.png_storage_compression_level
             if self.config_expert.compress_images
             else 0,
         ]
+        rgb_extension = self._rgb_image_extension()
+        rgb_params = self._rgb_image_write_params(jpeg_quality, png_params)
         save_panorama = self._should_save_camera_panorama()
         save_subfolders = self._should_save_camera_subfolders()
+        save_semantic_panorama, save_semantic_subfolders = self._semantic_save_modes()
         self._warn_if_camera_image_saving_disabled()
         image_write_tasks: list[tuple[str, np.ndarray, list[int]]] = []
 
@@ -1543,33 +1810,33 @@ class ExpertData(ExpertBase):
         if save_panorama:
             self._queue_image_write(
                 image_write_tasks,
-                self._camera_frame_path("rgb", frame, "jpg"),
+                self._camera_frame_path("rgb", frame, rgb_extension),
                 tick_data["rgb"],
-                jpeg_params,
+                rgb_params,
             )
             if self.config_expert.perturbate_sensors:
                 self._queue_image_write(
                     image_write_tasks,
-                    self._camera_frame_path("rgb_perturbated", frame, "jpg"),
+                    self._camera_frame_path("rgb_perturbated", frame, rgb_extension),
                     tick_data["rgb_perturbated"],
-                    jpeg_params,
+                    rgb_params,
                 )
         if save_subfolders:
             for camera_idx in range(1, self.config_expert.num_cameras + 1):
                 self._queue_image_write(
                     image_write_tasks,
-                    self._camera_frame_path("rgb", frame, "jpg", camera_idx),
+                    self._camera_frame_path("rgb", frame, rgb_extension, camera_idx),
                     tick_data[f"rgb_{camera_idx}"],
-                    jpeg_params,
+                    rgb_params,
                 )
                 if self.config_expert.perturbate_sensors:
                     self._queue_image_write(
                         image_write_tasks,
                         self._camera_frame_path(
-                            "rgb_perturbated", frame, "jpg", camera_idx
+                            "rgb_perturbated", frame, rgb_extension, camera_idx
                         ),
                         tick_data[f"rgb_{camera_idx}_perturbated"],
-                        jpeg_params,
+                        rgb_params,
                     )
 
         # Store camera point clouds
@@ -1592,7 +1859,7 @@ class ExpertData(ExpertBase):
                 "Skipping semantic file saving.",
             )
 
-        if save_semantic and ("semantics" not in tick_data):
+        if save_semantic and save_semantic_panorama and ("semantics" not in tick_data):
             self._warn_sensor_save_conflict_once(
                 "semantic_missing_payload",
                 "Semantic saving is enabled but semantic payload is missing. "
@@ -1600,7 +1867,7 @@ class ExpertData(ExpertBase):
             )
             save_semantic = False
 
-        if save_semantic and save_panorama:
+        if save_semantic and save_semantic_panorama:
             self._queue_image_write(
                 image_write_tasks,
                 self._camera_frame_path("semantics", frame, "png"),
@@ -1616,7 +1883,7 @@ class ExpertData(ExpertBase):
                     ),
                     png_params,
                 )
-        if save_semantic and save_subfolders:
+        if save_semantic and save_semantic_subfolders:
             for camera_idx in range(1, self.config_expert.num_cameras + 1):
                 self._queue_image_write(
                     image_write_tasks,
