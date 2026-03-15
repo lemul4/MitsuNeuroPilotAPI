@@ -193,25 +193,25 @@ class BaseConfig:
                 1: {
                     "pos": [0.0, -0.15, 2.25],
                     "rot": [0.0, 0.0, -40.0],
-                    "width": 512,
-                    "height": 512,
-                    "cropped_height": 512,
+                    "width": 384,
+                    "height": 384,
+                    "cropped_height": 384,
                     "fov": 90,
                 },
                 2: {
                     "pos": [0.0, 0.0, 2.25],
                     "rot": [0.0, 0.0, 0.0],
-                    "width": 512,
-                    "height": 512,
-                    "cropped_height": 512,
+                    "width": 384,
+                    "height": 384,
+                    "cropped_height": 384,
                     "fov": 60,
                 },
                 3: {
                     "pos": [0.0, 0.15, 2.25],
                     "rot": [0.0, 0.0, 40.0],
-                    "width": 512,
-                    "height": 512,
-                    "cropped_height": 512,
+                    "width": 384,
+                    "height": 384,
+                    "cropped_height": 384,
                     "fov": 90,
                 },
             }
@@ -383,6 +383,31 @@ class BaseConfig:
     SAVE_CAM_IMAGES_IN_SUBFOLDERS: bool = True
     # If true save camera images as stitched panorama (legacy behavior)
     SAVE_CAM_IMAGES_AS_PANORAMA: bool = False
+    # If true, images that are normally saved as JPEG are saved as PNG instead.
+    # Existing PNG outputs (semantic/depth/instance) are unchanged.
+    save_jpeg_images_as_png: bool = False
+    # If true, build semantic panorama via geometric reprojection instead of plain horizontal concatenation.
+    enable_semantic_panorama_stitching: bool = True
+    # Output panorama width in pixels for semantic stitching.
+    semantic_panorama_width: int = 384 * 2
+    # Output panorama height in pixels for semantic stitching.
+    semantic_panorama_height: int = 384
+    # Horizontal panorama field-of-view in degrees.
+    semantic_panorama_fov_deg: float = 150.0
+    # Vertical panorama field-of-view in degrees.
+    semantic_panorama_vertical_fov_deg: float = 60.0
+    # Virtual projection distance used by the semantic panorama mapper.
+    semantic_panorama_projection_dist: float = 7.0
+    # Camera id that should be overlaid last to hide seams.
+    semantic_panorama_center_camera_id: int = 2
+    # Kernel size for optional center-camera mask dilation.
+    semantic_panorama_center_dilate_kernel: int = 3
+    # Number of dilation iterations for center-camera mask.
+    semantic_panorama_center_dilate_iterations: int = 1
+    # Optional explicit camera ids used for panorama stitching; if empty, all camera_calibration keys are used.
+    semantic_panorama_camera_ids: tuple[int, ...] = ()
+    # Optional explicit overlay order for panorama stitching; if empty, non-center cameras are overlaid first.
+    semantic_panorama_render_order: tuple[int, ...] = ()
     # If true save depth images at lower resolution
     save_depth_lower_resolution = True
 
