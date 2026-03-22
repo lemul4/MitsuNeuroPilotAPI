@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from datetime import datetime
+import re
 
 # Plotting
 import pyqtgraph as pg
@@ -498,6 +499,21 @@ class MainWindow(QMainWindow):
             self.is_virtual = True
             self.on_conn_status(True, "Connected to Virtual Car")
             self.physics_timer.start(50)
+            # ВАЖНО: Убрали авто-нажатие btn_control, чтобы активировать вручную
+        else:
+            self.is_virtual = False
+            asyncio.create_task(self.serial_manager.connect_serial(port))
+            
+        self.check_and_apply_ai_state()
+
+        port = self.combo_ports.currentText()
+        if not port:
+            return
+
+        if port == "VIRTUAL_DEMO_MODE":
+            self.is_virtual = True
+            self.on_conn_status(True, "Connected to Virtual Car")
+            self.physics_timer.start(50)
             self.btn_control.setChecked(True)
         else:
             self.is_virtual = False
@@ -745,11 +761,15 @@ class MainWindow(QMainWindow):
             f"background-color: {'green' if checked else '#444'}; color: white;"
         )
 
-        # Send Cruise packet
-        self.cmd_cruise.TIME = int(time.time())
-        self.cmd_cruise.CAN_DATA.DATA[1] = 1 if checked else 0
-        self.cmd_cruise.store_crc8()
-        self.serial_manager.send_command(self.cmd_cruise)
+        # Send Cruise packet (только если не виртуальный режим)
+        if not self.is_virtual:
+            self.cmd_cruise.TIME = int(time.time())
+            self.cmd_cruise.CAN_DATA.DATA[1] = 1 if checked else 0
+            self.cmd_cruise.store_crc8()
+            self.serial_manager.send_command(self.cmd_cruise)
+
+        # Проверяем, нужно ли стартовать/стопать ИИ
+        self.check_and_apply_ai_state()
 
     # --- SENDERS ---
     def _prepare_send(self, cmd_obj, val, data_idx=1):
@@ -837,85 +857,128 @@ class MainWindow(QMainWindow):
                 f"source={source} frame={frame} step={step} "
                 f"speed={speed} steer={steer} throttle={throttle} brake={brake}"
             )
+    
 
-    # --- ОСНОВНОЙ МЕТОД ДЛЯ AI ---
-    def toggle_ai(self, checked):
-        if checked:
-            # 1. Проверяем наличие папки ПЕРЕД запуском
-            base_path = self._build_default_project_root()
-
-            # Исправленный путь к маршрутам (без папки lead)
-            routes_path = os.path.normpath(
-                os.path.join(
-                    base_path,
-                    "data",
-                    "data_routes",
-                    "leaderboard1",
-                    "ControlLoss",
-                    "Town01_Scenario1_0.xml",
-                )
-            )
-            checkpoint_path = os.path.normpath(os.path.join(base_path, "model_2.pth"))
-
-            if not os.path.exists(routes_path):
-                print(f"!!! ФАЙЛ НЕ НАЙДЕН ПО ПУТИ: {routes_path}")
-                # На всякий случай проверим вариант с маленькой буквой town13
-                routes_path = os.path.normpath(
-                    os.path.join(
-                        base_path, "data", "benchmark_routes", "town13", "0.xml"
-                    )
-                )
-
-            expert_mode_flag = os.environ.get("LEAD_EXPERT_MODE", "true").lower()
-            expert_mode = expert_mode_flag in ["1", "true", "yes", "on"]
-
-            config = {
-                "project_root": base_path,
-                "checkpoint_path": checkpoint_path,
-                "routes": routes_path,
-                # "port": 3000,
-                "host": "localhost",
-                "expert_mode": expert_mode,
-            }
-
-            config["telemetry_file"] = self._build_telemetry_file_path(base_path)
-
+    def poll_agent_telemetry(self):
+        if self.raw_telemetry_reader is None:
+            return
+        
+        records = self.raw_telemetry_reader.poll()
+        for payload in records:
+            self.raw_agent_telemetry = payload
+            
+            # Извлекаем сырые данные
+            speed = payload.get("speed", 0.0)
+            steer = payload.get("steer", 0.0)
+            throttle = payload.get("throttle", 0.0)
+            brake = payload.get("brake", 0.0)
+            
+            # Выводим в консоль для отладки
             print(
-                f"[GUI] Попытка запуска Lead Agent с конфигом: {config['checkpoint_path']}"
+                f"[GUI_TELEMETRY_RAW] source={payload.get('source', '?')} "
+                f"frame={payload.get('frame', '?')} step={payload.get('step', '?')} "
+                f"speed={speed} steer={steer} throttle={throttle} brake={brake}"
             )
 
+            # --- ОБНОВЛЕНИЕ GUI НАПРЯМУЮ ---
             try:
-                self.agent_thread = LeadAgentThread(config)
-                # Важно: Сначала коннектим сигналы, потом старт!
-                self.agent_thread.log_received.connect(self.handle_agent_log)
-                self.agent_thread.status_changed.connect(
-                    lambda s: self.statusBar().showMessage(s)
-                )
-                self.agent_thread.error_occurred.connect(self.handle_agent_error)
+                # Преобразование форматов
+                speed_kmh = float(speed) * 3.6
+                steer_val = float(steer)
+                throttle_val = int(float(throttle) * 100)
+                brake_val = int(float(brake) * 100)
+                angle_val = int(steer_val * MAX_ANGLE)
 
-                self.agent_thread.start()
-                self.statusBar().showMessage("Lead Agent: Starting thread...")
+                # 1. Визуально обновляем индикаторы всегда (чтобы видеть, что думает ИИ)
+                self.lbl_speed.setText(f"{speed_kmh:.2f} km/h")
+                self.pb_accel.setValue(throttle_val)
+                self.pb_brake.setValue(brake_val)
+                self.wheel_widget.set_angle(angle_val)
+                self.lbl_angle_text.setText(f"Angle: {angle_val}°")
 
-                self.raw_telemetry_reader = RawTelemetryJsonlReader(
-                    config["telemetry_file"]
-                )
-                # 20Hz polling is enough to keep up with 12 FPS frame-level telemetry.
-                self.raw_telemetry_timer.start(50)
-            except Exception as e:
-                print(f"!!! Ошибка при создании потока: {e}")
-                self.chk_ai.setChecked(False)
-        else:
-            if hasattr(self, "agent_thread") and self.agent_thread:
-                print("[GUI] Остановка Lead Agent...")
-                self.agent_thread.stop()
-                self.agent_thread = None
-            self.raw_telemetry_timer.stop()
-            self.raw_telemetry_reader = None
-            self.statusBar().showMessage("Lead Agent: Offline")
+                # Обновляем переменные для графиков
+                self.speed = speed_kmh
+                self.accel = throttle_val
+
+                # 2. Если управление активно, передаем команды ИИ в физическую модель машины
+                if self.control_active:
+                    self.target_angle = angle_val
+                    self.target_accel = throttle_val
+                    self.target_brake = brake_val
+
+            except ValueError:
+                pass # Защита от кривых данных "None" или текста в логе
+
+   # --- УПРАВЛЕНИЕ ЖИЗНЕННЫМ ЦИКЛОМ AI ---
+    def toggle_ai(self, checked):
+        # Чекбокс теперь просто меняет флаг, а решение о запуске принимает диспетчер
+        self.check_and_apply_ai_state()
+
+    def check_and_apply_ai_state(self):
+        # ИИ запускается ТОЛЬКО если: стоит галочка И активировано управление (Control Active) 
+        # И мы подключены (виртуально или реально)
+        connected = self.is_virtual or self.serial_manager.running
+        should_run_ai = self.chk_ai.isChecked() and self.control_active and connected
+        is_running = hasattr(self, "agent_thread") and self.agent_thread is not None
+
+        if should_run_ai and not is_running:
+            self.start_ai_agent()
+        elif not should_run_ai and is_running:
+            self.stop_ai_agent()
+
+    def start_ai_agent(self):
+        print("[GUI] Подготовка к запуску Lead Agent...")
+        base_path = self._build_default_project_root()
+        routes_path = os.path.normpath(os.path.join(
+            base_path, "data", "data_routes", "leaderboard1", "ControlLoss", "Town01_Scenario1_0.xml"
+        ))
+        checkpoint_path = os.path.normpath(os.path.join(base_path, "model_2.pth"))
+
+        if not os.path.exists(routes_path):
+            print(f"!!! ФАЙЛ НЕ НАЙДЕН ПО ПУТИ: {routes_path}")
+            routes_path = os.path.normpath(os.path.join(
+                base_path, "data", "benchmark_routes", "town13", "0.xml"
+            ))
+
+        expert_mode_flag = os.environ.get("LEAD_EXPERT_MODE", "true").lower()
+        expert_mode = expert_mode_flag in ["1", "true", "yes", "on"]
+
+        config = {
+            "project_root": base_path,
+            "checkpoint_path": checkpoint_path,
+            "routes": routes_path,
+            "host": "localhost",
+            "expert_mode": expert_mode,
+            "telemetry_file": self._build_telemetry_file_path(base_path)
+        }
+
+        try:
+            self.agent_thread = LeadAgentThread(config)
+            self.agent_thread.log_received.connect(self.handle_agent_log)
+            self.agent_thread.status_changed.connect(lambda s: self.statusBar().showMessage(s))
+            self.agent_thread.error_occurred.connect(self.handle_agent_error)
+
+            self.agent_thread.start()
+            self.statusBar().showMessage("Lead Agent: Starting CARLA simulation...")
+
+            self.raw_telemetry_reader = RawTelemetryJsonlReader(config["telemetry_file"])
+            self.raw_telemetry_timer.start(50)
+        except Exception as e:
+            print(f"!!! Ошибка при создании потока: {e}")
+            self.chk_ai.setChecked(False)
+
+    def stop_ai_agent(self):
+        if hasattr(self, "agent_thread") and self.agent_thread:
+            print("[GUI] Остановка Lead Agent...")
+            self.agent_thread.stop()
+            self.agent_thread = None
+        
+        self.raw_telemetry_timer.stop()
+        self.raw_telemetry_reader = None
+        self.statusBar().showMessage("Lead Agent: Offline")
 
     @Slot(str)
     def handle_agent_log(self, message):
-        # Печатаем ВООБЩЕ ВСЁ, что приходит от агента
         print(f"[AGENT_OUT]: {message}")
         self.statusBar().showMessage(f"AI: {message[:40]}")
 
