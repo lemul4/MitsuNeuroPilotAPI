@@ -227,7 +227,7 @@ class LeaderboardWrapper:
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
 
-        return ":".join(pythonpath_parts)
+        return os.pathsep.join(pythonpath_parts)
 
     def _determine_evaluation_output_dir(self, output_dir: Path | None) -> Path:
         """Determine where to save evaluation results. [Main process logic]

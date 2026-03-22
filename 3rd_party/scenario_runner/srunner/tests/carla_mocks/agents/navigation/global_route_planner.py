@@ -13,11 +13,11 @@ import numpy as np
 import networkx as nx
 
 import carla
-from agents.navigation.local_planner import RoadOption
-from agents.tools.misc import vector
+from .local_planner import RoadOption
+from ..tools.misc import vector
 
-class GlobalRoutePlanner(object):
-    """
+class GlobalRoutePlanner(object):   
+    """ 
     This class provides a very high level route plan.
     """
 

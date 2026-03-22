@@ -29,6 +29,7 @@ from py_trees.blackboard import Blackboard
 import networkx
 
 import carla
+
 from agents.navigation.basic_agent import BasicAgent
 from agents.navigation.constant_velocity_agent import ConstantVelocityAgent
 from agents.navigation.local_planner import RoadOption, LocalPlanner
