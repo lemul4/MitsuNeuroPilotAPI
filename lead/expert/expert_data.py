@@ -2454,13 +2454,13 @@ class ExpertData(ExpertBase):
         if x <= -extent[0]:
             return False
 
-        # ограничение дальности впереди (66 м + половина длины объекта)
-        if x > 66 + extent[0]:
+        # ограничение дальности впереди (80 м + половина длины объекта)
+        if x > 80 + extent[0]:
             return False
 
         angle = abs(np.arctan2(y, x))
 
-        # расширяем угол на половину ширины объекта
+        # расширяем угол на половину длины объекта
         extra = np.arctan2(extent[0] * 1.2, max(x, 0.001))
 
         return angle <= (self.half_fov_rad + extra)
@@ -3516,7 +3516,6 @@ class ExpertData(ExpertBase):
                 num_in_bbox_points = -1
                 num_in_bb_radar_points = -1
 
-                
                 if lidar_points is not None:
                     result["num_points"] = expert_utils.get_num_points_in_bbox(
                         self.ego_vehicle,
