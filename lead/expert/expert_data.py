@@ -3513,7 +3513,10 @@ class ExpertData(ExpertBase):
                     vehicle_bounding_box, existing_actor_bbs
                 ):
                     continue
+                num_in_bbox_points = -1
+                num_in_bb_radar_points = -1
 
+                
                 if lidar_points is not None:
                     result["num_points"] = expert_utils.get_num_points_in_bbox(
                         self.ego_vehicle,
