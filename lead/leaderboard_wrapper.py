@@ -284,12 +284,32 @@ class LeaderboardWrapper:
 
         # Add agent mode specific variables
         if self.args.expert:
+            save_camera_pc = "False"
+            enable_perturbated_sensors = "False"
+            sync_sensor_processing_with_save_freq = "True"
+            compute_camera_pc = "False"
+            compress_images = "False"
+
             env_vars.update(
                 {
                     "SAVE_PATH": str(resolved_output_dir / "data" / self.scenario_type),
                     "DATAGEN": "1",
                     "DEBUG_CHALLENGE": "0",
                     "TEAM_CONFIG": str(self.routes.absolute()),
+                    "SAVE_CAMERA_PC": save_camera_pc,
+                    "ENABLE_PERTURBATED_SENSORS": enable_perturbated_sensors,
+                    "SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ": sync_sensor_processing_with_save_freq,
+                    "COMPUTE_CAMERA_PC": compute_camera_pc,
+                    "COMPRESS_IMAGES": compress_images,
+                    "LEAD_EXPERT_CONFIG": (
+                        "target_dataset=2 "
+                        f"save_camera_pc={save_camera_pc} "
+                        f"perturbate_sensors={enable_perturbated_sensors} "
+                        "sync_sensor_processing_with_data_save_freq="
+                        f"{sync_sensor_processing_with_save_freq} "
+                        f"compute_camera_pc={compute_camera_pc} "
+                        f"compress_images={compress_images}"
+                    ),
                 }
             )
         else:
@@ -387,6 +407,8 @@ class LeaderboardWrapper:
         cmd = [
             sys.executable,
             str(paths["evaluator_script"]),
+            "--host",
+            str(self.args.host),
             "--routes",
             str(self.routes.absolute()),
             "--track",
@@ -556,6 +578,9 @@ Examples:
     )
 
     # CARLA settings
+    parser.add_argument(
+        "--host", type=str, default="172.30.96.1", help="CARLA server host"
+    )
     parser.add_argument("--port", type=int, default=2000, help="CARLA server port")
     parser.add_argument(
         "--traffic-manager-port", type=int, default=8000, help="Traffic manager port"
