@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from collections import deque
 from copy import deepcopy
 
@@ -114,6 +115,81 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             raise RuntimeError(
                 "ffmpeg is not installed or not found in PATH. Please install ffmpeg to use video compression."
             )
+
+        self._telemetry_file = None
+        self._telemetry_enabled = False
+        self._setup_raw_telemetry()
+
+    def _setup_raw_telemetry(self) -> None:
+        emit_flag = os.environ.get("LEAD_EMIT_TELEMETRY", "0").lower()
+        telemetry_file = os.environ.get("LEAD_TELEMETRY_FILE", "")
+        expert_mode = os.environ.get("LEAD_EXPERT_MODE", "").lower()
+
+        should_emit = emit_flag in {"1", "true", "yes", "on"}
+        mode_matches = expert_mode in {"", "0", "false", "no", "off"}
+        if not should_emit or not telemetry_file or not mode_matches:
+            return
+
+        try:
+            telemetry_dir = os.path.dirname(telemetry_file)
+            if telemetry_dir:
+                os.makedirs(telemetry_dir, exist_ok=True)
+            self._telemetry_file = open(telemetry_file, "a", encoding="utf-8")
+            self._telemetry_enabled = True
+            LOG.info(f"[Telemetry] Enabled raw telemetry writer: {telemetry_file}")
+        except Exception as e:
+            LOG.error(
+                f"[Telemetry] Failed to open telemetry file '{telemetry_file}': {e}"
+            )
+            self._telemetry_enabled = False
+            self._telemetry_file = None
+
+    def _emit_raw_telemetry(self, input_data: dict | None) -> None:
+        if not self._telemetry_enabled or self._telemetry_file is None:
+            return
+        if not hasattr(self, "control") or self.control is None:
+            return
+
+        frame = int(self.step)
+        try:
+            frame = int(self._world.get_snapshot().frame)
+        except Exception:
+            pass
+
+        raw_speed = 0.0
+        if isinstance(input_data, dict):
+            raw_speed = input_data.get("speed", 0.0)
+        try:
+            raw_speed = float(raw_speed)
+        except Exception:
+            raw_speed = 0.0
+
+        payload = {
+            "timestamp": time.time(),
+            "frame": frame,
+            "step": int(self.step),
+            "speed": raw_speed,
+            "steer": float(self.control.steer),
+            "throttle": float(self.control.throttle),
+            "brake": float(self.control.brake),
+            "source": "sensor_agent",
+            "expert": False,
+        }
+
+        try:
+            self._telemetry_file.write(json.dumps(payload, ensure_ascii=True) + "\n")
+            self._telemetry_file.flush()
+        except Exception as e:
+            LOG.error(f"[Telemetry] Failed to write telemetry payload: {e}")
+
+    def _close_raw_telemetry(self) -> None:
+        if self._telemetry_file is not None:
+            try:
+                self._telemetry_file.close()
+            except Exception:
+                pass
+        self._telemetry_file = None
+        self._telemetry_enabled = False
 
     def set_scenario(self, scenario):
         """Set the scenario reference to track infractions.
@@ -479,6 +555,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             self._init()
             self.control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
             input_data = self.tick(input_data)
+            self._emit_raw_telemetry(input_data)
             return self.control
 
         # Update video recorder step and demo cameras
@@ -699,12 +776,14 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
                 f"{self.config_closed_loop.save_path}/metric_info.json", "w"
             ) as outfile:
                 json.dump(self.metric_info, outfile, indent=4)
+        self._emit_raw_telemetry(input_data)
         return self.control
 
     def destroy(self, _=None):
         # Clean up video recorder
         if hasattr(self, "video_recorder"):
             self.video_recorder.cleanup_and_compress()
+        self._close_raw_telemetry()
 
 
 class StopSignPostProcessor:
