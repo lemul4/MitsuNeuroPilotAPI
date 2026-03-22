@@ -708,37 +708,43 @@ class MainWindow(QMainWindow):
     # --- ОСНОВНОЙ МЕТОД ДЛЯ AI ---
     def toggle_ai(self, checked):
         if checked:
-            # 1. Проверяем наличие папки ПЕРЕД запуском
             base_path = r"E:\основы программирования\MitsuNeuroPilotAPI"
-        
-            # Исправленный путь к маршрутам (без папки lead)
-            routes_path = os.path.normpath(os.path.join(base_path, "data", "benchmark_routes", "Town13", "0.xml"))
+            
+            # 1. Тот самый путь из твоей команды (Accident/route_001761.xml)
+            # Если хочешь, чтобы всегда запускался этот конкретный сценарий:
+            routes_path = os.path.normpath(os.path.join(
+                base_path, "data", "data_routes", "lead", "Accident", "route_001761.xml"
+            ))
+            
             checkpoint_path = os.path.normpath(os.path.join(base_path, "model_2.pth"))
 
+            # Проверка наличия файла
             if not os.path.exists(routes_path):
-                print(f"!!! ФАЙЛ НЕ НАЙДЕН ПО ПУТИ: {routes_path}")
-                # На всякий случай проверим вариант с маленькой буквой town13
-                routes_path = os.path.normpath(os.path.join(base_path, "data", "benchmark_routes", "town13", "0.xml"))
+                print(f"!!! ОШИБКА: Маршрут не найден: {routes_path}")
+                # Если Accident не найден, откатываемся на Town13 (как было раньше)
+                routes_path = os.path.normpath(os.path.join(base_path, "data", "benchmark_routes", "Town13", "0.xml"))
 
+            # 2. Настраиваем конфиг точно под команду терминала
             config = {
                 "project_root": base_path,
                 "checkpoint_path": checkpoint_path,
                 "routes": routes_path,
-                "port": 3000,
-                "expert_mode": False
-                }
+                "port": 2000,          # В команде был localhost (обычно 2000), а не 3000
+                "expert_mode": True,   # ВКЛЮЧАЕМ --expert как в твоем примере
+                "host": "localhost"    # Добавляем хост
+            }
 
-            print(f"[GUI] Попытка запуска Lead Agent с конфигом: {config['checkpoint_path']}")
+            print(f"[GUI] Запуск экспертного режима: {config['expert_mode']}")
+            print(f"[GUI] Используемый маршрут: {routes_path}")
             
             try:
                 self.agent_thread = LeadAgentThread(config)
-                # Важно: Сначала коннектим сигналы, потом старт!
                 self.agent_thread.log_received.connect(self.handle_agent_log)
                 self.agent_thread.status_changed.connect(lambda s: self.statusBar().showMessage(s))
                 self.agent_thread.error_occurred.connect(self.handle_agent_error)
                 
                 self.agent_thread.start()
-                self.statusBar().showMessage("Lead Agent: Starting thread...")
+                self.statusBar().showMessage("Lead Agent: Running (Expert Mode)")
             except Exception as e:
                 print(f"!!! Ошибка при создании потока: {e}")
                 self.chk_ai.setChecked(False)
