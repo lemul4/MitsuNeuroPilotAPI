@@ -117,7 +117,25 @@ class LeaderboardWrapper:
         self.routes = Path(args.routes)
 
         # Resolve workspace root from environment variable
+        if "LEAD_PROJECT_ROOT" not in os.environ:
+            # Фоллбек, если скрипт запущен напрямую из корня репозитория
+            os.environ["LEAD_PROJECT_ROOT"] = str(
+                Path(__file__).resolve().parent.parent
+            )
+            LOG.warning(
+                f"LEAD_PROJECT_ROOT not found. Setting to: {os.environ['LEAD_PROJECT_ROOT']}"
+            )
+
         self.workspace_root = Path(os.environ["LEAD_PROJECT_ROOT"]).resolve()
+
+        # --- ДОБАВЛЕНО: Фоллбек для SCENARIO_RUNNER_ROOT ---
+        if "SCENARIO_RUNNER_ROOT" not in os.environ:
+            default_sr_path = (
+                self.workspace_root / "3rd_party/scenario_runner_autopilot"
+            )
+            os.environ["SCENARIO_RUNNER_ROOT"] = str(default_sr_path)
+            LOG.info(f"SCENARIO_RUNNER_ROOT not set. Using default: {default_sr_path}")
+        # --------------------------------------------------
 
         # Parse scenario type from routes XML file and extract route ID
         self.scenario_type = self._parse_scenario_type_from_routes()

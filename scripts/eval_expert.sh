@@ -10,6 +10,7 @@ export ROUTE_NUMBER=$(basename $ROUTES .xml)
 export PYTHONPATH=3rd_party/CARLA_0915/PythonAPI/carla:$PYTHONPATH
 export PYTHONPATH=3rd_party/leaderboard_autopilot:$PYTHONPATH
 export PYTHONPATH=3rd_party/scenario_runner_autopilot:$PYTHONPATH
+export SCENARIO_RUNNER_ROOT=${SCENARIO_RUNNER_ROOT:-3rd_party/scenario_runner_autopilot}
 export DEBUG_CHALLENGE=0
 export TEAM_CONFIG=$ROUTES
 export DATAGEN=0
