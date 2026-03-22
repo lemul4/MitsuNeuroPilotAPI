@@ -1,17 +1,9 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
-port=2000
-# if there is first argument, use it as port
-if [ "$1" != "" ]; then
-	port=$1
-fi
+# Используем прямой вызов через cmd.exe, чтобы не мучиться с путями Bash
+CARLA_EXE="E:\основы программирования\CARLA_0.9.15\WindowsNoEditor\CarlaUE4.exe"
 
-$CARLA_ROOT/CarlaUE4.sh \
-    -quality-level=Poor \
-    -world-port=$port \
-    -resx=800 \
-    -resy=600 \
-    -nosound \
-    -graphicsadapter=0 \
-    -carla-streaming-port=2001 \
-    -RenderOffScreen &
+echo "Запускаю CARLA через системный вызов Windows..."
+
+# Команда запуска (используем кавычки для защиты пробелов)
+cmd.exe /c "$CARLA_EXE" -quality-level=Poor -world-port=2000 -resx=800 -resy=600 -nosound
