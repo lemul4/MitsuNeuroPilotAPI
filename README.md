@@ -33,6 +33,7 @@ https://github.com/user-attachments/assets/9f316ad2-e629-4bb4-bffb-9bb55e225738
 - [Updates](#updates)
 - [Quick Start](#quick-start)
   - [1. Environment initialization](#1-environment-initialization)
+  - [2.5. Configure Environment Variables (Conda)](#25-configure-environment-variables-conda)
   - [2. Install dependencies](#2-install-dependencies)
   - [3. Download checkpoints](#3-download-checkpoints)
   - [4. Setup VSCode/PyCharm](#4-setup-vscodepycharm)
@@ -90,6 +91,35 @@ source ~/.bashrc                                        # Reload config
 ```
 
 Please verify that `~/.bashrc` reflects these paths correctly.
+
+### 2.5. Configure Environment Variables (Conda)
+
+To avoid manual exports, set up `SCENARIO_RUNNER_ROOT` and `LEAD_PROJECT_ROOT` to load automatically whenever the `lead` environment is activated:
+
+```bash
+# 1. Create directory for environment hooks
+mkdir -p $CONDA_PREFIX/etc/conda/activate.d
+mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
+
+# 2. Create activation script (sets variables)
+cat <<EOF > $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+export LEAD_PROJECT_ROOT="$(pwd)"
+export SCENARIO_RUNNER_ROOT="\${LEAD_PROJECT_ROOT}/3rd_party/scenario_runner_autopilot"
+EOF
+
+# 3. Create deactivation script (cleans up variables)
+cat <<EOF > $CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh
+unset LEAD_PROJECT_ROOT
+unset SCENARIO_RUNNER_ROOT
+EOF
+
+# 4. Apply changes (Restart environment)
+conda deactivate && conda activate lead
+
+# 5. Verify setup
+echo "Project Root: \$LEAD_PROJECT_ROOT"
+echo "Scenario Runner: \$SCENARIO_RUNNER_ROOT"
+```
 
 ### 2. Install dependencies
 

@@ -644,6 +644,24 @@ def arg_parse() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = arg_parse()
+    # --- Настройка переменных окружения (Fallback-логика) ---
+    # Если пользователь не прописал их в Conda, берем текущую папку
+    if "LEAD_PROJECT_ROOT" not in os.environ:
+        os.environ["LEAD_PROJECT_ROOT"] = os.getcwd()
+        print(
+            f"[warning] LEAD_PROJECT_ROOT not found in env. Setting to: {os.environ['LEAD_PROJECT_ROOT']}"
+        )
+
+    code_root = os.environ["LEAD_PROJECT_ROOT"]
+
+    if "SCENARIO_RUNNER_ROOT" not in os.environ:
+        os.environ["SCENARIO_RUNNER_ROOT"] = os.path.join(
+            code_root, "3rd_party/scenario_runner_autopilot"
+        )
+        print(
+            f"[warning] SCENARIO_RUNNER_ROOT not found in env. Setting to: {os.environ['SCENARIO_RUNNER_ROOT']}"
+        )
+    # -------------------------------------------------------
     if args.py123d:
         raise ValueError(
             "--py123d is deprecated and no longer supported in slurm/data_collection/collect_data.py. "
@@ -655,7 +673,6 @@ if __name__ == "__main__":
     shuffle_routes = True
     max_route_per_scenario_type = 40  # -1 means no limit
 
-    code_root = os.getcwd()
     carla_root = (
         args.carla_root
         if args.carla_root
