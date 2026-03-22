@@ -22,43 +22,57 @@ class LeadAgentThread(QThread):
         self._is_running = True
         self.status_changed.emit("Starting Autopilot...")
 
-        # 1. Определяем базовые пути
-        project_root = os.path.normpath(self.config.get("project_root", os.getcwd()))
+        # 1. Определяем реальный корень проекта (MitsuNeuroPilotAPI)
+        current_dir = os.path.normpath(self.config.get("project_root", os.getcwd()))
+        if "i-MiEV GUI" in current_dir:
+            project_root = os.path.dirname(current_dir) 
+        else:
+            project_root = current_dir
+
         site_packages = os.path.normpath(os.path.join(project_root, "venv", "Lib", "site-packages"))
-        scenario_runner_path = os.path.normpath(os.path.join(project_root, "3rd_party", "scenario_runner"))
-        leaderboard_path = os.path.normpath(os.path.join(project_root, "3rd_party", "leaderboard"))
         
-        # 2. Формируем окружение (Минималистичное!)
+        # 2. Формируем окружение
         env = dict(os.environ)
         env["LEAD_PROJECT_ROOT"] = project_root
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
 
-        # 3. Нам НЕ НУЖНО собирать сложный PYTHONPATH здесь.
-        # Достаточно добавить только корень проекта и путь к venv,
-        # чтобы wrapper.py вообще смог запуститься.
-        # Все специфичные пути для CARLA/ScenarioRunner обертка добавит сама.
+        # 3. Собираем PYTHONPATH строго по папкам из твоего 3rd_party
+        # Мы добавляем саму папку 3rd_party и прямые пути к важным модулям
+        third_party = os.path.join(project_root, "3rd_party")
+        
+        carla_api_path = os.path.normpath(os.path.join(third_party, "CARLA_0915", "PythonAPI", "carla"))
+        
+        # Добавляем все ключевые папки со скриншота
         python_paths = [
             project_root,
-            site_packages
+            site_packages,
+            carla_api_path,
+            os.path.join(third_party, "leaderboard"),            # Новая папка со скрина
+            os.path.join(third_party, "leaderboard_autopilot"),
+            os.path.join(third_party, "scenario_runner"),
+            os.path.join(third_party, "scenario_runner_autopilot")
         ]
         
         env["PYTHONPATH"] = os.pathsep.join(python_paths)
-        print(env["PYTHONPATH"])
-        # 4. Путь к интерпретатору и скрипту
+        
+        # Выводим в консоль для проверки, что пути ведут в MitsuNeuroPilotAPI, а не в GUI
+        print(f"[DEBUG] Final PYTHONPATH: {env['PYTHONPATH']}")
+
+        # 4. Пути к исполняемым файлам
         venv_python = os.path.join(project_root, "venv", "Scripts", "python.exe")
         python_exe = venv_python if os.path.exists(venv_python) else sys.executable
+        
+        # Файл обертки лежит в MitsuNeuroPilotAPI/lead/
         wrapper_path = os.path.join(project_root, "lead", "leaderboard_wrapper.py")
-          
         cmd = [
             python_exe, "-u",
             wrapper_path,
             "--routes", str(self.config.get("routes")),
-            "--port", str(self.config.get("port", 2000)),
-            "--traffic-manager-port", str(self.config.get("tm_port", 8000)),
-            "--debug", "0",
-            "--checkpoint", str(self.config.get("checkpoint_path"))
+            "--host", str(self.config.get("host", "localhost")),
+            "--expert"
+            
         ]
-
         print(f"[DEBUG] LEAD_PROJECT_ROOT: {env['LEAD_PROJECT_ROOT']}")
 
         try:

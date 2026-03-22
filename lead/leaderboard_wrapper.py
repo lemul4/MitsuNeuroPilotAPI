@@ -579,7 +579,7 @@ Examples:
 
     # CARLA settings
     parser.add_argument(
-        "--host", type=str, default="172.30.96.1", help="CARLA server host"
+        "--host", type=str, default="127.0.0.1", help="CARLA server host"
     )
     parser.add_argument("--port", type=int, default=2000, help="CARLA server port")
     parser.add_argument(
