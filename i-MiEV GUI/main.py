@@ -2,8 +2,9 @@ import sys
 import asyncio
 import time
 import queue
+import os
 from datetime import datetime
-
+from lead_integration import LeadAgentThread
 # GUI Imports
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QPushButton, QComboBox, 
@@ -11,7 +12,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QTableWidgetItem, QHeaderView, QDoubleSpinBox, QCheckBox, QFrame)
 from PySide6.QtCore import Qt, QTimer, Slot, Signal, QThread, QObject, QEvent
 from PySide6.QtGui import QPixmap, QPainter, QTransform, QColor, QFont, QPen, QBrush
-
+from PySide6.QtCore import Slot
+import numpy as np
 # Plotting
 import pyqtgraph as pg
 
@@ -142,8 +144,12 @@ class SerialManager(QObject):
                 print(f"Write error: {e}")
 
     def send_command(self, cmd_obj):
-        # Метод для вызова из UI потока (thread-safeish for asyncio queue)
-        asyncio.create_task(self.cmd_queue.put(cmd_obj))
+        """Безопасно кладем команду в очередь. Без await и без call_soon."""
+        try:
+            # put_nowait работает мгновенно и не трогает Event Loop Qt
+            self.cmd_queue.put_nowait(cmd_obj)
+        except Exception as e:
+            print(f"[SerialManager] Ошибка очереди: {e}")
 
 class SerialProtocol(asyncio.Protocol):
     def __init__(self, manager):
@@ -166,6 +172,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("i-MiEV Auto Control [PySide6 + Asyncio]")
         self.resize(1200, 800)
+
+        
+        
+        self.agent_thread = None
         
         # State Variables
         self.speed = 0
@@ -685,23 +695,71 @@ class MainWindow(QMainWindow):
         if checked: self.recorder.start()
         else: self.recorder.stop()
 
-    def toggle_ai(self, checked):
-        if checked: self.ai_timer.start(100)
-        else: self.ai_timer.stop()
 
     def process_ai(self):
         if not self.control_active: return
-        t_ang, t_acc, t_brk = self.ai.predict()
         
-        # Update Targets
-        self.target_angle = t_ang * 6 # Scale
-        self.target_accel = int(t_acc)
-        self.target_brake = int(t_brk)
+        # Если Lead Agent запущен, он сам управляет процессом через wrapper.
+        # Этот метод можно оставить пустым или использовать для отрисовки
+        # предсказаний модели на графиках.
+        pass
+
+
+    # --- ОСНОВНОЙ МЕТОД ДЛЯ AI ---
+    def toggle_ai(self, checked):
+        if checked:
+            # 1. Проверяем наличие папки ПЕРЕД запуском
+            base_path = r"E:\основы программирования\MitsuNeuroPilotAPI"
         
-        # Send
-        self.send_angle()
-        self.send_accel()
-        self.send_brake()
+            # Исправленный путь к маршрутам (без папки lead)
+            routes_path = os.path.normpath(os.path.join(base_path, "data", "benchmark_routes", "Town13", "0.xml"))
+            checkpoint_path = os.path.normpath(os.path.join(base_path, "model_2.pth"))
+
+            if not os.path.exists(routes_path):
+                print(f"!!! ФАЙЛ НЕ НАЙДЕН ПО ПУТИ: {routes_path}")
+                # На всякий случай проверим вариант с маленькой буквой town13
+                routes_path = os.path.normpath(os.path.join(base_path, "data", "benchmark_routes", "town13", "0.xml"))
+
+            config = {
+                "project_root": base_path,
+                "checkpoint_path": checkpoint_path,
+                "routes": routes_path,
+                "port": 3000,
+                "expert_mode": False
+                }
+
+            print(f"[GUI] Попытка запуска Lead Agent с конфигом: {config['checkpoint_path']}")
+            
+            try:
+                self.agent_thread = LeadAgentThread(config)
+                # Важно: Сначала коннектим сигналы, потом старт!
+                self.agent_thread.log_received.connect(self.handle_agent_log)
+                self.agent_thread.status_changed.connect(lambda s: self.statusBar().showMessage(s))
+                self.agent_thread.error_occurred.connect(self.handle_agent_error)
+                
+                self.agent_thread.start()
+                self.statusBar().showMessage("Lead Agent: Starting thread...")
+            except Exception as e:
+                print(f"!!! Ошибка при создании потока: {e}")
+                self.chk_ai.setChecked(False)
+        else:
+            if hasattr(self, 'agent_thread') and self.agent_thread:
+                print("[GUI] Остановка Lead Agent...")
+                self.agent_thread.stop()
+                self.agent_thread = None
+            self.statusBar().showMessage("Lead Agent: Offline")
+
+    @Slot(str)
+    def handle_agent_log(self, message):
+        # Печатаем ВООБЩЕ ВСЁ, что приходит от агента
+        print(f"[AGENT_OUT]: {message}")
+        self.statusBar().showMessage(f"AI: {message[:40]}")
+
+    @Slot(str)
+    def handle_agent_error(self, error):
+        print(f"[AGENT_ERR]: {error}")
+        self.statusBar().showMessage(f"AI ERROR: {error}")
+        self.chk_ai.setChecked(False)
 
 
 # --- BOOTSTRAP ---

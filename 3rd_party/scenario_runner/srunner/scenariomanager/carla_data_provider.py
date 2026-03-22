@@ -19,7 +19,24 @@ from numpy import random
 from six import iteritems
 
 import carla
-from agents.navigation.global_route_planner import GlobalRoutePlanner
+import sys
+from pathlib import Path
+
+# Определяем путь к папке с моками относительно текущего файла
+# Мы находимся в srunner/scenariomanager/carla_data_provider.py
+# Нам нужно подняться на 1 уровень вверх в srunner, потом в tests/carla_mocks
+current_dir = Path(__file__).resolve().parent
+mocks_path = str(current_dir.parent / "tests" / "carla_mocks")
+
+if mocks_path not in sys.path:
+    sys.path.insert(0, mocks_path)
+
+# Теперь импортируем Глобальный планировщик из "корня" моков
+try:
+    from agent.navigation.global_route_planner import GlobalRoutePlanner
+except ImportError:
+    # Если папка называется agent (без s), попробуем так:
+    from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 def calculate_velocity(actor):
