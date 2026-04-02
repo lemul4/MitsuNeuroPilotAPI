@@ -184,6 +184,10 @@ token.pickle
 /*.sh
 /*.py
 data/**/*
+!data/benchmark_routes/
+!data/benchmark_routes/**
+!data/benchmark_routes/bench2drive/
+!data/benchmark_routes/bench2drive/**
 !data/**/*.xml
 outputs/checkpoints
 outputs/local_evaluation
