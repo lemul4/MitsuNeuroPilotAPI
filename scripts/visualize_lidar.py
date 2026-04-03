@@ -7,6 +7,7 @@ from pathlib import Path
 
 import laspy
 import numpy as np
+from laspy.errors import LaspyException
 
 try:
     import open3d as o3d
@@ -24,8 +25,18 @@ except ImportError:
 
 def load_laz(path: str) -> np.ndarray:
     """Загружает .laz файл и возвращает массив точек (N, 4): x, y, z, time."""
-    with laspy.open(path) as f:
-        las = f.read()
+    try:
+        with laspy.open(path) as f:
+            las = f.read()
+    except LaspyException as exc:
+        if "No LazBackend selected" in str(exc):
+            print("[ERROR] Невозможно прочитать .laz: отсутствует backend декомпрессии для laspy.")
+            print("Установите один из пакетов и повторите запуск:")
+            print("  pip install lazrs")
+            print("  или pip install laszip")
+            print("  (conda) conda install -c conda-forge lazrs")
+            sys.exit(1)
+        raise
 
     x = np.array(las.x, dtype=np.float32)
     y = np.array(las.y, dtype=np.float32)

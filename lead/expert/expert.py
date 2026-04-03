@@ -221,6 +221,9 @@ class Expert(ExpertData):
         self.update_3rd_person_camera()
 
         input_data = self.tick(input_data)
+        frame, is_saved_step, synced_sensor_frame = (
+            self._resolve_sync_state_from_input_data(input_data)
+        )
 
         # Get the control commands and driving data for the current step
         target_speed, control, speed_reduced_by_obj = self._get_control()
@@ -232,13 +235,11 @@ class Expert(ExpertData):
         if self.config_expert.visualize_original_route:
             self._visualize_original_route()
 
-        if (
-            not self.config_expert.eval_expert
-            and not self.config_expert.py123d_data_format
+        if not self.config_expert.eval_expert and (
+            not self.config_expert.py123d_data_format
+            or self.config_expert.save_legacy_outputs_with_py123d
         ):
             if input_data is not None and "bounding_boxes" in input_data:
-                is_saved_step = self.step % self.config_expert.data_save_freq == 0
-                frame = self.step // self.config_expert.data_save_freq
                 if is_saved_step and self.config_expert.stage_history_to_disk:
                     self._stage_saved_bounding_boxes(
                         frame, input_data["bounding_boxes"]
@@ -262,14 +263,17 @@ class Expert(ExpertData):
                 target_speed,
                 input_data,
                 speed_reduced_by_obj,
+                frame=frame,
+                is_saved_step=is_saved_step,
+                synced_sensor_frame=synced_sensor_frame,
             )
 
-        if (
-            self.step % self.config_expert.data_save_freq == 0
-            and not self.config_expert.py123d_data_format
+        if is_saved_step and (
+            not self.config_expert.py123d_data_format
+            or self.config_expert.save_legacy_outputs_with_py123d
         ):
             if self.save_path is not None and self.config_expert.datagen:
-                self.save_sensors(input_data)
+                self.save_sensors(input_data, frame=frame)
         if self.step % self.config_expert.log_info_freq == 0:
             elapsed_time = time.time() - start_time
             LOG.info(f"Step: {self.step}, Time per step: {elapsed_time * 1000:.2f} ms")
@@ -2954,6 +2958,9 @@ class Expert(ExpertData):
         target_speed: float,
         tick_data: dict,
         speed_reduced_by_obj: list | None,
+        frame: int | None = None,
+        is_saved_step: bool | None = None,
+        synced_sensor_frame: int | None = None,
     ) -> dict:
         """
         Save the driving data for the current frame.
@@ -2963,12 +2970,32 @@ class Expert(ExpertData):
             target_speed: The target speed for the current frame.
             tick_data: Dictionary containing the current state of the vehicle.
             speed_reduced_by_obj: List containing information about the object that caused speed reduction.
+            frame: The frame index for the current timestep. If None, the frame
+                will be resolved from tick_data.
+            is_saved_step: Boolean indicating whether this timestep should be
+                saved. If None, the value will be resolved from tick_data.
+            synced_sensor_frame: Sensor frame index synchronized with the driving
+                data. If None, it may be resolved later.
 
         Returns:
             A dictionary containing the driving data for the current frame.
         """
-        frame = self.step // self.config_expert.data_save_freq
-        is_saved_step = self.step % self.config_expert.data_save_freq == 0
+        if frame is None or is_saved_step is None:
+            resolved_frame, resolved_is_saved_step, resolved_sensor_frame = (
+                self._resolve_sync_state_from_input_data(tick_data)
+            )
+            if frame is None:
+                frame = resolved_frame
+            if is_saved_step is None:
+                is_saved_step = resolved_is_saved_step
+            if synced_sensor_frame is None:
+                synced_sensor_frame = resolved_sensor_frame
+
+        if synced_sensor_frame is None:
+            sync_sensor_frame_raw = tick_data.get("_sync_sensor_frame")
+            if isinstance(sync_sensor_frame_raw, (int, np.integer)):
+                synced_sensor_frame = int(sync_sensor_frame_raw)
+
         history_meta = {
             "speed": tick_data.get("speed", 0.0),
             "theta": self.ego_orientation_rad,
@@ -3092,6 +3119,11 @@ class Expert(ExpertData):
             if self.rear_adversarial_actor is None
             else self.rear_adversarial_actor.id,
             "town": self.town,
+            "sim_step": int(self.step),
+            "sync_saved_frame": int(frame),
+            "sync_sensor_frame": None
+            if synced_sensor_frame is None
+            else int(synced_sensor_frame),
             "privileged_past_positions": np.array(
                 self.privileged_ego_past_positions, dtype=np.float32
             )[::-1],
@@ -3188,6 +3220,7 @@ class Expert(ExpertData):
                 "target_dataset": int(self.config_expert.target_dataset),
                 "data_save_freq": self.config_expert.data_save_freq,
                 "save_grouped_semantic": self.config_expert.save_grouped_semantic,
+                "camera_lidar_sensor_tick_from_data_save_freq": self.config_expert.camera_lidar_sensor_tick_from_data_save_freq,
                 "sync_sensor_processing_with_data_save_freq": self.config_expert.sync_sensor_processing_with_data_save_freq,
                 "compute_camera_pc": self.config_expert.compute_camera_pc,
                 "compress_images": self.config_expert.compress_images,
