@@ -81,6 +81,17 @@ class BaseAgent:
 
     @beartype
     def tick(self, input_data: dict, use_kalman_filter: bool = True) -> dict:
+        raw_sensor_frames: dict[str, int] = {}
+        for sensor_key, sensor_value in input_data.items():
+            if (
+                isinstance(sensor_value, tuple)
+                and len(sensor_value) == 2
+                and isinstance(sensor_value[0], (int, np.integer))
+            ):
+                raw_sensor_frames[str(sensor_key)] = int(sensor_value[0])
+        if len(raw_sensor_frames) > 0:
+            input_data["_raw_sensor_frames"] = raw_sensor_frames
+
         # Get the vehicle's speed from sensor
         speed = input_data["speed"][1]["speed"]
         self.speeds_queue.append(speed)

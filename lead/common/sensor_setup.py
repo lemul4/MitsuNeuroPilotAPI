@@ -164,7 +164,7 @@ def av_sensor_setup(
             "roll": 0.0,
             "pitch": 0.0,
             "yaw": 0.0,
-            "sensor_tick": config.carla_fps,
+            "sensor_tick": config.carla_frame_rate,
             "id": "gps",
         }
     )

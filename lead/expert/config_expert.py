@@ -57,10 +57,45 @@ class ExpertConfig(BaseConfig):
     # --- Py123D ---
     # If true, save data in Py123D format instead of classic CARLA Leaderboard Format
     py123d_data_format = False
-    # Timestep in seconds for Py123D data (0.1 = 10 Hz)
-    py123d_timestep_seconds = 0.1
-    # Save Py123D data every N simulation steps (2 = save every other step for 10 Hz from 20 Hz sim)
-    py123d_save_interval = 2
+    # If true, keep classic LEAD outputs (rgb/semantics/hdmap/metas) alongside Py123D.
+    # Useful when migrating to Py123D while preserving existing training/eval pipelines.
+    save_legacy_outputs_with_py123d = False
+
+    @overridable_property
+    def py123d_timestep_seconds(self):
+        """Py123D timestep in seconds.
+
+        By default it follows the legacy save cadence so Py123D frames stay aligned
+        with classic LEAD outputs.
+        """
+        return float(self.data_save_freq) / float(self.fps)
+
+    @overridable_property
+    def py123d_save_interval(self):
+        """Save Py123D every N simulator steps.
+
+        By default this matches data_save_freq (e.g. 12 FPS and freq=4 -> 3 Hz).
+        """
+        return int(self.data_save_freq)
+
+    @overridable_property
+    def py123d_camera_index(self):
+        """Camera index used for single-camera Py123D export."""
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+            # Use the center camera for ONLY3CAMERAS (cam2).
+            return 2
+        return 1
+
+    @overridable_property
+    def py123d_jpeg_quality(self):
+        """JPEG quality used by Py123D camera encoding.
+
+        Lower means stronger compression.
+        """
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+            return 50
+        return 85
+
     # Log Py123D save progress every N steps
     py123d_log_interval = 20
     # Log Py123D debug info every N steps

@@ -291,6 +291,8 @@ class ExpertData(ExpertBase):
         )
         self._camera_image_saving_disabled_warning_logged = False
         self._sensor_save_conflict_warnings: set[str] = set()
+        self._sync_sensor_frame_origin: int | None = None
+        self._sensor_frame_mismatch_warning_logged = False
         self._history_cache_dir: pathlib.Path | None = None
         self._meta_stage_dir: pathlib.Path | None = None
         self._bboxes_stage_dir: pathlib.Path | None = None
@@ -301,7 +303,10 @@ class ExpertData(ExpertBase):
         if (
             self.save_path is not None
             and self.config_expert.datagen
-            and not self.config_expert.py123d_data_format
+            and (
+                not self.config_expert.py123d_data_format
+                or self.config_expert.save_legacy_outputs_with_py123d
+            )
         ):
             if self.config_expert.use_lidar:
                 (self.save_path / "lidar").mkdir()
@@ -816,6 +821,87 @@ class ExpertData(ExpertBase):
         input_data["semantics_camera_pc"] = self._empty_camera_pc_numpy()
         input_data["semantics_camera_pc_all"] = input_data["semantics_camera_pc"]
 
+    def _extract_sensor_frames(self, input_data: dict) -> dict[str, int]:
+        sensor_frames: dict[str, int] = {}
+
+        raw_sensor_frames = input_data.get("_raw_sensor_frames")
+        if isinstance(raw_sensor_frames, dict):
+            for sensor_id, frame in raw_sensor_frames.items():
+                if isinstance(frame, (int, np.integer)):
+                    sensor_frames[str(sensor_id)] = int(frame)
+
+        if len(sensor_frames) == 0:
+            for sensor_id, sensor_value in input_data.items():
+                if (
+                    isinstance(sensor_value, tuple)
+                    and len(sensor_value) == 2
+                    and isinstance(sensor_value[0], (int, np.integer))
+                ):
+                    sensor_frames[str(sensor_id)] = int(sensor_value[0])
+
+        return sensor_frames
+
+    def _pick_reference_sensor_frame(self, sensor_frames: dict[str, int]) -> int | None:
+        preferred_sensor_ids = ["rgb_1", "lidar1", "imu", "gps", "speed"]
+        for sensor_id in preferred_sensor_ids:
+            if sensor_id in sensor_frames:
+                return int(sensor_frames[sensor_id])
+
+        if len(sensor_frames) == 0:
+            return None
+
+        return int(next(iter(sensor_frames.values())))
+
+    def _resolve_sync_state_from_input_data(
+        self, input_data: dict
+    ) -> tuple[int, bool, int | None]:
+        freq = max(1, int(self.config_expert.data_save_freq))
+        fallback_frame = self.step // freq
+        fallback_is_saved = self.step % freq == 0
+
+        if not isinstance(input_data, dict):
+            return fallback_frame, fallback_is_saved, None
+
+        sensor_frames = self._extract_sensor_frames(input_data)
+        reference_sensor_frame = self._pick_reference_sensor_frame(sensor_frames)
+        if reference_sensor_frame is None:
+            return fallback_frame, fallback_is_saved, None
+
+        if (
+            not self._sensor_frame_mismatch_warning_logged
+            and len(set(sensor_frames.values())) > 1
+        ):
+            LOG.warning(
+                "Sensor frame mismatch detected at step %d. Frames=%s. "
+                "Using reference sensor frame %d for save synchronization.",
+                self.step,
+                sensor_frames,
+                reference_sensor_frame,
+            )
+            self._sensor_frame_mismatch_warning_logged = True
+
+        if self._sync_sensor_frame_origin is None:
+            self._sync_sensor_frame_origin = int(reference_sensor_frame)
+
+        relative_frame = int(reference_sensor_frame) - int(
+            self._sync_sensor_frame_origin
+        )
+        if relative_frame < 0:
+            LOG.warning(
+                "Reference sensor frame moved backwards (origin=%d, current=%d). "
+                "Falling back to step-based frame numbering for this step.",
+                int(self._sync_sensor_frame_origin),
+                int(reference_sensor_frame),
+            )
+            return fallback_frame, fallback_is_saved, int(reference_sensor_frame)
+
+        frame = relative_frame // freq
+        is_saved_step = relative_frame % freq == 0
+        input_data["_sync_sensor_frame"] = int(reference_sensor_frame)
+        input_data["_sync_saved_frame"] = int(frame)
+        input_data["_sync_is_saved_step"] = bool(is_saved_step)
+        return int(frame), bool(is_saved_step), int(reference_sensor_frame)
+
     @beartype
     def tick(self, input_data: dict) -> dict:
         """
@@ -835,11 +921,11 @@ class ExpertData(ExpertBase):
                 radar_arrays.append(input_data[f"radar{i}"])
             input_data["radar"] = np.concatenate(radar_arrays, axis=0)
 
+        _, synced_saved_step, _ = self._resolve_sync_state_from_input_data(input_data)
+
         process_sensor_payload_this_step = True
         if self.config_expert.sync_sensor_processing_with_data_save_freq:
-            process_sensor_payload_this_step = (
-                self.step % self.config_expert.data_save_freq == 0
-            )
+            process_sensor_payload_this_step = synced_saved_step
 
         if self.save_path is not None and self.config_expert.datagen:
             if process_sensor_payload_this_step:
@@ -1674,8 +1760,9 @@ class ExpertData(ExpertBase):
             return fallback
 
     @beartype
-    def save_sensors(self, tick_data: dict) -> None:
-        frame = self.step // self.config_expert.data_save_freq
+    def save_sensors(self, tick_data: dict, frame: int | None = None) -> None:
+        if frame is None:
+            frame, _, _ = self._resolve_sync_state_from_input_data(tick_data)
 
         if self.config_expert.eval_expert:
             # Just save RGB synchronously for eval
@@ -2139,9 +2226,9 @@ class ExpertData(ExpertBase):
             self._image_write_executor.shutdown(wait=True)
             self._image_write_executor = None
 
-        if (
-            not self.config_expert.eval_expert
-            and not self.config_expert.py123d_data_format
+        if not self.config_expert.eval_expert and (
+            not self.config_expert.py123d_data_format
+            or self.config_expert.save_legacy_outputs_with_py123d
         ):
             self._offline_process_data()
 
@@ -2454,8 +2541,8 @@ class ExpertData(ExpertBase):
         if x <= -extent[0]:
             return False
 
-        # ограничение дальности впереди (80 м + половина длины объекта)
-        if x > 80 + extent[0]:
+        # ограничение дальности впереди (85 м + половина длины объекта)
+        if x > 85 + extent[0]:
             return False
 
         angle = abs(np.arctan2(y, x))

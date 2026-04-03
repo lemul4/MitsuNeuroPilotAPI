@@ -304,6 +304,7 @@ class LeaderboardWrapper:
         if self.args.expert:
             save_camera_pc = "False"
             enable_perturbated_sensors = "False"
+            camera_lidar_sensor_tick_from_data_save_freq = "False"
             sync_sensor_processing_with_save_freq = "True"
             compute_camera_pc = "False"
             compress_images = "False"
@@ -316,6 +317,7 @@ class LeaderboardWrapper:
                     "TEAM_CONFIG": str(self.routes.absolute()),
                     "SAVE_CAMERA_PC": save_camera_pc,
                     "ENABLE_PERTURBATED_SENSORS": enable_perturbated_sensors,
+                    "CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ": camera_lidar_sensor_tick_from_data_save_freq,
                     "SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ": sync_sensor_processing_with_save_freq,
                     "COMPUTE_CAMERA_PC": compute_camera_pc,
                     "COMPRESS_IMAGES": compress_images,
@@ -323,6 +325,8 @@ class LeaderboardWrapper:
                         "target_dataset=2 "
                         f"save_camera_pc={save_camera_pc} "
                         f"perturbate_sensors={enable_perturbated_sensors} "
+                        "camera_lidar_sensor_tick_from_data_save_freq="
+                        f"{camera_lidar_sensor_tick_from_data_save_freq} "
                         "sync_sensor_processing_with_data_save_freq="
                         f"{sync_sensor_processing_with_save_freq} "
                         f"compute_camera_pc={compute_camera_pc} "

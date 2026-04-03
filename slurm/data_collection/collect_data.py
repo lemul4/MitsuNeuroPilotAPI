@@ -211,6 +211,7 @@ def ensure_collection_dirs(data_save_root: str) -> None:
 def configure_expert_env(env: dict[str, str], save_path: str) -> None:
     env["SAVE_CAMERA_PC"] = "False"
     env["ENABLE_PERTURBATED_SENSORS"] = "False"
+    env["CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ"] = "False"
     env["SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ"] = "True"
     env["COMPUTE_CAMERA_PC"] = "False"
     env["COMPRESS_IMAGES"] = "False"
@@ -219,6 +220,8 @@ def configure_expert_env(env: dict[str, str], save_path: str) -> None:
         "target_dataset=2 "
         f"save_camera_pc={env['SAVE_CAMERA_PC']} "
         f"perturbate_sensors={env['ENABLE_PERTURBATED_SENSORS']} "
+        "camera_lidar_sensor_tick_from_data_save_freq="
+        f"{env['CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ']} "
         "sync_sensor_processing_with_data_save_freq="
         f"{env['SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ']} "
         f"compute_camera_pc={env['COMPUTE_CAMERA_PC']} "

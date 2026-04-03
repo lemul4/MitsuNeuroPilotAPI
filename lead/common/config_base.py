@@ -58,7 +58,8 @@ class BaseConfig:
     # Frequency (in steps) at which data is saved during data collection
     data_save_freq = 3
     # If true, camera and LiDAR sensors use sensor_tick synchronized to data_save_freq cadence.
-    camera_lidar_sensor_tick_from_data_save_freq = True
+    # Keep this disabled by default to preserve strict per-tick synchronization across saved modalities.
+    camera_lidar_sensor_tick_from_data_save_freq = False
     # If true enable camera perturbation during data collection
     perturbate_sensors = False
     # Safety translation perturbation penalty for default scenarios
@@ -344,7 +345,7 @@ class BaseConfig:
     # If true save radar point cloud as LiDAR format
     save_radar_pc_as_lidar = True
     # If true save LiDAR data only inside bird's eye view area
-    save_lidar_only_inside_bev = True
+    save_lidar_only_inside_bev = False
     # If true duplicate radar points near ego vehicle for better detection
     duplicate_radar_near_ego = True
     # Radius around ego vehicle for radar point duplication
