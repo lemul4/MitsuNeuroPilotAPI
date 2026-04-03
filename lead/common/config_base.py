@@ -120,7 +120,7 @@ class BaseConfig:
 
     # --- Camera Configuration ---
     # Horizontal FOV (degrees) used for forward-sector filtering in expert data processing.
-    target_fov = 150.0
+    target_fov = 170.0
 
     @property
     def num_cameras(self):
@@ -202,9 +202,9 @@ class BaseConfig:
                 2: {
                     "pos": [0.0, 0.0, 2.25],
                     "rot": [0.0, 0.0, 0.0],
-                    "width": 384,
-                    "height": 384,
-                    "cropped_height": 384,
+                    "width": 512,
+                    "height": 512,
+                    "cropped_height": 512,
                     "fov": 60,
                 },
                 3: {
@@ -390,11 +390,11 @@ class BaseConfig:
     # If true, build semantic panorama via geometric reprojection instead of plain horizontal concatenation.
     enable_semantic_panorama_stitching: bool = True
     # Output panorama width in pixels for semantic stitching.
-    semantic_panorama_width: int = 384 * 2
+    semantic_panorama_width: int = 1024
     # Output panorama height in pixels for semantic stitching.
-    semantic_panorama_height: int = 384
+    semantic_panorama_height: int = 512
     # Horizontal panorama field-of-view in degrees.
-    semantic_panorama_fov_deg: float = 150.0
+    semantic_panorama_fov_deg: float = 170.0
     # Vertical panorama field-of-view in degrees.
     semantic_panorama_vertical_fov_deg: float = 60.0
     # Virtual projection distance used by the semantic panorama mapper.

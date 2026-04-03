@@ -74,7 +74,7 @@ LOS_LOCAL_CORNERS_UNIT = np.array(
 
 
 class SemanticPanoramaStitcher:
-    """Geometric semantic panorama stitcher using camera calibration from config."""
+    """Geometric semantic panorama stitcher with center-priority fusion in overlap zones."""
 
     def __init__(self, config):
         self.config = config
@@ -96,20 +96,6 @@ class SemanticPanoramaStitcher:
             else self.camera_ids[len(self.camera_ids) // 2]
         )
 
-        configured_render_order = tuple(config.semantic_panorama_render_order)
-        if len(configured_render_order) > 0:
-            self.render_order = [
-                camera_id
-                for camera_id in configured_render_order
-                if camera_id in self.camera_ids
-            ]
-        else:
-            self.render_order = [
-                camera_id
-                for camera_id in self.camera_ids
-                if camera_id != self.center_camera_id
-            ] + [self.center_camera_id]
-
         self.center_dilate_kernel = max(
             1, int(config.semantic_panorama_center_dilate_kernel)
         )
@@ -117,12 +103,54 @@ class SemanticPanoramaStitcher:
             0, int(config.semantic_panorama_center_dilate_iterations)
         )
 
+        # Насколько сильнее центр побеждает в overlap.
+        # 1.0 = без усиления, 1.2..2.0 = типичный диапазон.
+        self.center_priority_boost = float(
+            getattr(config, "semantic_panorama_center_priority_boost", 1.5)
+        )
+
+        # Насколько быстро падает вес к краям изображения.
+        # 1.0..3.0 обычно ок. Чем больше, тем сильнее предпочитается центр кадра.
+        self.edge_falloff_power = float(
+            getattr(config, "semantic_panorama_edge_falloff_power", 2.0)
+        )
+
         center_camera_cfg = config.camera_calibration[self.center_camera_id]
         self.reference_camera_z = float(center_camera_cfg["pos"][2])
 
         self.maps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         self.valid_masks: dict[int, np.ndarray] = {}
+        self.priority_maps: dict[int, np.ndarray] = {}
+
         self._precompute_maps()
+
+    def _build_camera_priority_map(
+        self,
+        width: int,
+        height: int,
+        boost: float,
+    ) -> np.ndarray:
+        """
+        Строит карту приоритета в координатах исходной камеры:
+        - максимум в центре изображения
+        - спад к краям
+        - для центральной камеры дополнительно умножаем на boost
+        """
+        xs = np.linspace(-1.0, 1.0, width, dtype=np.float32)
+        ys = np.linspace(-1.0, 1.0, height, dtype=np.float32)
+        xx, yy = np.meshgrid(xs, ys)
+
+        # Нормированная "дистанция" до центра.
+        rr = np.sqrt(xx * xx + yy * yy)
+        rr = np.clip(rr, 0.0, 1.0)
+
+        # Вес выше в центре, ниже по краям.
+        # На краю не опускаем в ноль полностью, чтобы камера не "исчезала".
+        base = 1.0 - rr
+        base = np.clip(base, 0.05, 1.0)
+        weight = np.power(base, self.edge_falloff_power)
+
+        return (weight * boost).astype(np.float32)
 
     def _precompute_maps(self) -> None:
         theta = np.linspace(-self.pano_fov / 2.0, self.pano_fov / 2.0, self.W_pano)
@@ -159,6 +187,7 @@ class SemanticPanoramaStitcher:
 
             z_positive = z_local > 0.1
             z_safe = np.where(z_positive, z_local, 0.1)
+
             u = focal * (x_local / z_safe) + width / 2.0
             v = focal * (y_local / z_safe) + height / 2.0
 
@@ -183,6 +212,17 @@ class SemanticPanoramaStitcher:
 
             self.valid_masks[camera_id] = valid
 
+            boost = (
+                self.center_priority_boost
+                if camera_id == self.center_camera_id
+                else 1.0
+            )
+            self.priority_maps[camera_id] = self._build_camera_priority_map(
+                width=width,
+                height=height,
+                boost=boost,
+            )
+
     def stitch(self, img_dict: dict[int, np.ndarray]) -> np.ndarray:
         if len(img_dict) == 0:
             raise ValueError("img_dict must contain at least one camera image")
@@ -196,24 +236,45 @@ class SemanticPanoramaStitcher:
                 dtype=first_image.dtype,
             )
 
-        warped_images: dict[int, np.ndarray] = {}
+        best_score = np.full((self.H_pano, self.W_pano), -1.0, dtype=np.float32)
+
         for camera_id in self.camera_ids:
             if camera_id not in img_dict:
                 continue
+
             map_u, map_v = self.maps[camera_id]
-            warped_images[camera_id] = cv2.remap(
+            valid_mask = self.valid_masks[camera_id]
+
+            warped_image = cv2.remap(
                 img_dict[camera_id],
                 map_u,
                 map_v,
                 interpolation=cv2.INTER_NEAREST,
-                borderMode=cv2.BORDER_REPLICATE,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
             )
 
-        for camera_id in self.render_order:
-            if camera_id not in warped_images:
+            warped_priority = cv2.remap(
+                self.priority_maps[camera_id],
+                map_u,
+                map_v,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+
+            current_score = np.where(valid_mask, warped_priority, -1.0)
+            update_mask = current_score > best_score
+
+            if not np.any(update_mask):
                 continue
-            valid_mask = self.valid_masks[camera_id]
-            panorama[valid_mask] = warped_images[camera_id][valid_mask]
+
+            if panorama.ndim == 2:
+                panorama[update_mask] = warped_image[update_mask]
+            else:
+                panorama[update_mask] = warped_image[update_mask]
+
+            best_score[update_mask] = current_score[update_mask]
 
         return panorama
 
