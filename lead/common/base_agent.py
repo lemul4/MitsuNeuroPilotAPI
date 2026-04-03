@@ -262,7 +262,7 @@ class BaseAgent:
             input_data[f"rgb_{camera_idx}"] = rgb_camera  # individual camera
             rgb_cameras.append(rgb_camera)
 
-        input_data["rgb"] = np.concatenate(rgb_cameras, axis=1)  # stitched version
+        # input_data["rgb"] = np.concatenate(rgb_cameras, axis=1)  # stitched version
         return input_data
 
     @beartype
