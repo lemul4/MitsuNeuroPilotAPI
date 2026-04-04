@@ -13,6 +13,7 @@ import typing
 import carla
 import matplotlib
 import numpy as np
+from agents.navigation.local_planner import RoadOption
 from agents.tools.misc import compute_distance, is_within_distance
 from beartype import beartype
 from shapely.geometry import Polygon
@@ -993,14 +994,28 @@ class Expert(ExpertData):
                 life_time=self.config_expert.draw_life_time,
             )
 
-        # Compute the number of future frames to consider for collision detection
+        # Compute the number of future frames to consider for collision detection.
+        current_route_command = None
+        if self.privileged_route_planner.route_index < len(
+            self.privileged_route_planner.commands
+        ):
+            current_route_command = self.privileged_route_planner.commands[
+                self.privileged_route_planner.route_index
+            ]
+
+        if current_route_command in (
+            RoadOption.LEFT,
+            RoadOption.RIGHT,
+            RoadOption.STRAIGHT,
+        ):
+            forecast_length_seconds = self.config_expert.forecast_length_crossroad
+        elif self.near_lane_change:
+            forecast_length_seconds = self.config_expert.forecast_length_lane_change
+        else:
+            forecast_length_seconds = self.config_expert.default_forecast_length
+
         num_future_frames = int(
-            self.config_expert.bicycle_frame_rate
-            * (
-                self.config_expert.forecast_length_lane_change
-                if self.near_lane_change
-                else self.config_expert.default_forecast_length
-            )
+            self.config_expert.bicycle_frame_rate * forecast_length_seconds
         )
 
         # Get future bounding boxes of pedestrians
