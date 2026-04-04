@@ -954,7 +954,7 @@ class ExpertConfig(BaseConfig):
         def normalize(d):
             return {k: v / sum(d.values()) for k, v in d.items()}
 
-        LOW_COMPRESSION = normalize({85: 0.5, 90: 0.5})
+        LOW_COMPRESSION = normalize({90: 1.0})
         """LOW_COMPRESSION = normalize({80: 0.25, 85: 0.5, 90: 0.25})
         MILD_COMPRESSION = normalize({70: 0.1, 75: 0.25, 80: 0.4, 90: 0.2})
         MEDIUM_COMPRESSION = normalize({70: 0.2, 75: 0.2, 80: 0.15, 90: 0.2})

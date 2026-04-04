@@ -120,7 +120,7 @@ class BaseConfig:
 
     # --- Camera Configuration ---
     # Horizontal FOV (degrees) used for forward-sector filtering in expert data processing.
-    target_fov = 170.0
+    target_fov = 90.0
 
     @property
     def num_cameras(self):
@@ -192,8 +192,8 @@ class BaseConfig:
         elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
             return {
                 1: {
-                    "pos": [0.0, -0.15, 2.25],
-                    "rot": [0.0, 0.0, -40.0],
+                    "pos": [0.0, -0.045, 2.25],
+                    "rot": [0.0, 0.0, 0.0],
                     "width": 384,
                     "height": 384,
                     "cropped_height": 384,
@@ -205,11 +205,11 @@ class BaseConfig:
                     "width": 512,
                     "height": 512,
                     "cropped_height": 512,
-                    "fov": 60,
+                    "fov": 50,
                 },
                 3: {
-                    "pos": [0.0, 0.15, 2.25],
-                    "rot": [0.0, 0.0, 40.0],
+                    "pos": [0.0, 0.045, 2.25],
+                    "rot": [0.0, 0.0, 0.0],
                     "width": 384,
                     "height": 384,
                     "cropped_height": 384,
@@ -390,11 +390,11 @@ class BaseConfig:
     # If true, build semantic panorama via geometric reprojection instead of plain horizontal concatenation.
     enable_semantic_panorama_stitching: bool = True
     # Output panorama width in pixels for semantic stitching.
-    semantic_panorama_width: int = 1024
+    semantic_panorama_width: int = 962
     # Output panorama height in pixels for semantic stitching.
     semantic_panorama_height: int = 512
     # Horizontal panorama field-of-view in degrees.
-    semantic_panorama_fov_deg: float = 170.0
+    semantic_panorama_fov_deg: float = 90.0
     # Vertical panorama field-of-view in degrees.
     semantic_panorama_vertical_fov_deg: float = 60.0
     # Virtual projection distance used by the semantic panorama mapper.
