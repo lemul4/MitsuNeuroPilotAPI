@@ -209,21 +209,24 @@ def ensure_collection_dirs(data_save_root: str) -> None:
 
 
 def configure_expert_env(env: dict[str, str], save_path: str) -> None:
-    env["SAVE_CAMERA_PC"] = "False"
-    env["ENABLE_PERTURBATED_SENSORS"] = "False"
-    env["CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ"] = "False"
-    env["SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ"] = "True"
-    env["COMPUTE_CAMERA_PC"] = "False"
-    env["COMPRESS_IMAGES"] = "False"
-    env["DATAGEN"] = "0"
+    env.setdefault("SAVE_CAMERA_PC", "False")
+    env.setdefault("ENABLE_PERTURBATED_SENSORS", "False")
+    env.setdefault("CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ", "False")
+    env.setdefault("SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ", "True")
+    env.setdefault("COMPUTE_CAMERA_PC", "False")
+    env.setdefault("COMPRESS_IMAGES", "True")
+    env.setdefault("PY123D_DATA_FORMAT", "False")
+    env["DATAGEN"] = "1"
     env["LEAD_EXPERT_CONFIG"] = (
         "target_dataset=2 "
+        f"py123d_data_format={env['PY123D_DATA_FORMAT']} "
+        f"save_legacy_outputs_with_py123d={env['PY123D_DATA_FORMAT']} "
+        "use_radars=false lidar_stack_size=2 "
+        "save_only_non_ground_lidar=false save_lidar_only_inside_bev=false "
         f"save_camera_pc={env['SAVE_CAMERA_PC']} "
         f"perturbate_sensors={env['ENABLE_PERTURBATED_SENSORS']} "
-        "camera_lidar_sensor_tick_from_data_save_freq="
-        f"{env['CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ']} "
-        "sync_sensor_processing_with_data_save_freq="
-        f"{env['SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ']} "
+        f"camera_lidar_sensor_tick_from_data_save_freq={env['CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ']} "
+        f"sync_sensor_processing_with_data_save_freq={env['SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ']} "
         f"compute_camera_pc={env['COMPUTE_CAMERA_PC']} "
         f"compress_images={env['COMPRESS_IMAGES']}"
     )
@@ -565,7 +568,10 @@ def discover_routes(
     if shuffle_routes:
         random.seed(42)
         random.shuffle(routes)
-    print(f"Found {len(routes)} routes in total.")
+    # Exclude specific towns that should not be collected
+    excluded_towns = {"town10hd", "town11", "town12", "town13"}
+    routes = [r for r in routes if not any(ex in r.lower() for ex in excluded_towns)]
+    print(f"Found {len(routes)} routes in total (excluded: {', '.join(sorted(excluded_towns))}).")
 
     if len(scenario_white_lists) > 0:
         routes = [
@@ -664,6 +670,11 @@ if __name__ == "__main__":
         print(
             f"[warning] SCENARIO_RUNNER_ROOT not found in env. Setting to: {os.environ['SCENARIO_RUNNER_ROOT']}"
         )
+    if "PY123D_DATA_FORMAT" not in os.environ:
+        os.environ["PY123D_DATA_FORMAT"] = "False"
+        print(
+            f"[warning] PY123D_DATA_FORMAT not found in env. Setting to: {os.environ['PY123D_DATA_FORMAT']}"
+        )
     # -------------------------------------------------------
     if args.py123d:
         raise ValueError(
@@ -684,7 +695,10 @@ if __name__ == "__main__":
 
     endpoint = parse_single_carla_endpoint(args.carla_endpoints)
 
-    agent = f"{code_root}/lead/expert/expert.py"
+    if os.environ.get("PY123D_DATA_FORMAT", "False").lower() == "true":
+        agent = f"{code_root}/lead/expert/expert_py123d.py"
+    else:
+        agent = f"{code_root}/lead/expert/expert.py"
     dataset_name = "carla_leaderboard2"
 
     # Keep existing scenario filtering behavior
