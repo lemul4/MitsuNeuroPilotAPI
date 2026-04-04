@@ -456,8 +456,10 @@ class ExpertConfig(BaseConfig):
     high_speed_extent_factor_ego_y = 1.2
     # Threshold to decide, when which bbs increase factor is used
     extent_ego_bbs_speed_threshold = 5
+    # Forecast length in seconds when current route command is LEFT/RIGHT/STRAIGHT
+    forecast_length_crossroad = 3.0
     # Forecast length in seconds when near a lane change
-    forecast_length_lane_change = 1.1
+    forecast_length_lane_change = 3.0
     # Forecast length in seconds when not near a lane change
     default_forecast_length = 2.0
     # Factor to increase the ego vehicles bbs during forecasting when speed < extent_ego_bbs_speed_threshold
