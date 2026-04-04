@@ -33,8 +33,8 @@ https://github.com/user-attachments/assets/9f316ad2-e629-4bb4-bffb-9bb55e225738
 - [Updates](#updates)
 - [Quick Start](#quick-start)
   - [1. Environment initialization](#1-environment-initialization)
-  - [2.5. Configure Environment Variables (Conda)](#25-configure-environment-variables-conda)
   - [2. Install dependencies](#2-install-dependencies)
+  - [2.5. Configure Environment Variables (Conda)](#25-configure-environment-variables-conda)
   - [3. Download checkpoints](#3-download-checkpoints)
   - [4. Setup VSCode/PyCharm](#4-setup-vscodepycharm)
   - [5. Evaluate model](#5-evaluate-model)
@@ -92,6 +92,41 @@ source ~/.bashrc                                        # Reload config
 
 Please verify that `~/.bashrc` reflects these paths correctly.
 
+### 2. Install dependencies
+
+We utilize [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install), conda-lock and uv:
+
+```bash
+# Install conda-lock and create conda environment
+pip install conda-lock 
+conda-lock install -n lead conda-lock.yml
+
+# Activate conda environment
+conda activate lead
+
+# Install dependencies and setup git hooks
+pip install uv 
+uv pip install -r requirements.txt  
+
+# Install dependencies (Windows CPU)
+uv pip install -r requirements-win.txt  
+
+uv pip install -e .
+
+# Install other tools needed for development
+conda install -c conda-forge ffmpeg parallel tree gcc zip unzip
+
+# Optional: Activate git hooks
+pre-commit install
+```
+
+While waiting for dependencies installation, we recommend setting up CARLA and downloading checkpoints on parallel:
+
+```bash
+# Download and setup CARLA at 3rd_party/CARLA_0915
+bash scripts/setup_carla.sh
+```
+
 ### 2.5. Configure Environment Variables (Conda)
 
 To avoid manual exports, set up `SCENARIO_RUNNER_ROOT` and `LEAD_PROJECT_ROOT` to load automatically whenever the `lead` environment is activated:
@@ -121,32 +156,66 @@ echo "Project Root: \$LEAD_PROJECT_ROOT"
 echo "Scenario Runner: \$SCENARIO_RUNNER_ROOT"
 ```
 
-### 2. Install dependencies
+windows
 
-We utilize [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install), conda-lock and uv:
+```powershell
+conda activate lead
+$PROJECT_ROOT = (Get-Location).Path
 
-```bash
-# Install conda-lock and create conda environment
-pip install conda-lock && conda-lock install -n lead conda-lock.yml
+New-Item -ItemType Directory -Force "$env:CONDA_PREFIX\etc\conda\activate.d" | Out-Null
+New-Item -ItemType Directory -Force "$env:CONDA_PREFIX\etc\conda\deactivate.d" | Out-Null
 
-# Activate conda environment
+@"
+`$env:LEAD_PROJECT_ROOT = '$PROJECT_ROOT'
+`$env:SCENARIO_RUNNER_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\scenario_runner_autopilot"
+
+`$env:CARLA_VERSION = '0915'
+`$env:CARLA_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\CARLA_`$env:CARLA_VERSION"
+
+if ([string]::IsNullOrEmpty(`$env:PYTHONPATH)) {
+    `$env:PYTHONPATH = "`$env:CARLA_ROOT\PythonAPI\carla"
+} else {
+    `$env:PYTHONPATH = "`$env:CARLA_ROOT\PythonAPI\carla;`$env:PYTHONPATH"
+}
+
+`$env:PATH = "`$env:LEAD_PROJECT_ROOT;`$env:LEAD_PROJECT_ROOT\scripts;`$env:PATH"
+
+`$env:NUPLAN_MAP_VERSION = 'nuplan-maps-v1.0'
+`$env:NUPLAN_MAPS_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\dataset\maps"
+`$env:NAVSIM_EXP_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\exp"
+`$env:NAVSIM_DEVKIT_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\navsimv1.1"
+`$env:OPENSCENE_DATA_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\dataset"
+
+`$env:PY123D_DATA_ROOT = "`$env:LEAD_PROJECT_ROOT\data\carla_leaderboard2_py123d"
+"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\activate.d\env_vars.ps1"
+
+@"
+Remove-Item Env:LEAD_PROJECT_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:SCENARIO_RUNNER_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:CARLA_VERSION -ErrorAction SilentlyContinue
+Remove-Item Env:CARLA_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:NUPLAN_MAP_VERSION -ErrorAction SilentlyContinue
+Remove-Item Env:NUPLAN_MAPS_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:NAVSIM_EXP_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:NAVSIM_DEVKIT_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:OPENSCENE_DATA_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:PY123D_DATA_ROOT -ErrorAction SilentlyContinue
+"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\deactivate.d\env_vars.ps1"
+
+conda deactivate
 conda activate lead
 
-# Install dependencies and setup git hooks
-pip install uv && uv pip install -r requirements.txt && uv pip install -e .
-
-# Install other tools needed for development
-conda install -c conda-forge ffmpeg parallel tree gcc zip unzip
-
-# Optional: Activate git hooks
-pre-commit install
-```
-
-While waiting for dependencies installation, we recommend setting up CARLA and downloading checkpoints on parallel:
-
-```bash
-# Download and setup CARLA at 3rd_party/CARLA_0915
-bash scripts/setup_carla.sh
+echo "Project Root: $env:LEAD_PROJECT_ROOT"
+echo "Scenario Runner: $env:SCENARIO_RUNNER_ROOT"
+echo "CARLA Version: $env:CARLA_VERSION"
+echo "CARLA Root: $env:CARLA_ROOT"
+echo "PYTHONPATH: $env:PYTHONPATH"
+echo "NUPLAN Map Version: $env:NUPLAN_MAP_VERSION"
+echo "NUPLAN Maps Root: $env:NUPLAN_MAPS_ROOT"
+echo "NAVSIM Exp Root: $env:NAVSIM_EXP_ROOT"
+echo "NAVSIM Devkit Root: $env:NAVSIM_DEVKIT_ROOT"
+echo "OPENSCENE Data Root: $env:OPENSCENE_DATA_ROOT"
+echo "PY123D Data Root: $env:PY123D_DATA_ROOT"
 ```
 
 ### 3. Download checkpoints
@@ -302,6 +371,9 @@ python lead/leaderboard_wrapper.py \
 
 # Collect Data Alternative 2
 bash scripts/eval_expert.sh
+
+# Collect Data Windows
+powershell -ExecutionPolicy Bypass -File .\scripts\run_expert.ps1
 
 # Collect Data 123D Format Alternative 1
 export LEAD_EXPERT_CONFIG="target_dataset=6 py123d_data_format=true use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false"
