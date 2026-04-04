@@ -30,7 +30,6 @@ https://github.com/user-attachments/assets/9f316ad2-e629-4bb4-bffb-9bb55e225738
 ## Table of Contents
 
 - [Table of Contents](#table-of-contents)
-- [Updates](#updates)
 - [Quick Start](#quick-start)
   - [1. Environment initialization](#1-environment-initialization)
   - [2. Install dependencies](#2-install-dependencies)
@@ -49,31 +48,6 @@ https://github.com/user-attachments/assets/9f316ad2-e629-4bb4-bffb-9bb55e225738
 - [Citation](#citation)
 - [License](#license)
 
-## Updates
-
-- **`[2026/25/02]`** LEAD is accepted to CVPR 2026! 🎉
-
-- **`[2026/25/02]`** NAVSIM data pre-processing and training instructions released.
-  > Supplementary data coming soon.
-
-- **`[2026/02/02]`** Preliminary support for [Py123D](https://github.com/autonomousvision/py123d)
-  > Added initial support for Py123D, enabling: collecting, loading and visualizing driving data in unified data format.
-
-- **`[2026/01/18]`** Deactivated Kalman filter
-  > By default, we deactivate the Kalman filter used for ego state estimation and GPS target-point smoothing to evaluate the policy in a fully end-to-end setting. While this may slightly reduce closed-loop performance, it avoids unrealistically noise-free target points. To turn the kalman filter on, set `use_kalman_filter=True` in [config_closed_loop.py](lead/inference/config_closed_loop.py).
-
-- **`[2026/01/13]`** CARLA dataset and training documentation released
-  > We publicly release a CARLA dataset generated with the same pipeline as described in the paper. Note that due to subsequent refactoring and code cleanup, the released dataset differs from the original dataset used in our experiments. Performance on the new dataset is similar to the reported performance.
-
-- **`[2026/01/05]`** Deactivated stop-sign heuristic
-  > By default, we deactivate explicit stop-sign handling to evaluate the policy in a fully end-to-end setting. This may slightly reduce closed-loop performance compared to earlier runs.  To turn the heuristic on, set `slower_for_stop_sign=True` in [config_closed_loop.py](lead/inference/config_closed_loop.py).
-
-- **`[2026/01/05]`** RoutePlanner bug fix
-  > Fixed an index error that caused the driving policy to crash at the end of routes in Town13. Driving scores have been updated accordingly.
-
-- **`[2025/12/24]`** Initial release
-  > Paper, checkpoints, expert driver, and inference code are now available.
-
 ## Quick Start
 
 ### 1. Environment initialization
@@ -81,13 +55,8 @@ https://github.com/user-attachments/assets/9f316ad2-e629-4bb4-bffb-9bb55e225738
 Clone the repository and map the project root to your environment
 
 ```bash
-git clone https://github.com/autonomousvision/lead.git
-cd lead
-
-# Setup environment, important!
-echo -e "export LEAD_PROJECT_ROOT=$(pwd)" >> ~/.bashrc  # Set project root variable
-echo "source $(pwd)/scripts/main.sh" >> ~/.bashrc       # Persist more environment variables
-source ~/.bashrc                                        # Reload config
+git clone https://github.com/lemul4/MitsuNeuroPilotAPI.git
+cd MitsuNeuroPilotAPI
 ```
 
 Please verify that `~/.bashrc` reflects these paths correctly.
@@ -154,6 +123,9 @@ conda deactivate && conda activate lead
 # 5. Verify setup
 echo "Project Root: \$LEAD_PROJECT_ROOT"
 echo "Scenario Runner: \$SCENARIO_RUNNER_ROOT"
+
+echo "source $(pwd)/scripts/main.sh" >> ~/.bashrc       # Persist more environment variables
+source ~/.bashrc                                        # Reload config
 ```
 
 windows
