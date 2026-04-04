@@ -26,8 +26,9 @@ repos:
     rev: v0.14.10
     hooks:
       - id: ruff
-        args: [--fix]
+        args: [--no-fix]
       - id: ruff-format
+        args: [--check]
       - id: ruff-check
 
   # - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror

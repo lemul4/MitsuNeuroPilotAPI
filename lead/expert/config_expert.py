@@ -372,8 +372,14 @@ class ExpertConfig(BaseConfig):
     )
 
     # --- Autopilot Configuration ---
-    # Maximum speed in m/s to consider a bad view
-    min_target_speed_limit = 6.75
+    # Global expert speed cap in m/s. Set this single value to limit expert speed everywhere.
+    expert_speed_cap = 15.0 / 3.6
+
+    @overridable_property
+    def min_target_speed_limit(self):
+        # Minimum target speed floor used by expert logic (kept below or equal to global speed cap).
+        return min(6.75, self.expert_speed_cap / 2.0)
+
     # Noise added to expert steering angle
     steer_noise = 1e-3
     # Distance of obstacles (in meters) in which we will check for collisions
@@ -473,8 +479,12 @@ class ExpertConfig(BaseConfig):
     braking_distance_calculation_safety_distance = 10
     # Minimum speed in m/s to prevent rolling back, when braking no throttle is applied
     minimum_speed_to_prevent_rolling_back = 0.5
-    # Maximum seed in junctions in m/s
-    max_speed_in_junction_urban = 25 / 3.6
+
+    @overridable_property
+    def max_speed_in_junction_urban(self):
+        # Maximum speed in junctions in m/s, capped by the global expert speed cap.
+        return min(25 / 3.6, self.expert_speed_cap)
+
     # Lookahead distance to check, whether the ego is close to a junction
     max_lookahead_to_check_for_junction = 30 * points_per_meter
     # Distance of the first checkpoint for TF++
@@ -513,8 +523,12 @@ class ExpertConfig(BaseConfig):
     # --- TwoWays Scenarios with Obstacles ---
     # Maximum distance to start the overtaking maneuver
     max_distance_to_overtake_two_way_scnearios = int(8 * points_per_meter)
-    # Default overtaking speed in m/s for all route obstacle scenarios
-    default_overtake_speed = 40.0 / 3.6
+
+    @overridable_property
+    def default_overtake_speed(self):
+        # Default overtaking speed in m/s for all route obstacle scenarios, capped globally.
+        return min(40.0 / 3.6, self.expert_speed_cap)
+
     # Distance in meters at which two ways scenarios are considered finished
     distance_to_delete_scenario_in_two_ways = int(2 * points_per_meter)
     # Transition length for scenario ConstructionObstacleTwoWays to change lanes
@@ -549,8 +563,12 @@ class ExpertConfig(BaseConfig):
     # --- VehicleOpensDoorTwoWays ---
     # How much to drive to the center of the opposite lane while handling VehicleOpensDoorTwoWays
     factor_vehicle_opens_door_two_ways = 0.7
-    # Overtaking speed in m/s for vehicle opens door two ways scenarios
-    overtake_speed_vehicle_opens_door_two_ways = 8.75
+
+    @overridable_property
+    def overtake_speed_vehicle_opens_door_two_ways(self):
+        # Overtaking speed in m/s for VehicleOpensDoorTwoWays, capped globally.
+        return min(8.75, self.expert_speed_cap)
+
     # Increase overtaking maneuver by distance in meters before the obstacle in VehicleOpensDoorTwoWays
     add_before_vehicle_opens_door_two_ways = int(-1.0 * points_per_meter)
     # Increase overtaking maneuver by distance in meters after the obstacle in VehicleOpensDoorTwoWays

@@ -496,7 +496,9 @@ class Expert(ExpertData):
         self.target_speed_limit = max(
             self.target_speed_limit, self.config_expert.min_target_speed_limit
         )
-        self.target_speed_limit = min(self.target_speed_limit, 20.0)
+        self.target_speed_limit = min(
+            self.target_speed_limit, self.config_expert.expert_speed_cap
+        )
 
         # --- Target speed, begins with target speed limit, reduces further depending on scenarios ---
         target_speed = self.target_speed_limit
@@ -564,13 +566,17 @@ class Expert(ExpertData):
                     LOG.info(
                         f"[Control] {self.current_active_scenario_type}: Reducing target speed to 10.0 m/s, approaching visible obstacle at {self.distance_to_scenario_obstacle:.1f}m"
                     )
-                    target_speed = min(target_speed, 10.0)
+                    target_speed = min(
+                        target_speed, min(10.0, self.config_expert.expert_speed_cap)
+                    )
             elif self.speed_limit > 20:
                 if 25 < self.distance_to_scenario_obstacle < 45:
                     LOG.info(
                         f"[Control] {self.current_active_scenario_type}: Reducing target speed to 7.5 m/s, approaching visible obstacle at {self.distance_to_scenario_obstacle:.1f}m"
                     )
-                    target_speed = min(target_speed, 7.5)
+                    target_speed = min(
+                        target_speed, min(7.5, self.config_expert.expert_speed_cap)
+                    )
             else:
                 if 25 < self.distance_to_scenario_obstacle < 40:
                     LOG.info(
@@ -587,13 +593,17 @@ class Expert(ExpertData):
                     LOG.info(
                         f"[Control] ParkedObstacle: Reducing target speed to 10.0 m/s, approaching parked obstacle at {self.distance_to_scenario_obstacle:.1f}m"
                     )
-                    target_speed = min(target_speed, 10.0)
+                    target_speed = min(
+                        target_speed, min(10.0, self.config_expert.expert_speed_cap)
+                    )
             elif self.speed_limit > 20:
                 if 25 < self.distance_to_scenario_obstacle < 45:
                     LOG.info(
                         f"[Control] ParkedObstacle: Reducing target speed to 7.5 m/s, approaching parked obstacle at {self.distance_to_scenario_obstacle:.1f}m"
                     )
-                    target_speed = min(target_speed, 7.5)
+                    target_speed = min(
+                        target_speed, min(7.5, self.config_expert.expert_speed_cap)
+                    )
             else:
                 if 25 < self.distance_to_scenario_obstacle < 35:
                     LOG.info(
@@ -690,6 +700,9 @@ class Expert(ExpertData):
                     f"[Control] StaticCutIn: Cut-in vehicle cleared (speed={cut_in_vehicle.get_velocity().length() * 3.6:.1f} km/h)"
                 )
                 CarlaDataProvider.get_current_scenario_memory()["stopped"] = True
+
+        # Enforce a final speed cap before converting target speed to throttle/brake.
+        target_speed = min(target_speed, self.config_expert.expert_speed_cap)
 
         # Compute throttle and brake control
         throttle, control_brake = self._longitudinal_controller.get_throttle_and_brake(
