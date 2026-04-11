@@ -628,7 +628,7 @@ def arg_parse() -> argparse.Namespace:
     parser.add_argument(
         "--route_folder",
         type=str,
-        default="data/data_routes",
+        default="data/data_routes/lead",
         help="Folder containing route files",
     )
     parser.add_argument(

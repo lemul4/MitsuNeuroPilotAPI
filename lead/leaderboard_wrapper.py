@@ -307,10 +307,22 @@ class LeaderboardWrapper:
             camera_lidar_sensor_tick_from_data_save_freq = "False"
             sync_sensor_processing_with_save_freq = "True"
             compute_camera_pc = "False"
-            compress_images = "False"
+            # Enabled by user request
+            compress_images = "True"
+
+            # Py123d flag: set from CLI if provided
+            py123d_data_format = "True" if getattr(self.args, "py123d", False) else "False"
+
+            # Agent selection env var for downstream scripts
+            agent_module = (
+                "lead/expert/expert_py123d.py"
+                if py123d_data_format == "True"
+                else "lead/expert/expert.py"
+            )
 
             env_vars.update(
                 {
+                    # Save paths (use workspace-rooted expert_debug structure)
                     "SAVE_PATH": str(resolved_output_dir / "data" / self.scenario_type),
                     "DATAGEN": "1",
                     "DEBUG_CHALLENGE": "0",
@@ -321,8 +333,18 @@ class LeaderboardWrapper:
                     "SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ": sync_sensor_processing_with_save_freq,
                     "COMPUTE_CAMERA_PC": compute_camera_pc,
                     "COMPRESS_IMAGES": compress_images,
+                    # New flags from user snippet
+                    "PY123D_DATA_FORMAT": py123d_data_format,
+                    "AGENT_MODULE": agent_module,
+                    "CHECKPOINT_ENDPOINT": str(self.workspace_root / "data/expert_debug/results" / f"{self.route_id}_result.json"),
                     "LEAD_EXPERT_CONFIG": (
                         "target_dataset=2 "
+                        f"py123d_data_format={py123d_data_format} "
+                        f"save_legacy_outputs_with_py123d={py123d_data_format} "
+                        "use_radars=false "
+                        "lidar_stack_size=2 "
+                        "save_only_non_ground_lidar=false "
+                        "save_lidar_only_inside_bev=false "
                         f"save_camera_pc={save_camera_pc} "
                         f"perturbate_sensors={enable_perturbated_sensors} "
                         "camera_lidar_sensor_tick_from_data_save_freq="

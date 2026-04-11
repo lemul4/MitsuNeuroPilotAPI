@@ -38,9 +38,26 @@ fi
 export SAVE_PATH=data/expert_debug/data/$SCENARIO_NAME
 export CHECKPOINT_ENDPOINT=data/expert_debug/results/${ROUTE_NUMBER}_result.json
 
+# CARLA host override support for WSL<->Windows setups.
+# Priority:
+# 1) CARLA_HOST env var
+# 2) WSL default gateway
+# 3) /etc/resolv.conf nameserver
+# 4) fallback to 127.0.0.1
+if [[ -z "${CARLA_HOST:-}" ]]; then
+    CARLA_HOST=$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')
+fi
+
+if [[ -z "${CARLA_HOST:-}" && -f /etc/resolv.conf ]]; then
+    CARLA_HOST=$(awk '/^nameserver / {print $2; exit}' /etc/resolv.conf)
+fi
+
+export CARLA_HOST=${CARLA_HOST:-127.0.0.1}
+echo "Using CARLA_HOST=${CARLA_HOST}"
+
 # Start the evaluation
 python -u 3rd_party/leaderboard_autopilot/leaderboard/leaderboard_evaluator_local.py \
-    --host=172.30.96.1 \
+    --host=${CARLA_HOST} \
     --port=2000 \
     --traffic-manager-port=8000 \
     --traffic-manager-seed=0 \
