@@ -88,13 +88,27 @@ class SemanticPanoramaStitcher:
         if len(configured_camera_ids) == 0:
             configured_camera_ids = tuple(sorted(config.camera_calibration.keys()))
         self.camera_ids = list(configured_camera_ids)
+        if len(self.camera_ids) == 0:
+            raise ValueError("semantic_panorama_camera_ids resolved to an empty list")
 
-        configured_center_id = int(config.semantic_panorama_center_camera_id)
-        self.center_camera_id = (
-            configured_center_id
-            if configured_center_id in self.camera_ids
-            else self.camera_ids[len(self.camera_ids) // 2]
-        )
+        configured_render_order = tuple(getattr(config, "semantic_panorama_render_order", ()))
+        if len(configured_render_order) == 0:
+            configured_render_order = (2, 3, 1)
+
+        # Keep only known cameras from the requested order, then append the rest.
+        render_order = [
+            cam_id for cam_id in configured_render_order if cam_id in self.camera_ids
+        ]
+        render_order.extend(cam_id for cam_id in self.camera_ids if cam_id not in render_order)
+        self.render_order = render_order
+        self.render_rank = {cam_id: rank for rank, cam_id in enumerate(self.render_order)}
+        self.render_priority = {
+            cam_id: (len(self.render_order) - rank)
+            for cam_id, rank in self.render_rank.items()
+        }
+
+        # Use the top-priority camera as the center-priority source for overlap boosting.
+        self.center_camera_id = self.render_order[0]
 
         self.center_dilate_kernel = max(
             1, int(config.semantic_panorama_center_dilate_kernel)
@@ -106,13 +120,13 @@ class SemanticPanoramaStitcher:
         # Насколько сильнее центр побеждает в overlap.
         # 1.0 = без усиления, 1.2..2.0 = типичный диапазон.
         self.center_priority_boost = float(
-            getattr(config, "semantic_panorama_center_priority_boost", 1.5)
+            getattr(config, "semantic_panorama_center_priority_boost", 1.8)
         )
 
         # Насколько быстро падает вес к краям изображения.
         # 1.0..3.0 обычно ок. Чем больше, тем сильнее предпочитается центр кадра.
         self.edge_falloff_power = float(
-            getattr(config, "semantic_panorama_edge_falloff_power", 2.0)
+            getattr(config, "semantic_panorama_edge_falloff_power", 2.5)
         )
 
         center_camera_cfg = config.camera_calibration[self.center_camera_id]
@@ -238,7 +252,7 @@ class SemanticPanoramaStitcher:
 
         best_score = np.full((self.H_pano, self.W_pano), -1.0, dtype=np.float32)
 
-        for camera_id in self.camera_ids:
+        for camera_id in self.render_order:
             if camera_id not in img_dict:
                 continue
 
@@ -263,7 +277,9 @@ class SemanticPanoramaStitcher:
                 borderValue=0,
             )
 
-            current_score = np.where(valid_mask, warped_priority, -1.0)
+            # Tie-break overlaps by explicit render order (earlier cameras win).
+            order_bias = 1e-3 * float(self.render_priority.get(camera_id, 0))
+            current_score = np.where(valid_mask, warped_priority + order_bias, -1.0)
             update_mask = current_score > best_score
 
             if not np.any(update_mask):
@@ -1583,14 +1599,6 @@ class ExpertData(ExpertBase):
         if not self._should_process_semantic_panorama():
             return None
 
-        if self.config_expert.num_cameras < 2:
-            LOG.warning(
-                "Semantic panorama stitching is enabled but num_cameras=%d. "
-                "Falling back to horizontal concatenation.",
-                self.config_expert.num_cameras,
-            )
-            return None
-
         try:
             return SemanticPanoramaStitcher(self.config_expert)
         except Exception as e:
@@ -1604,15 +1612,29 @@ class ExpertData(ExpertBase):
     def _build_semantic_panorama(
         self, semantics_by_camera: dict[int, np.ndarray]
     ) -> np.ndarray:
+        crop_top_rows = max(
+            0,
+            int(getattr(self.config_expert, "semantic_panorama_crop_top_rows", 0)),
+        )
+
         if self.semantic_panorama_stitcher is None:
-            return np.concatenate(
+            panorama = np.concatenate(
                 [
                     semantics_by_camera[idx]
                     for idx in sorted(semantics_by_camera.keys())
                 ],
                 axis=1,
             )
-        return self.semantic_panorama_stitcher.stitch(semantics_by_camera)
+        else:
+            panorama = self.semantic_panorama_stitcher.stitch(semantics_by_camera)
+
+        if crop_top_rows <= 0:
+            return panorama
+
+        # Keep at least one row to avoid producing an empty image.
+        max_crop = max(0, panorama.shape[0] - 1)
+        crop_top_rows = min(crop_top_rows, max_crop)
+        return panorama[crop_top_rows:, ...]
 
     @beartype
     def _prepare_semantics_for_saving(self, semantics: np.ndarray) -> np.ndarray:

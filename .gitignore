@@ -205,3 +205,4 @@ visualization/
 /data/carla_leaderboard2
 /data/expert_debug
 *:Zone.Identifier
+telemetry_*
