@@ -3,6 +3,9 @@
 # Enter data here
 export ROUTES=data/data_routes/leaderboard1/BlockedIntersection/Town06_13.xml
 export LEAD_LOG_LEVEL="DEBUG"
+# If true, disables speed reduction caused by bad visibility (night/rain/fog)
+# while preserving all other visibility-related behavior (e.g., maneuver timing).
+export DISABLE_SPEED_REDUCTION_BAD_VISIBILITY=false
 
 # Set standard environment variables
 export SCENARIO_NAME=$(basename $(dirname $ROUTES))
@@ -24,7 +27,7 @@ rm -rf data/expert_debug/data
 rm -rf data/expert_debug/results
 
 # Start the evaluation
-export LEAD_EXPERT_CONFIG="target_dataset=6 py123d_data_format=true use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false"
+export LEAD_EXPERT_CONFIG="target_dataset=6 py123d_data_format=true use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false disable_speed_reduction_bad_visibility=${DISABLE_SPEED_REDUCTION_BAD_VISIBILITY}"
 python -u 3rd_party/leaderboard_autopilot/leaderboard/leaderboard_evaluator_local.py \
     --port=2000 \
     --traffic-manager-port=8000 \

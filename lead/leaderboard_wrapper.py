@@ -309,6 +309,8 @@ class LeaderboardWrapper:
             compute_camera_pc = "False"
             # Enabled by user request
             compress_images = "True"
+            disable_speed_reduction_bad_visibility = "True"
+            use_min_speed_infractions_in_score = "False"
 
             # Py123d flag: set from CLI if provided
             py123d_data_format = "True" if getattr(self.args, "py123d", False) else "False"
@@ -333,6 +335,8 @@ class LeaderboardWrapper:
                     "SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ": sync_sensor_processing_with_save_freq,
                     "COMPUTE_CAMERA_PC": compute_camera_pc,
                     "COMPRESS_IMAGES": compress_images,
+                    "DISABLE_SPEED_REDUCTION_BAD_VISIBILITY": disable_speed_reduction_bad_visibility,
+                    "USE_MIN_SPEED_INFRACTIONS_IN_SCORE": use_min_speed_infractions_in_score,
                     # New flags from user snippet
                     "PY123D_DATA_FORMAT": py123d_data_format,
                     "AGENT_MODULE": agent_module,
@@ -352,7 +356,9 @@ class LeaderboardWrapper:
                         "sync_sensor_processing_with_data_save_freq="
                         f"{sync_sensor_processing_with_save_freq} "
                         f"compute_camera_pc={compute_camera_pc} "
-                        f"compress_images={compress_images}"
+                        f"compress_images={compress_images} "
+                        "disable_speed_reduction_bad_visibility="
+                        f"{disable_speed_reduction_bad_visibility}"
                     ),
                 }
             )
