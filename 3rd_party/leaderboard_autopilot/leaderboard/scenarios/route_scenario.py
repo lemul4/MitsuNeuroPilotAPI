@@ -146,7 +146,7 @@ class RouteScenario(BasicScenario):
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2020',
+        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.audi.a2',
                                                           elevate_transform,
                                                           rolename='hero')
         if not ego_vehicle:

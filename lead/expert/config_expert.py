@@ -1,5 +1,6 @@
 from collections import defaultdict
 from functools import cached_property
+import os
 
 import carla
 import numpy as np
@@ -267,6 +268,9 @@ class ExpertConfig(BaseConfig):
     @property
     def nice_weather(self):
         """If true use only nice weather conditions."""
+        # During data collection we want weather diversity instead of forcing ClearNoon.
+        if os.getenv("DATAGEN", "0") == "1":
+            return False
         if self.is_on_slurm:
             return False
         return True
@@ -373,12 +377,16 @@ class ExpertConfig(BaseConfig):
 
     # --- Autopilot Configuration ---
     # Global expert speed cap in m/s. Set this single value to limit expert speed everywhere.
-    expert_speed_cap = 15.0 / 3.6
+    expert_speed_cap = 20.0 / 3.6
 
     @overridable_property
     def min_target_speed_limit(self):
         # Minimum target speed floor used by expert logic (kept below or equal to global speed cap).
         return min(6.75, self.expert_speed_cap / 2.0)
+
+    # If true, keep all visibility-related maneuver behavior but disable direct target-speed
+    # reduction caused only by bad visual visibility (e.g., night/fog/rain presets).
+    disable_speed_reduction_bad_visibility = False
 
     # Noise added to expert steering angle
     steer_noise = 1e-3
@@ -541,6 +549,10 @@ class ExpertConfig(BaseConfig):
     add_after_construction_obstacle_two_ways = int(1.0 * points_per_meter)
     # How much to drive to the center of the opposite lane while handling ConstructionObstacleTwoWays
     factor_construction_obstacle_two_ways = 1.08
+    # Extra safety distance (meters) before allowing ConstructionObstacleTwoWays overtaking.
+    construction_two_ways_extra_safety_distance = 8.0
+    # Extra safety time margin (seconds) against oncoming traffic in ConstructionObstacleTwoWays.
+    construction_two_ways_extra_safety_time = 1.5
 
     # --- AccidentTwoWays ---
     # Increase overtaking maneuver by distance in meters after the obstacle in AccidentTwoWays
@@ -551,6 +563,13 @@ class ExpertConfig(BaseConfig):
     add_before_accident_two_ways = int(-1.0 * points_per_meter)
     # How much to drive to the center of the opposite lane while handling AccidentTwoWays
     factor_accident_two_ways = 1.0
+    # Extra safety distance (meters) before allowing AccidentTwoWays overtaking.
+    accident_two_ways_extra_safety_distance = 8.0
+    # Extra safety time margin (seconds) against oncoming traffic in AccidentTwoWays.
+    accident_two_ways_extra_safety_time = 1.0
+    # Ignore-nearby threshold used by early-acceleration shortcut in AccidentTwoWays.
+    # Smaller values make the expert less likely to ignore relevant oncoming vehicles.
+    accident_two_ways_early_accel_ignore_threshold = 3.0
 
     # --- ParkedObstacleTwoWays ---
     # Transition length for scenario ParkedObstacleTwoWays to change lanes

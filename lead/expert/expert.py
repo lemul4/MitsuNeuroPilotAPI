@@ -347,11 +347,10 @@ class Expert(ExpertData):
             "PedestrianCrossing",
         ]:
             for actor in self.walkers_inside_bev + self.bikers_inside_bev:
-                num_visible_pixel = (
-                    self.id2bb_map[actor.id]["visible_pixels"]
-                    if self.config_expert.datagen
-                    else -1
-                )
+                actor_bb = self.id2bb_map.get(actor.id)
+                if self.config_expert.datagen and actor_bb is None:
+                    continue
+                num_visible_pixel = actor_bb["visible_pixels"] if actor_bb else -1
                 actor_height = actor.bounding_box.extent.z
                 threshold = (
                     50
@@ -460,7 +459,10 @@ class Expert(ExpertData):
             < 60 / 3.6  # Assume urban = 60kmh
         ):
             if self.distance_to_next_junction > 0:
-                if self.visual_visibility == WeatherVisibility.VERY_LIMITED:
+                if (
+                    self.visual_visibility == WeatherVisibility.VERY_LIMITED
+                    and not self.config_expert.disable_speed_reduction_bad_visibility
+                ):
                     self.target_speed_limit -= 4.0
                     self.slower_bad_visibility = True
                 if self.num_parking_vehicles_in_proximity >= 2:
@@ -783,11 +785,27 @@ class Expert(ExpertData):
             from_location[0], from_location[1], from_location[2]
         )
 
+        extra_safety_distance = 0.0
+        extra_safety_time = 0.0
+        if self.current_active_scenario_type == "AccidentTwoWays":
+            extra_safety_distance = (
+                self.config_expert.accident_two_ways_extra_safety_distance
+            )
+            extra_safety_time = self.config_expert.accident_two_ways_extra_safety_time
+        elif self.current_active_scenario_type == "ConstructionObstacleTwoWays":
+            extra_safety_distance = (
+                self.config_expert.construction_two_ways_extra_safety_distance
+            )
+            extra_safety_time = (
+                self.config_expert.construction_two_ways_extra_safety_time
+            )
+
         # Compute the distance and time needed for the ego vehicle to overtake
         ego_distance = (
             to_location.distance(self.ego_location)
             + self.ego_vehicle.bounding_box.extent.x * 2
             + self.config_expert.check_path_free_safety_distance
+            + extra_safety_distance
         )
         ego_time = expert_utils.compute_min_time_for_distance(
             self.config_expert,
@@ -875,23 +893,13 @@ class Expert(ExpertData):
                     if self.current_active_scenario_type in [
                         "ConstructionObstacleTwoWays"
                     ]:
-                        threshold = 8
-                        if self.ego_lane_width <= 2.76:
-                            threshold = 8
-                        elif self.ego_lane_width <= 3.01:
-                            threshold = 9
-                        elif self.ego_lane_width <= 3.51:
-                            threshold = 10
-                        if dot_product < threshold:
-                            continue
+                        # Do not use the aggressive "early acceleration" ignore shortcut
+                        # in ConstructionObstacleTwoWays. It can miss relevant oncoming cars.
+                        pass
                     elif self.current_active_scenario_type in ["AccidentTwoWays"]:
-                        threshold = 7
-                        if self.ego_lane_width <= 2.76:
-                            threshold = 7
-                        elif self.ego_lane_width <= 3.01:
-                            threshold = 8
-                        elif self.ego_lane_width <= 3.51:
-                            threshold = 9
+                        threshold = (
+                            self.config_expert.accident_two_ways_early_accel_ignore_threshold
+                        )
                         if dot_product < threshold:
                             continue
                     elif self.current_active_scenario_type in ["ParkedObstacleTwoWays"]:
@@ -951,7 +959,9 @@ class Expert(ExpertData):
                 # Vehicle needs less time to arrive at to_location than the ego vehicle
                 if (
                     other_vehicle_time
-                    < ego_time + self.config_expert.check_path_free_safety_time
+                    < ego_time
+                    + self.config_expert.check_path_free_safety_time
+                    + extra_safety_time
                 ):
                     path_clear = False
                     break

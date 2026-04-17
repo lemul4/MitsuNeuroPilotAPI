@@ -216,6 +216,8 @@ def configure_expert_env(env: dict[str, str], save_path: str) -> None:
     env.setdefault("COMPUTE_CAMERA_PC", "False")
     env.setdefault("COMPRESS_IMAGES", "True")
     env.setdefault("PY123D_DATA_FORMAT", "False")
+    env.setdefault("DISABLE_SPEED_REDUCTION_BAD_VISIBILITY", "True")
+    env.setdefault("USE_MIN_SPEED_INFRACTIONS_IN_SCORE", "False")
     env["DATAGEN"] = "1"
     env["LEAD_EXPERT_CONFIG"] = (
         "target_dataset=2 "
@@ -228,7 +230,9 @@ def configure_expert_env(env: dict[str, str], save_path: str) -> None:
         f"camera_lidar_sensor_tick_from_data_save_freq={env['CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ']} "
         f"sync_sensor_processing_with_data_save_freq={env['SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ']} "
         f"compute_camera_pc={env['COMPUTE_CAMERA_PC']} "
-        f"compress_images={env['COMPRESS_IMAGES']}"
+        f"compress_images={env['COMPRESS_IMAGES']} "
+        "disable_speed_reduction_bad_visibility="
+        f"{env['DISABLE_SPEED_REDUCTION_BAD_VISIBILITY']}"
     )
     env["SAVE_PATH"] = save_path
 
@@ -326,6 +330,27 @@ def build_route_jobs(
             )
 
     return jobs
+
+
+def write_jobs_launch_order(jobs: list[RouteJob], data_save_directory: Path) -> Path:
+    order_file = data_save_directory / "routes_launch_order.txt"
+    order_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(order_file, "w", encoding="utf-8") as f:
+        f.write("# Route launch order\n")
+        f.write("# This order matches run_local_collection() iteration over jobs.\n")
+        f.write(
+            "idx\trepetition\tscenario\ttown\troutefile_number\tseed\troute\tcheckpoint\n"
+        )
+        for idx, job in enumerate(jobs, start=1):
+            f.write(
+                f"{idx}\t{job.repetition}\t{job.scenario_type}\t{job.town}"
+                f"\t{job.routefile_number}\t{job.seed}\t{job.route}"
+                f"\t{job.checkpoint_endpoint}\n"
+            )
+
+    print(f"Saved route launch order to: {order_file}")
+    return order_file
 
 
 def stop_route_process_gracefully(
@@ -568,10 +593,29 @@ def discover_routes(
     if shuffle_routes:
         random.seed(42)
         random.shuffle(routes)
-    # Exclude specific towns that should not be collected
-    excluded_towns = {"town10hd", "town11", "town12", "town13"}
-    routes = [r for r in routes if not any(ex in r.lower() for ex in excluded_towns)]
-    print(f"Found {len(routes)} routes in total (excluded: {', '.join(sorted(excluded_towns))}).")
+    # Exclude specific towns based on route XML metadata, not file path.
+    excluded_towns = {"town12", "town13", "town14", "town15"}
+    excluded_by_town = 0
+    filtered_by_town: list[str] = []
+    for route in routes:
+        try:
+            town, _ = parse_route_metadata(route)
+        except Exception as e:
+            print(f"Warning: Could not parse town from route {route}: {e}")
+            filtered_by_town.append(route)
+            continue
+
+        if town.lower() in excluded_towns:
+            excluded_by_town += 1
+            continue
+
+        filtered_by_town.append(route)
+
+    routes = filtered_by_town
+    print(
+        f"Found {len(routes)} routes in total "
+        f"(excluded by town: {excluded_by_town}; excluded towns: {', '.join(sorted(excluded_towns))})."
+    )
 
     if len(scenario_white_lists) > 0:
         routes = [
@@ -685,7 +729,7 @@ if __name__ == "__main__":
     repetitions = 1
     repetition_start = 0
     shuffle_routes = True
-    max_route_per_scenario_type = 40  # -1 means no limit
+    max_route_per_scenario_type = 50  # -1 means no limit
 
     carla_root = (
         args.carla_root
@@ -702,8 +746,8 @@ if __name__ == "__main__":
     dataset_name = "carla_leaderboard2"
 
     # Keep existing scenario filtering behavior
-    scenario_white_lists = ["NonSignalizedJunctionLeftTurn"]
-    scenario_blacklist = ["YieldToEmergencyVehicle"]
+    scenario_white_lists = ["DynamicObjectCrossing", "VehicleTurningRoute", "ParkedObstacle", "Accident", "ConstructionObstacle", "ParkingExit", "RedLightWithoutLeadVehicle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss", "noScenarios", "SignalizedJunctionLeftTurn" ]
+    scenario_blacklist = ["YieldToEmergencyVehicle", ]
 
     root_folder = Path(args.root_folder).expanduser()
     if not root_folder.is_absolute():
@@ -731,6 +775,8 @@ if __name__ == "__main__":
         scenario_blacklist=scenario_blacklist,
         data_save_directory=data_save_directory,
     )
+
+    write_jobs_launch_order(jobs=jobs, data_save_directory=data_save_directory)
 
     run_local_collection(
         jobs=jobs,

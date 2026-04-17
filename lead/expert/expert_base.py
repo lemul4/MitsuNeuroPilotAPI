@@ -1286,15 +1286,18 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
         if (
             self.config_expert.datagen
         ):  # Can only perform occlusion check if we have sensor data
-            walkers = [
-                walker
-                for walker in walkers
+            walkers_filtered = []
+            for walker in walkers:
+                walker_bb = self.id2bb_map.get(walker.id)
+                if walker_bb is None:
+                    continue
                 if not (
                     0
-                    <= self.id2bb_map[walker.id]["visible_pixels"]
+                    <= walker_bb["visible_pixels"]
                     < self.config_expert.pedestrian_min_num_visible_pixels
-                )
-            ]
+                ):
+                    walkers_filtered.append(walker)
+            walkers = walkers_filtered
         return walkers
 
     @step_cached_property
@@ -1315,15 +1318,18 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
         if (
             self.config_expert.datagen and self.config_expert.bikers_occlusion_check
         ):  # Can only perform occlusion check if we have sensor data
-            bikers = [
-                biker
-                for biker in bikers
+            bikers_filtered = []
+            for biker in bikers:
+                biker_bb = self.id2bb_map.get(biker.id)
+                if biker_bb is None:
+                    continue
                 if not (
                     0
-                    <= self.id2bb_map[biker.id]["visible_pixels"]
+                    <= biker_bb["visible_pixels"]
                     < self.config_expert.bikers_occlusion_check_min_visible_pixels
-                )
-            ]
+                ):
+                    bikers_filtered.append(biker)
+            bikers = bikers_filtered
         return bikers
 
     @step_cached_property
