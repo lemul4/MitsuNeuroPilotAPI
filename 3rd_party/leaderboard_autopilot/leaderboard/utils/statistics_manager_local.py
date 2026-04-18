@@ -67,6 +67,20 @@ ROUND_DIGITS = 3
 ROUND_DIGITS_SCORE = 6
 
 
+def _env_bool(name, default=True):
+    """Parse bool env var values like 1/0, true/false, yes/no, on/off."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    value = value.strip().lower()
+    if value in ('1', 'true', 'yes', 'y', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'n', 'off'):
+        return False
+    return default
+
+
 class RouteRecord():
     def __init__(self):
         self.timestamp = None
@@ -202,6 +216,8 @@ class StatisticsManager(object):
         self._results = Results()
         self._endpoint = endpoint
         self._debug_endpoint = debug_endpoint
+        # If False, min_speed_infractions are still logged but do not affect score_penalty.
+        self._use_min_speed_infractions_in_score = _env_bool('USE_MIN_SPEED_INFRACTIONS_IN_SCORE', True)
 
     def add_file_records(self, endpoint):
         """Reads a file and saves its records onto the statistics manager"""
@@ -376,6 +392,11 @@ class StatisticsManager(object):
 
                     # Traffic events that substract a varying amount of points
                     elif event.get_type() in PENALTY_PERC_DICT:
+                        if (event.get_type() == TrafficEventType.MIN_SPEED_INFRACTION
+                                and not self._use_min_speed_infractions_in_score):
+                            set_infraction_message()
+                            continue
+
                         score_penalty = set_score_penalty(score_penalty)
                         set_infraction_message()
 
