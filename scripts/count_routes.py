@@ -15,7 +15,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Count route XML files in data/data_routes")
     p.add_argument('--root', default=os.path.join('data', 'data_routes'), help='root folder to scan')
     p.add_argument('--ext', default='.xml', help='route file extension to count')
-    p.add_argument('--exclude', default='Town11,Town12,Town13,Town14,Town15',
+    p.add_argument('--exclude', default='Town13',
                    help='comma-separated town names to exclude (case-insensitive)')
     return p.parse_args()
 

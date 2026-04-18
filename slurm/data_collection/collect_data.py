@@ -594,7 +594,7 @@ def discover_routes(
         random.seed(42)
         random.shuffle(routes)
     # Exclude specific towns based on route XML metadata, not file path.
-    excluded_towns = {"town12", "town13", "town14", "town15"}
+    excluded_towns = {"town13",}
     excluded_by_town = 0
     filtered_by_town: list[str] = []
     for route in routes:
@@ -672,7 +672,7 @@ def arg_parse() -> argparse.Namespace:
     parser.add_argument(
         "--route_folder",
         type=str,
-        default="data/data_routes/lead",
+        default="data/data_routes/",
         help="Folder containing route files",
     )
     parser.add_argument(
@@ -729,7 +729,7 @@ if __name__ == "__main__":
     repetitions = 1
     repetition_start = 0
     shuffle_routes = True
-    max_route_per_scenario_type = 50  # -1 means no limit
+    max_route_per_scenario_type = 100  # -1 means no limit
 
     carla_root = (
         args.carla_root
@@ -746,8 +746,8 @@ if __name__ == "__main__":
     dataset_name = "carla_leaderboard2"
 
     # Keep existing scenario filtering behavior
-    scenario_white_lists = ["DynamicObjectCrossing", "VehicleTurningRoute", "ParkedObstacle", "Accident", "ConstructionObstacle", "ParkingExit", "RedLightWithoutLeadVehicle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss", "noScenarios", "SignalizedJunctionLeftTurn" ]
-    scenario_blacklist = ["YieldToEmergencyVehicle", ]
+    scenario_white_lists = ["DynamicObjectCrossing", "VehicleTurningRoute", "ParkedObstacle", "Accident", "ConstructionObstacle", "ParkingExit", "RedLightWithoutLeadVehicle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "VehicleTurningRoutePedestrian", "ParkingCutIn", "PedestrianCrossing", "StaticCutIn", "EnterActorFlow", "HardBreakRoute", "ConstructionObstacle", "VehicleTurningRoutePedestrian", "CrossingBicycleFlow", "ParkingCrossingPedestrian" ]
+    scenario_blacklist = ["YieldToEmergencyVehicle", "noScenarios", ]
 
     root_folder = Path(args.root_folder).expanduser()
     if not root_folder.is_absolute():
