@@ -96,6 +96,10 @@ While waiting for dependencies installation, we recommend setting up CARLA and d
 bash scripts/setup_carla.sh
 ```
 
+Move file [DefaultEngine.ini](DefaultEngine.ini) in your_carla_folder\CarlaUE4\Config
+
+Carla parameters: -quality-level=Epic -world-port=2000 -nosound -carla-streaming-port=2001
+
 ### 2.5. Configure Environment Variables (Conda)
 
 To avoid manual exports, set up `SCENARIO_RUNNER_ROOT` and `LEAD_PROJECT_ROOT` to load automatically whenever the `lead` environment is activated:
