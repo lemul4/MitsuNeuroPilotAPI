@@ -192,7 +192,7 @@ class BaseConfig:
         elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
             return {
                 1: {
-                    "pos": [0.360, -0.0225, 1.370],
+                    "pos": [0.900, -0.0675, 1.550],
                     "rot": [0.0, 0.0, 0.0],
                     "width": 384,
                     "height": 384,
@@ -200,7 +200,7 @@ class BaseConfig:
                     "fov": 90,
                 },
                 2: {
-                    "pos": [0.360, 0.0225, 1.370],
+                    "pos": [0.900, -0.0225, 1.550],
                     "rot": [0.0, 0.0, 0.0],
                     "width": 384,
                     "height": 384,
@@ -208,7 +208,7 @@ class BaseConfig:
                     "fov": 26.27,
                 },
                 3: {
-                    "pos": [0.360, 0.0675, 1.370],
+                    "pos": [0.900, 0.0675, 1.550],
                     "rot": [0.0, 0.0, 0.0],
                     "width": 384,
                     "height": 384,

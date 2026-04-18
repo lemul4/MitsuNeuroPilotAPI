@@ -206,3 +206,4 @@ visualization/
 /data/expert_debug
 *:Zone.Identifier
 telemetry_*
+*.txt

@@ -146,7 +146,7 @@ class RouteScenario(BasicScenario):
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.audi.a2',
+        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.mini.cooper_s_2021',
                                                           elevate_transform,
                                                           rolename='hero')
         if not ego_vehicle:
@@ -430,7 +430,7 @@ class RouteScenario(BasicScenario):
         criteria.add_child(InRouteTest(
             self.ego_vehicles[0], route=self.route, offroad_max=30, terminate_on_failure=True))
         criteria.add_child(ActorBlockedTest(
-            self.ego_vehicles[0], min_speed=0.1, max_time=90.0, terminate_on_failure=True, name="AgentBlockedTest")
+            self.ego_vehicles[0], min_speed=0.15, max_time=75.0, terminate_on_failure=True, name="AgentBlockedTest")
         )
 
         return criteria
