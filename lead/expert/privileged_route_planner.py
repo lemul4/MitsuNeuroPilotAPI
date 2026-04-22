@@ -303,6 +303,13 @@ class PrivilegedRoutePlanner:
                 the neighboring lane, while a value of 0.0 means the route will stay in the center of
                 the current lane.
         """
+        max_index = len(self.route_waypoints)
+        start_index = max(0, int(start_index))
+        end_index = min(max_index, int(end_index))
+
+        if start_index >= end_index:
+            return
+
         for idx in range(start_index, end_index):
             # Get the location of the left / right center lane
             if shift_to_left_lane:
@@ -517,10 +524,14 @@ class PrivilegedRoutePlanner:
         # Determine the shift direction
         shift_to_left_lane = True if obstacle_direction == "right" else False
 
+        route_len = len(self.route_waypoints)
+        shift_start_index = max(0, min(route_len, int(shift_start_index)))
+        shift_end_index = max(0, min(route_len, int(shift_end_index)))
+
         # Shift the route smoothly
         self.shift_route_smoothly(
-            int(shift_start_index),
-            int(shift_end_index),
+            shift_start_index,
+            shift_end_index,
             shift_to_left_lane,
             transition_length=transition_length,
             lane_transition_factor=lane_transition_factor,

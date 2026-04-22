@@ -351,6 +351,7 @@ class Expert(ExpertData):
                 if self.config_expert.datagen and actor_bb is None:
                     continue
                 num_visible_pixel = actor_bb["visible_pixels"] if actor_bb else -1
+                num_lidar_points = actor_bb["num_points"] if actor_bb else -1
                 actor_height = actor.bounding_box.extent.z
                 threshold = (
                     50
@@ -358,7 +359,13 @@ class Expert(ExpertData):
                     / ((384**2) * 3)
                     * (3 / self.config_expert.num_cameras)
                 )
-                if 0 < num_visible_pixel / (actor_height**2) < threshold:
+                has_insufficient_visible_pixels = (
+                    0 < num_visible_pixel / (actor_height**2) < threshold
+                )
+                has_insufficient_lidar_points = (
+                    0 <= num_lidar_points < self.config_expert.pedestrian_min_num_lidar_points
+                )
+                if has_insufficient_visible_pixels and has_insufficient_lidar_points:
                     continue
                 actor_velocity = actor.get_velocity().length()
                 if (
