@@ -202,6 +202,45 @@ def parse_single_carla_endpoint(endpoints_csv: str) -> CarlaEndpoint:
     return CarlaEndpoint(host=host, port=port, tm_port=tm_port)
 
 
+def resolve_carla_host() -> str:
+    carla_host = os.environ.get("CARLA_HOST", "").strip()
+    if not carla_host:
+        try:
+            proc = subprocess.run(
+                ["ip", "route"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("default "):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        carla_host = parts[2]
+                        break
+        except Exception:
+            pass
+
+    if not carla_host and os.path.exists("/etc/resolv.conf"):
+        try:
+            with open("/etc/resolv.conf", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("nameserver "):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            carla_host = parts[1]
+                            break
+        except Exception:
+            pass
+
+    carla_host = carla_host or "127.0.0.1"
+    os.environ["CARLA_HOST"] = carla_host
+    print(f"Using CARLA_HOST={carla_host}")
+    return carla_host
+
+
 def ensure_collection_dirs(data_save_root: str) -> None:
     os.makedirs(f"{data_save_root}/stderr", exist_ok=True)
     os.makedirs(f"{data_save_root}/stdout", exist_ok=True)
@@ -678,9 +717,11 @@ def arg_parse() -> argparse.Namespace:
     parser.add_argument(
         "--carla-endpoints",
         type=str,
-        # default="172.30.96.1:2000:8000",
-        default="172.17.192.1:2000:8000",
-        help="Exactly one CARLA endpoint in format host:rpc_port:tm_port",
+        default="",
+        help=(
+            "Exactly one CARLA endpoint in format host:rpc_port:tm_port. "
+            "If omitted, host is auto-detected and ports default to 2000:8000"
+        ),
     )
     parser.add_argument(
         "--carla_root",
@@ -738,7 +779,11 @@ if __name__ == "__main__":
         else os.path.join(code_root, "3rd_party/CARLA_0915")
     )
 
-    endpoint = parse_single_carla_endpoint(args.carla_endpoints)
+    if args.carla_endpoints.strip():
+        endpoint = parse_single_carla_endpoint(args.carla_endpoints)
+    else:
+        carla_host = resolve_carla_host()
+        endpoint = CarlaEndpoint(host=carla_host, port=2000, tm_port=8000)
 
     if os.environ.get("PY123D_DATA_FORMAT", "False").lower() == "true":
         agent = f"{code_root}/lead/expert/expert_py123d.py"
@@ -747,7 +792,7 @@ if __name__ == "__main__":
     dataset_name = "carla_leaderboard2"
 
     # Keep existing scenario filtering behavior
-    scenario_white_lists = ["DynamicObjectCrossing", "VehicleTurningRoute", "ParkedObstacle", "Accident", "ConstructionObstacle", "ParkingExit", "RedLightWithoutLeadVehicle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "VehicleTurningRoutePedestrian", "ParkingCutIn", "PedestrianCrossing", "StaticCutIn", "EnterActorFlow", "HardBreakRoute", "ConstructionObstacle", "VehicleTurningRoutePedestrian", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios" ]
+    scenario_white_lists = [ "ParkingCrossingPedestrian", ]
     scenario_blacklist = ["YieldToEmergencyVehicle", ]
 
     root_folder = Path(args.root_folder).expanduser()

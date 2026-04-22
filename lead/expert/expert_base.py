@@ -503,13 +503,27 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
                 "adversarial_actors"
             ]:
                 try:
+                    actor_bb = self.id2bb_map.get(adversarial_actor.id, {})
+                    actor_num_points = int(actor_bb.get("num_points", -1))
+                    visible_pixels_raw = actor_bb.get("visible_pixels")
+                    visible_pixels_available = visible_pixels_raw is not None
+                    actor_visible_pixels = (
+                        int(visible_pixels_raw) if visible_pixels_available else -1
+                    )
+
+                    # If visible pixels are unavailable (e.g., camera point cloud disabled),
+                    # use only LiDAR points to determine if the actor is too occluded.
+                    has_insufficient_observations = (
+                        actor_num_points < 10
+                        if not visible_pixels_available
+                        else (
+                            actor_visible_pixels < 10 and actor_num_points < 10
+                        )
+                    )
                     if (
                         not self.is_actor_inside_bev(adversarial_actor)
                         or adversarial_actor.get_velocity().length() < 0.1
-                        or (
-                            self.id2bb_map[adversarial_actor.id]["visible_pixels"] < 10
-                            and self.id2bb_map[adversarial_actor.id]["num_points"] < 10
-                        )
+                        or has_insufficient_observations
                     ):
                         continue
                     dangerous_adversarial_actors_ids.append(adversarial_actor.id)
@@ -1291,11 +1305,21 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
                 walker_bb = self.id2bb_map.get(walker.id)
                 if walker_bb is None:
                     continue
-                if not (
-                    0
-                    <= walker_bb["visible_pixels"]
-                    < self.config_expert.pedestrian_min_num_visible_pixels
-                ):
+                visible_pixels = int(walker_bb.get("visible_pixels", -1))
+                lidar_points = int(walker_bb.get("num_points", -1))
+
+                has_sufficient_visible_pixels = (
+                    visible_pixels
+                    >= self.config_expert.pedestrian_min_num_visible_pixels
+                )
+                has_sufficient_lidar_points = (
+                    lidar_points >= self.config_expert.pedestrian_min_num_lidar_points
+                )
+
+                # If camera point clouds are disabled (or skipped on non-save ticks),
+                # visible_pixels may be zero even when the walker is truly observable.
+                # Fall back to LiDAR evidence so pedestrians are not dropped from planning.
+                if has_sufficient_visible_pixels or has_sufficient_lidar_points:
                     walkers_filtered.append(walker)
             walkers = walkers_filtered
         return walkers
@@ -1323,11 +1347,18 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
                 biker_bb = self.id2bb_map.get(biker.id)
                 if biker_bb is None:
                     continue
-                if not (
-                    0
-                    <= biker_bb["visible_pixels"]
-                    < self.config_expert.bikers_occlusion_check_min_visible_pixels
-                ):
+                visible_pixels = int(biker_bb.get("visible_pixels", -1))
+                lidar_points = int(biker_bb.get("num_points", -1))
+
+                has_sufficient_visible_pixels = (
+                    visible_pixels
+                    >= self.config_expert.bikers_occlusion_check_min_visible_pixels
+                )
+                has_sufficient_lidar_points = (
+                    lidar_points >= self.config_expert.pedestrian_min_num_lidar_points
+                )
+
+                if has_sufficient_visible_pixels or has_sufficient_lidar_points:
                     bikers_filtered.append(biker)
             bikers = bikers_filtered
         return bikers
