@@ -552,7 +552,8 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
                         color, blueprint.id, default_color))
                     blueprint.set_attribute('color', default_color)
         else:
-            if blueprint.has_attribute('color') and rolename != 'hero':
+            # Randomize color for actors that support it (including the hero/ego vehicle)
+            if blueprint.has_attribute('color'):
                 color = CarlaDataProvider._rng.choice(blueprint.get_attribute('color').recommended_values)
                 blueprint.set_attribute('color', color)
 

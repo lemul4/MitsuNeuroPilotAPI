@@ -8,7 +8,7 @@ from pygame.locals import *
 # --- Конфигурация ---
 HOST = '172.30.96.1' # Поменяйте на свой IP если нужно (172.24.80.1)
 PORT = 2000
-VEHICLE_FILTER = 'vehicle.mini.cooper_s_2021'
+VEHICLE_FILTER = 'vehicle.tesla.model3'
 
 # Конфигурация камер из BaseConfig.CARLA_LEADERBOARD2_ONLY3CAMERAS
 CAM_CONFIGS = [
