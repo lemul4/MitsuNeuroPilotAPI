@@ -771,7 +771,7 @@ if __name__ == "__main__":
     repetitions = 1
     repetition_start = 0
     shuffle_routes = True
-    max_route_per_scenario_type = 100  # -1 means no limit
+    max_route_per_scenario_type = 400  # -1 means no limit
 
     carla_root = (
         args.carla_root
@@ -792,7 +792,8 @@ if __name__ == "__main__":
     dataset_name = "carla_leaderboard2"
 
     # Keep existing scenario filtering behavior
-    scenario_white_lists = [ "ParkingCrossingPedestrian", ]
+    # scenario_white_lists = ["DynamicObjectCrossing", "VehicleTurningRoute", "ParkedObstacle", "Accident", "ConstructionObstacle", "ParkingExit", "RedLightWithoutLeadVehicle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "VehicleTurningRoutePedestrian", "ParkingCutIn", "PedestrianCrossing", "StaticCutIn", "HardBreakRoute", "ConstructionObstacle", "VehicleTurningRoutePedestrian", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios" ]
+    scenario_white_lists = ["DynamicObjectCrossing", "ParkingExit", "noScenarios", "ParkingCrossingPedestrian", "BlockedIntersection"]
     scenario_blacklist = ["YieldToEmergencyVehicle", ]
 
     root_folder = Path(args.root_folder).expanduser()

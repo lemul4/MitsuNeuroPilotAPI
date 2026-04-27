@@ -425,7 +425,7 @@ class ExpertConfig(BaseConfig):
     # IDM additional distance for Europe red lights in older towns
     idm_europe_red_light_minimum_distance = 6.0
     # IDM minimum distance for pedestrians
-    idm_pedestrian_minimum_distance = 4.5
+    idm_pedestrian_minimum_distance = 4.0
     # IDM desired time headway for pedestrians
     idm_pedestrian_desired_time_headway = 0.125
     # IDM minimum distance for bicycles
@@ -465,9 +465,9 @@ class ExpertConfig(BaseConfig):
     # Threshold to decide, when which bbs increase factor is used
     extent_ego_bbs_speed_threshold = 5
     # Forecast length in seconds when current route command is LEFT/RIGHT/STRAIGHT
-    forecast_length_crossroad = 3.0
+    forecast_length_crossroad = 2.0
     # Forecast length in seconds when near a lane change
-    forecast_length_lane_change = 3.0
+    forecast_length_lane_change = 2.0
     # Forecast length in seconds when not near a lane change
     default_forecast_length = 2.0
     # Factor to increase the ego vehicles bbs during forecasting when speed < extent_ego_bbs_speed_threshold
