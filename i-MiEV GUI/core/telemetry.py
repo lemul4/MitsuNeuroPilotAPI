@@ -48,6 +48,38 @@ class RawTelemetryJsonlReader:
             return None
         except OSError:
             return None
+    import json
+import os
+
+class RawTelemetryJsonlReader:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.last_pos = 0
+
+    def get_latest_data(self):
+        """Читает последнюю добавленную строку из jsonl файла"""
+        if not os.path.exists(self.file_path):
+            return None
+        
+        try:
+            with open(self.file_path, 'r') as f:
+                # Переходим к позиции, на которой закончили в прошлый раз
+                f.seek(self.last_pos)
+                lines = f.readlines()
+                if not lines:
+                    return None
+                
+                # Обновляем позицию для следующего чтения
+                self.last_pos = f.tell()
+                
+                # Берем самую свежую строку (последнюю)
+                last_line = lines[-1].strip()
+                if last_line:
+                    return json.loads(last_line)
+        except Exception as e:
+            print(f"[Reader Error]: {e}")
+            return None
+        return None
 
     def poll(self) -> list[dict]:
         """Read only newly appended complete JSON lines.
