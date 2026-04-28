@@ -12,6 +12,8 @@ from hardware.serial_comm import SerialManager
 import utils 
 from core.telemetry import TelemetryRecorder, RawTelemetryJsonlReader
 from lead_integration import LeadAgentThread
+from PySide6.QtGui import QPixmap
+
 
 class AppController(QObject):
     def __init__(self, view: MainWindow):
@@ -36,7 +38,8 @@ class AppController(QObject):
 
         self.physics_timer = QTimer()
         self.physics_timer.timeout.connect(self.step_virtual_physics)
-
+        self.raw_telemetry_timer = QTimer()
+        self.raw_telemetry_timer.timeout.connect(self.poll_ai_telemetry)
         self.view.connect_requested.connect(self.handle_connect)
         self.view.disconnect_requested.connect(self.handle_disconnect)
         self.view.control_toggled.connect(self.handle_control_toggle)
@@ -47,8 +50,9 @@ class AppController(QObject):
         
         self.serial.connection_status.connect(self.view.set_connection_status)
         self.serial.data_received.connect(self.handle_can_packet)
-        
+        self.latest_frame_path = os.path.join("outputs", "visualizations", "latest_front_cam.png")
         self.init_commands()
+
 
     def init_commands(self):
         self.cmd_gear = utils.Serial_Data(bytearray.fromhex("AA 00000000 3300 00 02 01 00 00 00 01 00 00"))
@@ -161,6 +165,12 @@ class AppController(QObject):
             self.vehicle.target_angle = target_angle
             self.vehicle.target_accel = target_accel
             self.vehicle.target_brake = target_brake
+            if os.path.exists(self.latest_frame_path):
+                try:
+                    pixmap = QPixmap(self.latest_frame_path)
+                    self.view.update_camera_frame(pixmap)
+                except Exception as e:
+                    print(f"Ошибка загрузки кадра камеры: {e}")
 
             # Если управление активно, отправляем в CAN
             if self.control_active:
@@ -227,7 +237,7 @@ class AppController(QObject):
             self.vehicle.accel = data[0]
         elif can_id == 0x0004:
             self.vehicle.gear = data[0]
-        self.view.update_can_table(hex(can_id), data)
+        # self.view.update_can_table(hex(can_id), data)
         self.telemetry.log(self.vehicle.speed, self.vehicle.angle, 
                            self.vehicle.accel, self.vehicle.brake, self.vehicle.gear)
 

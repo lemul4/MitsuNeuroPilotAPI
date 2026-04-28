@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, QEvent
 from datetime import datetime
 import pyqtgraph as pg
-
+from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, Signal 
 # Импортируем кастомный виджет руля (предполагается, что он в ui/widgets.py)
 # Если вы не выносили его в отдельный файл, просто вставьте класс SteeringWidget сюда
 from ui.widgets import SteeringWidget 
@@ -29,7 +30,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("i-MiEV Auto Control [MVC Refactored]")
+        self.setWindowTitle("MitsuNeuroPilot GUI")
         self.resize(1200, 800)
 
         # Локальные переменные для перехвата клавиатуры
@@ -150,13 +151,12 @@ class MainWindow(QMainWindow):
         gb_extra.setLayout(v_extra)
         mid_col.addWidget(gb_extra)
 
-        self.table_can = QTableWidget()
-        self.table_can.setColumnCount(3)
-        self.table_can.setHorizontalHeaderLabels(["ID", "Data", "Time"])
-        self.table_can.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        mid_col.addWidget(QLabel("CAN Monitor:"))
-        mid_col.addWidget(self.table_can)
-
+        self.camera_view = QLabel("Ожидание видеопотока...")
+        self.camera_view.setAlignment(Qt.AlignCenter)
+        self.camera_view.setMinimumSize(640, 360) # Базовое разрешение 16:9
+        self.camera_view.setStyleSheet("background-color: black; color: white;")
+        self.camera_view.setScaledContents(False)
+        mid_col.addWidget(self.camera_view)
         main_layout.addLayout(mid_col, stretch=1)
 
         # ================= ПРАВАЯ КОЛОНКА (Графики) =================
@@ -172,12 +172,23 @@ class MainWindow(QMainWindow):
         # Защита фокуса клавиатуры (чтобы стрелки работали всегда)
         for widget in [self.combo_ports, self.btn_connect, self.btn_control, 
                        self.spin_kp, self.spin_ki, self.spin_kd, 
-                       self.chk_telemetry, self.chk_ai, self.table_can]:
+                       self.chk_telemetry, self.chk_ai]:
             widget.setFocusPolicy(Qt.NoFocus)
             
         self.setFocusPolicy(Qt.StrongFocus)
         self.setFocus()
-
+    def update_camera_frame(self, pixmap: QPixmap):
+            """
+            Обновляет QLabel новым кадром с камеры автомобиля.
+            Масштабирует изображение с сохранением пропорций под текущий размер виджета.
+            """
+            if not pixmap.isNull():
+                scaled_pixmap = pixmap.scaled(
+                    self.camera_view.size(), 
+                    Qt.KeepAspectRatio, 
+                    Qt.SmoothTransformation
+                )
+                self.camera_view.setPixmap(scaled_pixmap)
     def _create_pid_spinbox(self):
         spin = QDoubleSpinBox()
         spin.setRange(0, 100)
