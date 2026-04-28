@@ -1557,6 +1557,18 @@ def visualize_feature_maps(
 
     plt.tight_layout()
 
+    if save_image:
+        # Создаем абсолютный путь в корне проекта для GUI
+        # Мы берем путь от LEAD_PROJECT_ROOT, который мы передали в env
+        root = os.environ.get("LEAD_PROJECT_ROOT", os.getcwd())
+        bridge_path = os.path.join(root, "gui_bridge_frame.png")
+        
+        try:
+            plt.savefig(bridge_path, dpi=100) # Меньше DPI для скорости
+            print(f"DEBUG: Saved frame to {bridge_path}") # Раскомментируйте для отладки
+        except Exception as e:
+            print(f"CRITICAL: Visualizer failed to save: {e}")
+
     # Save the figure to disk if needed
     if save_image:
         out_path = f"{save_path}/{prefix}_bev_{postfix}.png"
