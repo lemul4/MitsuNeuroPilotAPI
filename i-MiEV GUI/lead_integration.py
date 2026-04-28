@@ -3,12 +3,12 @@ import signal
 import subprocess
 import sys
 
-# МЕНЯЕМ НА PYSIDE6
+# Используем PySide6 для работы с потоками и сигналами
 from PySide6.QtCore import QThread, Signal
 
 
 class LeadAgentThread(QThread):
-    # В PySide6 используется Signal вместо pyqtSignal
+    # Сигналы для связи с основным интерфейсом
     log_received = Signal(str)
     status_changed = Signal(str)
     error_occurred = Signal(str)
@@ -17,13 +17,16 @@ class LeadAgentThread(QThread):
         super().__init__()
         self.config = config
         self.process = None
+        self.cam_service_process = None  # Процесс для ZMQ-стриминга камеры
         self._is_running = False
 
     def run(self):
+        self.stop_subprocesses() 
+        
         self._is_running = True
         self.status_changed.emit("Starting Autopilot...")
 
-        # 1. Определяем реальный корень проекта (MitsuNeuroPilotAPI)
+        # 1. Определяем корневую директорию проекта (MitsuNeuroPilotAPI)
         current_dir = os.path.normpath(self.config.get("project_root", os.getcwd()))
         if "i-MiEV GUI" in current_dir:
             project_root = os.path.dirname(current_dir)
@@ -51,55 +54,43 @@ class LeadAgentThread(QThread):
         env["LEAD_TELEMETRY_FILE"] = telemetry_file
         env["LEAD_EXPERT_MODE"] = "true" if expert_mode else "false"
 
-        # 3. Собираем PYTHONPATH строго по папкам из твоего 3rd_party
-        # Мы добавляем саму папку 3rd_party и прямые пути к важным модулям
+        # 3. Настройка PYTHONPATH
         third_party = os.path.join(project_root, "3rd_party")
-
         carla_api_path = os.path.normpath(
             os.path.join(third_party, "CARLA_0915", "PythonAPI", "carla")
         )
 
-        # Добавляем все ключевые папки со скриншота
         python_paths = [
             project_root,
             site_packages,
             carla_api_path,
-            os.path.join(third_party, "leaderboard"),  # Новая папка со скрина
+            os.path.join(third_party, "leaderboard"),
             os.path.join(third_party, "leaderboard_autopilot"),
             os.path.join(third_party, "scenario_runner"),
             os.path.join(third_party, "scenario_runner_autopilot"),
         ]
-
         env["PYTHONPATH"] = os.pathsep.join(python_paths)
 
-        # Выводим в консоль для проверки, что пути ведут в MitsuNeuroPilotAPI, а не в GUI
-        print(f"[DEBUG] Final PYTHONPATH: {env['PYTHONPATH']}")
-
-        # 4. Пути к исполняемым файлам
+        # 4. Исполняемый файл Python
         venv_python = os.path.join(project_root, "venv", "Scripts", "python.exe")
         python_exe = venv_python if os.path.exists(venv_python) else sys.executable
 
-        # Файл обертки лежит в MitsuNeuroPilotAPI/lead/
+        # 5. Команда запуска агента
         wrapper_path = os.path.join(project_root, "lead", "leaderboard_wrapper.py")
         cmd = [python_exe, "-u", wrapper_path]
+        
         if expert_mode:
             cmd.append("--expert")
         else:
             cmd.extend(["--checkpoint", str(self.config.get("checkpoint_path", ""))])
 
-        cmd.extend(
-            [
-                "--routes",
-                str(self.config.get("routes")),
-                "--host",
-                str(self.config.get("host", "localhost")),
-            ]
-        )
-        print(f"[DEBUG] LEAD_PROJECT_ROOT: {env['LEAD_PROJECT_ROOT']}")
-        print(f"[DEBUG] LEAD_EXPERT_MODE: {env['LEAD_EXPERT_MODE']}")
-        print(f"[DEBUG] LEAD_TELEMETRY_FILE: {env['LEAD_TELEMETRY_FILE']}")
+        cmd.extend([
+            "--routes", str(self.config.get("routes")),
+            "--host", str(self.config.get("host", "localhost")),
+        ])
 
         try:
+            # --- ЗАПУСК 1: Основной агент CARLA ---
             self.process = subprocess.Popen(
                 cmd,
                 cwd=project_root,
@@ -109,15 +100,29 @@ class LeadAgentThread(QThread):
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                # CREATE_NEW_PROCESS_GROUP критичен для корректного stop() в Windows
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                if os.name == "nt"
-                else 0,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
+
+            # --- ЗАПУСК 2: Сервис камеры ---
+            # Исправленный путь: ищем внутри 'i-MiEV GUI/hardware/'
+            cam_script = os.path.join(project_root, "i-MiEV GUI", "hardware", "camera_service.py")
+            
+            try:
+                if os.path.exists(cam_script):
+                    self.cam_service_process = subprocess.Popen(
+                        [python_exe, cam_script],
+                        cwd=project_root,
+                        env=env
+                    )
+                    print(f"[DEBUG] Camera Service started (PID: {self.cam_service_process.pid})")
+                else:
+                    print(f"[DEBUG] Camera service script NOT FOUND at: {cam_script}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to start Camera Service: {e}")
 
             self.status_changed.emit("Autopilot: ACTIVE")
 
-            # Читаем лог построчно
+            # 6. Цикл чтения логов
             while self._is_running and self.process.poll() is None:
                 line = self.process.stdout.readline()
                 if line:
@@ -125,32 +130,35 @@ class LeadAgentThread(QThread):
                 elif not line and self.process.poll() is not None:
                     break
 
-            # Если вышли из цикла, проверяем код завершения
-            if self.process:
-                returncode = self.process.poll()
-                if returncode is not None and returncode != 0 and self._is_running:
-                    # Код 3221225786 часто означает принудительное закрытие пользователем
-                    if returncode != 3221225786:
-                        self.error_occurred.emit(
-                            f"Process exited with code {returncode}"
-                        )
-
         except Exception as e:
             self.error_occurred.emit(f"Failed to start agent: {str(e)}")
         finally:
+            self.stop_subprocesses()
             self._is_running = False
             self.status_changed.emit("Autopilot: IDLE")
 
-    def stop(self):
-        self._is_running = False
+    def stop_subprocesses(self):
+        if self.cam_service_process:
+            print("[DEBUG] Terminating Camera Service...")
+            self.cam_service_process.terminate()
+            try:
+                self.cam_service_process.wait(timeout=2)
+            except:
+                self.cam_service_process.kill()
+            self.cam_service_process = None
+
         if self.process:
-            # В Windows для остановки группы процессов используем CTRL_BREAK_EVENT
+            print("[DEBUG] Stopping Lead Agent...")
             if os.name == "nt":
                 self.process.send_signal(signal.CTRL_BREAK_EVENT)
             else:
                 self.process.send_signal(signal.SIGINT)
-
             try:
                 self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
+            except:
                 self.process.kill()
+            self.process = None
+
+    def stop(self):
+        self._is_running = False
+        self.stop_subprocesses()

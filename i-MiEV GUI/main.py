@@ -3,7 +3,7 @@ import asyncio
 import qasync
 import os
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer, QObject, Slot
+from PySide6.QtCore import QTimer, QObject, Slot, QThread, Signal 
 from datetime import datetime
 from config import PHYSICS_UPDATE_RATE_MS
 from ui.main_window import MainWindow
@@ -12,14 +12,67 @@ from hardware.serial_comm import SerialManager
 import utils 
 from core.telemetry import TelemetryRecorder, RawTelemetryJsonlReader
 from lead_integration import LeadAgentThread
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QImage
 
+import zmq 
+
+
+class VideoReceiverThread(QThread):
+    frame_received = Signal(QPixmap)
+
+    def __init__(self):
+        super().__init__()
+        self.is_running = True
+        self.received_count = 0
+
+    def run(self):
+        print("[GUI_VIDEO_THREAD] Запуск потока приема видео...")
+        context = zmq.Context()
+        socket = context.socket(zmq.SUB)
+        
+        # Важно: используем адрес отправителя
+        try:
+            socket.connect("tcp://127.0.0.1:5555")
+            socket.setsockopt_string(zmq.SUBSCRIBE, "")
+            print("[GUI_VIDEO_THREAD] Подключено к сокету 127.0.0.1:5555")
+        except Exception as e:
+            print(f"[GUI_VIDEO_THREAD] Ошибка подключения к сокету: {e}")
+            return
+
+        while self.is_running:
+            # Проверяем наличие данных (таймаут 500мс)
+            if socket.poll(500):
+                try:
+                    msg = socket.recv()
+                    self.received_count += 1
+                    
+                    # Логируем каждые 50 полученных кадров
+                    if self.received_count % 50 == 0:
+                        print(f"[GUI_VIDEO_THREAD] Принято кадров от сервиса: {self.received_count}")
+
+                    image = QImage.fromData(msg, "JPG")
+                    if not image.isNull():
+                        pixmap = QPixmap.fromImage(image)
+                        self.frame_received.emit(pixmap)
+                    else:
+                        print("[GUI_VIDEO_THREAD] Ошибка: Получены битые данные (не удалось собрать QImage)")
+                except Exception as e:
+                    print(f"[GUI_VIDEO_THREAD] Ошибка при чтении сообщения: {e}")
+            else:
+                # Если данных нет долгое время
+                pass 
+
+    def stop(self):
+        self.is_running = False
+        self.wait()
 
 class AppController(QObject):
     def __init__(self, view: MainWindow):
         super().__init__()
         self.view = view
-        
+        self.video_receiver = VideoReceiverThread()
+        self.video_receiver.frame_received.connect(self.view.update_camera_frame)
+        self.video_receiver.start()
         self.vehicle = VehicleState()
         self.serial = SerialManager()
         self.telemetry = TelemetryRecorder()
