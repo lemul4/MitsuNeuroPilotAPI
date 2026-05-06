@@ -267,9 +267,24 @@ class AppController(QObject):
             print(f"[{timestamp}] {log_line}")  
 
             # Обновляем состояние модели
+            # Обновляем состояние модели
             self.vehicle.target_angle = target_angle
             self.vehicle.target_accel = target_accel
             self.vehicle.target_brake = target_brake
+
+            # Агент не переключает передачи. Для AI-сценария держим локальную модель в D.
+            if hasattr(self.vehicle, "force_drive_gear"):
+                self.vehicle.force_drive_gear()
+            else:
+                self.vehicle.target_gear = 4
+                self.vehicle.gear = 4
+
+            # Если trace_log.jsonl содержит реальную скорость CARLA, используем ее.
+            # Если скорости нет, обновляем fallback-физику.
+            if hasattr(self.vehicle, "apply_telemetry") and self.vehicle.apply_telemetry(data):
+                pass
+            else:
+                self.vehicle.update_physics(dt=0.05)
             if os.path.exists(self.latest_frame_path):
                 try:
                     pixmap = QPixmap(self.latest_frame_path)
