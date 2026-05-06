@@ -3,21 +3,42 @@ import cv2
 import zmq
 import numpy as np
 import time
+import threading
+
 
 class CarlaCameraService:
-    def __init__(self, host='127.0.0.1', port=2000, zmq_port=5555):
-        # 1. Сохраняем параметры подключения (ВАЖНО!)
+    """
+    Публикует видеопоток через тот же ZMQ PUB-протокол, что и старая версия:
+    socket.send(<jpg bytes>)
+
+    Отличие:
+    - ищет ego-машину по role_name hero / ego_vehicle / ego / player;
+    - логирует найденные камеры, уже прикрепленные к машине;
+    - создает 3 отдельные viewer-only RGB-камеры для GUI;
+    - склеивает 3 кадра в один JPEG-мозаичный кадр:
+        верх: FRONT
+        низ:  LEFT / RIGHT
+
+    Поэтому существующий VideoReceiver, который принимает один JPEG, менять не нужно.
+    """
+
+    def __init__(self, host="127.0.0.1", port=2000, zmq_port=5555):
         self.host = host
         self.port = port
-        self.camera = None
+        self.camera = None          # оставлено для совместимости
+        self.cameras = {}
         self.frame_count = 0
-        
-        print(f"[CAMERA_SERVICE] Инициализация ZMQ...")
+
+        self._latest_frames = {}
+        self._frame_lock = threading.Lock()
+        self._last_send_ts = 0.0
+        self._send_interval = 1.0 / 20.0  # максимум 20 FPS в GUI
+
+        print("[CAMERA_SERVICE] Инициализация ZMQ...")
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.PUB)
         self.socket.setsockopt(zmq.LINGER, 0)
-        
-        # 2. Попытки занять порт
+
         bound = False
         for i in range(5):
             try:
@@ -26,91 +47,270 @@ class CarlaCameraService:
                 bound = True
                 break
             except zmq.error.ZMQError:
-                print(f"[CAMERA_SERVICE] Порт {zmq_port} занят, повтор {i+1}/5...")
+                print(f"[CAMERA_SERVICE] Порт {zmq_port} занят, повтор {i + 1}/5...")
                 time.sleep(1)
-        
+
         if not bound:
             raise RuntimeError(f"Не удалось занять порт {zmq_port}")
 
-    def _process_image(self, image):
-        try:
-            # Превращаем в массив
-            array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-            array = np.reshape(array, (image.height, image.width, 4))
-            rgb_frame = array[:, :, :3]
-            
-            # Сжимаем
-            _, buffer = cv2.imencode('.jpg', rgb_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            
-            # Отправляем
-            self.socket.send(buffer.tobytes())
-            self.frame_count += 1
-            
-            if self.frame_count % 100 == 0:
-                print(f"[CAMERA_SERVICE] Отправлено кадров: {self.frame_count}")
-        except Exception as e:
-            print(f"[CAMERA_SERVICE] Ошибка обработки кадра: {e}")
-
-    def start_streaming(self):
-        # 1. Попытки подключения к серверу CARLA
+    def _connect_to_carla(self):
         print(f"[CAMERA_SERVICE] Подключение к CARLA {self.host}:{self.port}...")
-        connected = False
-        for i in range(20): # 10 попыток подключения
+        for i in range(20):
             try:
                 self.client = carla.Client(self.host, self.port)
-                self.client.set_timeout(5.0) # Маленький таймаут для быстрой проверки
+                self.client.set_timeout(5.0)
                 self.world = self.client.get_world()
-                connected = True
                 print("[CAMERA_SERVICE] Соединение с CARLA установлено.")
-                break
-            except Exception:
-                print(f"[CAMERA_SERVICE] Сервер CARLA не отвечает, попытка {i+1}/10...")
+                return True
+            except Exception as exc:
+                print(f"[CAMERA_SERVICE] Сервер CARLA не отвечает, попытка {i + 1}/20: {exc}")
                 time.sleep(2)
 
-        if not connected:
-            print("[CAMERA_SERVICE] КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к CARLA.")
+        print("[CAMERA_SERVICE] КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к CARLA.")
+        return False
+
+    def _find_vehicle(self, max_attempts=180, sleep_sec=2):
+        preferred_roles = {"hero", "ego_vehicle", "ego", "player"}
+
+        self.client.set_timeout(60.0)
+
+        for i in range(max_attempts):
+            # Важно перечитывать world. ScenarioRunner/Leaderboard может перезагрузить карту.
+            self.world = self.client.get_world()
+
+            vehicles = list(self.world.get_actors().filter("vehicle.*"))
+            print(
+                f"[CAMERA_SERVICE] Поиск авто {i + 1}/{max_attempts}: "
+                f"map={self.world.get_map().name}, vehicles={len(vehicles)}"
+            )
+
+            for v in vehicles:
+                role = v.attributes.get("role_name", "")
+                loc = v.get_location()
+                print(
+                    f"[CAMERA_SERVICE]   vehicle id={v.id}, type={v.type_id}, "
+                    f"role={role or '-'}, loc=({loc.x:.1f}, {loc.y:.1f}, {loc.z:.1f})"
+                )
+
+            for v in vehicles:
+                role = v.attributes.get("role_name", "")
+                if role in preferred_roles:
+                    print(
+                        f"[CAMERA_SERVICE] Успешно прицепились к: "
+                        f"id={v.id}, type={v.type_id}, role={role}"
+                    )
+                    return v
+
+            if len(vehicles) == 1:
+                v = vehicles[0]
+                role = v.attributes.get("role_name", "")
+                print(
+                    f"[CAMERA_SERVICE] Успешно прицепились к единственному авто: "
+                    f"id={v.id}, type={v.type_id}, role={role or '-'}"
+                )
+                return v
+
+            time.sleep(sleep_sec)
+
+        return None
+
+    def _log_existing_attached_cameras(self, vehicle):
+        actors = self.world.get_actors()
+        attached_cameras = []
+
+        for actor in actors:
+            if not actor.type_id.startswith("sensor.camera."):
+                continue
+
+            parent = getattr(actor, "parent", None)
+            if parent is not None and parent.id == vehicle.id:
+                attached_cameras.append(actor)
+
+        if not attached_cameras:
+            print("[CAMERA_SERVICE] Штатные камеры на ego-авто не найдены.")
             return
 
-        # 2. Ожидание появления автомобиля (hero)
+        print(f"[CAMERA_SERVICE] Найдены штатные камеры на ego-авто: {len(attached_cameras)}")
+        for cam in attached_cameras:
+            role = cam.attributes.get("role_name", "")
+            attrs = {
+                "image_size_x": cam.attributes.get("image_size_x", "-"),
+                "image_size_y": cam.attributes.get("image_size_y", "-"),
+                "fov": cam.attributes.get("fov", "-"),
+                "sensor_tick": cam.attributes.get("sensor_tick", "-"),
+            }
+            print(
+                f"[CAMERA_SERVICE]   existing camera id={cam.id}, type={cam.type_id}, "
+                f"role={role or '-'}, attrs={attrs}"
+            )
+
+    def _make_camera_blueprint(self, name, width=800, height=450):
+        blueprint = self.world.get_blueprint_library().find("sensor.camera.rgb")
+        blueprint.set_attribute("image_size_x", str(width))
+        blueprint.set_attribute("image_size_y", str(height))
+        blueprint.set_attribute("sensor_tick", "0.05")
+        blueprint.set_attribute("fov", "90")
+
+        # Чтобы в actor-watch было видно, что это GUI-камеры.
+        if blueprint.has_attribute("role_name"):
+            blueprint.set_attribute("role_name", f"gui_{name}")
+
+        return blueprint
+
+    def _spawn_gui_cameras(self, vehicle):
+        # left/right yaw можно поменять местами, если в твоем мире стороны окажутся инвертированы.
+        specs = {
+            "front": {
+                "transform": carla.Transform(
+                    carla.Location(x=1.6, y=0.0, z=1.7),
+                    carla.Rotation(pitch=-6.0, yaw=0.0, roll=0.0),
+                ),
+            },
+            "left": {
+                "transform": carla.Transform(
+                    carla.Location(x=1.2, y=-0.45, z=1.55),
+                    carla.Rotation(pitch=-6.0, yaw=-55.0, roll=0.0),
+                ),
+            },
+            "right": {
+                "transform": carla.Transform(
+                    carla.Location(x=1.2, y=0.45, z=1.55),
+                    carla.Rotation(pitch=-6.0, yaw=55.0, roll=0.0),
+                ),
+            },
+        }
+
+        for name, spec in specs.items():
+            bp = self._make_camera_blueprint(name)
+            camera = self.world.spawn_actor(bp, spec["transform"], attach_to=vehicle)
+            camera.listen(lambda image, camera_name=name: self._process_image(camera_name, image))
+            self.cameras[name] = camera
+            print(f"[CAMERA_SERVICE] GUI camera '{name}' запущена: id={camera.id}")
+
+        # Совместимость со старым кодом, где ожидалась self.camera.
+        self.camera = self.cameras.get("front")
+
+    @staticmethod
+    def _carla_image_to_bgr(image):
+        array = np.frombuffer(image.raw_data, dtype=np.uint8)
+        array = np.reshape(array, (image.height, image.width, 4))
+        bgr = array[:, :, :3]
+        return np.ascontiguousarray(bgr)
+
+    @staticmethod
+    def _put_label(frame, text):
+        cv2.rectangle(frame, (0, 0), (210, 34), (0, 0, 0), -1)
+        cv2.putText(
+            frame,
+            text,
+            (12, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        return frame
+
+    def _compose_three_camera_frame(self):
+        front = self._latest_frames.get("front")
+        left = self._latest_frames.get("left")
+        right = self._latest_frames.get("right")
+
+        if front is None and left is None and right is None:
+            return None
+
+        placeholder = np.zeros((450, 800, 3), dtype=np.uint8)
+        if front is None:
+            front = placeholder.copy()
+            self._put_label(front, "FRONT: waiting")
+        if left is None:
+            left = placeholder.copy()
+            self._put_label(left, "LEFT: waiting")
+        if right is None:
+            right = placeholder.copy()
+            self._put_label(right, "RIGHT: waiting")
+
+        front = cv2.resize(front, (1280, 450), interpolation=cv2.INTER_AREA)
+        left = cv2.resize(left, (640, 270), interpolation=cv2.INTER_AREA)
+        right = cv2.resize(right, (640, 270), interpolation=cv2.INTER_AREA)
+
+        self._put_label(front, "FRONT")
+        self._put_label(left, "LEFT")
+        self._put_label(right, "RIGHT")
+
+        bottom = np.hstack([left, right])
+        mosaic = np.vstack([front, bottom])
+        return mosaic
+
+    def _process_image(self, camera_name, image):
         try:
-            self.client.set_timeout(60.0) # Увеличиваем таймаут для работы с миром
-            vehicle = None
-            for i in range(180):
-                vehicles = self.world.get_actors().filter('vehicle.*')
-                for v in vehicles:
-                    role = v.attributes.get('role_name', '')
-                    if role in ['hero', 'ego_vehicle'] or len(vehicles) == 1:
-                        vehicle = v
-                        break
-                if vehicle: break
-                print(f"[CAMERA_SERVICE] Ожидание авто... (попытка {i+1}/180)")
-                time.sleep(2)
+            frame = self._carla_image_to_bgr(image)
+
+            with self._frame_lock:
+                self._latest_frames[camera_name] = frame
+
+                now = time.monotonic()
+                if now - self._last_send_ts < self._send_interval:
+                    return
+                self._last_send_ts = now
+
+                mosaic = self._compose_three_camera_frame()
+
+            if mosaic is None:
+                return
+
+            ok, buffer = cv2.imencode(".jpg", mosaic, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ok:
+                print("[CAMERA_SERVICE] Ошибка JPEG-кодирования мозаики.")
+                return
+
+            self.socket.send(buffer.tobytes())
+            self.frame_count += 1
+
+            if self.frame_count % 100 == 0:
+                print(f"[CAMERA_SERVICE] Отправлено кадров: {self.frame_count}")
+
+        except Exception as exc:
+            print(f"[CAMERA_SERVICE] Ошибка обработки кадра {camera_name}: {exc}")
+
+    def start_streaming(self):
+        if not self._connect_to_carla():
+            return
+
+        try:
+            vehicle = self._find_vehicle(max_attempts=180, sleep_sec=2)
 
             if not vehicle:
                 print("[CAMERA_SERVICE] ОШИБКА: Автомобиль не найден.")
                 return
 
-            print(f"[CAMERA_SERVICE] Успешно прицепились к: {vehicle.type_id}")
+            self._log_existing_attached_cameras(vehicle)
+            self._spawn_gui_cameras(vehicle)
+            print("[CAMERA_SERVICE] Трехкамерный поток видео запущен!")
 
-            # Настройка камеры
-            blueprint = self.world.get_blueprint_library().find('sensor.camera.rgb')
-            blueprint.set_attribute('image_size_x', '800')
-            blueprint.set_attribute('image_size_y', '450')
-            blueprint.set_attribute('sensor_tick', '0.05')
-
-            spawn_point = carla.Transform(carla.Location(x=1.6, z=1.7))
-            self.camera = self.world.spawn_actor(blueprint, spawn_point, attach_to=vehicle)
-            self.camera.listen(lambda data: self._process_image(data))
-            print("[CAMERA_SERVICE] Поток видео запущен!")
-
-        except Exception as e:
-            print(f"[CAMERA_SERVICE] Ошибка в start_streaming: {e}")
+        except Exception as exc:
+            print(f"[CAMERA_SERVICE] Ошибка в start_streaming: {exc}")
 
     def stop(self):
         print("[CAMERA_SERVICE] Остановка сервиса...")
-        if self.camera:
-            self.camera.destroy()
-        self.socket.close()
+
+        for name, camera in list(self.cameras.items()):
+            try:
+                print(f"[CAMERA_SERVICE] Остановка камеры '{name}', id={camera.id}")
+                camera.stop()
+                camera.destroy()
+            except Exception as exc:
+                print(f"[CAMERA_SERVICE] Ошибка остановки камеры '{name}': {exc}")
+
+        self.cameras.clear()
+        self.camera = None
+
+        try:
+            self.socket.close()
+        finally:
+            self.context.term()
+
 
 if __name__ == "__main__":
     service = CarlaCameraService()
