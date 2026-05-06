@@ -1,7 +1,51 @@
 #!/usr/bin/python3
 # utils.py
+import xml.etree.ElementTree as ET
+import os
 
 PACKET_SIZE = 16
+
+def scan_carla_routes(project_root):
+    routes_list = []
+    # Убедимся, что пути строятся относительно корня MitsuNeuroPilotAPI
+    folders = {
+        "TEST": os.path.join(project_root, "data", "benchmark_routes"),
+        "TRAIN": os.path.join(project_root, "data", "data_routes")
+    }
+
+    print(f"[DEBUG] Scanning routes in: {project_root}")
+
+    for tag, base_path in folders.items():
+        if not os.path.exists(base_path):
+            print(f"[DEBUG] Path not found: {base_path}")
+            continue
+            
+        for root_dir, _, files in os.walk(base_path):
+            for file in files:
+                if file.endswith(".xml"):
+                    full_path = os.path.join(root_dir, file)
+                    try:
+                        tree = ET.parse(full_path)
+                        root = tree.getroot()
+                        
+                        # В некоторых CARLA XML структура может отличаться
+                        # Пробуем найти город (town) более гибко
+                        town = "Unknown"
+                        route_node = root.find('.//route') # Поиск по всему дереву
+                        if route_node is not None:
+                            town = route_node.get('town', "Unknown")
+                        
+                        routes_list.append({
+                            "label": f"[{tag}] {file} ({town})",
+                            "path": full_path
+                        })
+                        print(f"[DEBUG] Found route: {file}")
+                    except Exception as e:
+                        print(f"[DEBUG] XML Error in {file}: {e}")
+    
+    if not routes_list:
+        print("[DEBUG] No .xml files found in target folders!")
+    return routes_list
 
 def calc_crc8(data: bytearray):
     crc8 = 0xFF
@@ -111,3 +155,6 @@ class CircularBuffer:
             return items
         else:
             return None
+        
+
+    

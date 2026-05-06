@@ -55,7 +55,7 @@ class CarlaCameraService:
         # 1. Попытки подключения к серверу CARLA
         print(f"[CAMERA_SERVICE] Подключение к CARLA {self.host}:{self.port}...")
         connected = False
-        for i in range(10): # 10 попыток подключения
+        for i in range(20): # 10 попыток подключения
             try:
                 self.client = carla.Client(self.host, self.port)
                 self.client.set_timeout(5.0) # Маленький таймаут для быстрой проверки
@@ -73,9 +73,9 @@ class CarlaCameraService:
 
         # 2. Ожидание появления автомобиля (hero)
         try:
-            self.client.set_timeout(20.0) # Увеличиваем таймаут для работы с миром
+            self.client.set_timeout(60.0) # Увеличиваем таймаут для работы с миром
             vehicle = None
-            for i in range(30):
+            for i in range(180):
                 vehicles = self.world.get_actors().filter('vehicle.*')
                 for v in vehicles:
                     role = v.attributes.get('role_name', '')
@@ -83,7 +83,7 @@ class CarlaCameraService:
                         vehicle = v
                         break
                 if vehicle: break
-                print(f"[CAMERA_SERVICE] Ожидание авто... (попытка {i+1}/30)")
+                print(f"[CAMERA_SERVICE] Ожидание авто... (попытка {i+1}/180)")
                 time.sleep(2)
 
             if not vehicle:
