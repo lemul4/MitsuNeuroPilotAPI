@@ -145,31 +145,37 @@ class AppController(QObject):
             self.stop_ai_agent()
 
     def start_ai_agent(self):
-        # 1. Определяем пути. Т.к. main.py лежит в "i-MiEV GUI/", 
-        # корень проекта — на уровень выше.
         gui_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(gui_dir)
         
+        # ПОЛУЧАЕМ МАРШРУТ ИЗ UI
+        selected_route_path = self.view.get_selected_route()
+        
+        if not selected_route_path:
+            self.view.statusBar().showMessage("AI ERROR: No route selected!")
+            self.view.set_ai_checkbox(False)
+            return
+
         config = {
             "project_root": project_root,
-            "routes": os.path.join(project_root, "data", "data_routes", "leaderboard1", "ControlLoss", "Town01_Scenario1_0.xml"),
+            "routes": selected_route_path, # Используем выбранный путь
             "checkpoint_path": os.path.join(project_root, "model_2.pth"),
             "telemetry_file": os.path.join(project_root, "trace_log.jsonl"),
-            "expert_mode": True, # Установите False, если нужна нейросеть (checkpoint)
+            "expert_mode": True,
             "host": "localhost"
         }
         
         try:
-            self.agent_thread = LeadAgentThread(config)
+            # Прекращаем работу старого ридера, если он был
+            self.raw_telemetry_timer.stop()
             
-            # ПОДКЛЮЧАЕМ ОБНОВЛЕННЫЕ СИГНАЛЫ
+            self.agent_thread = LeadAgentThread(config)
             self.agent_thread.log_received.connect(self.handle_agent_log)
             self.agent_thread.status_changed.connect(lambda s: self.view.statusBar().showMessage(f"AI Status: {s}"))
             self.agent_thread.error_occurred.connect(self.handle_agent_error)
             
             self.agent_thread.start()
             
-            # Читалка телеметрии остается прежней
             self.raw_telemetry_reader = RawTelemetryJsonlReader(config["telemetry_file"])
             self.raw_telemetry_timer.start(50)
             

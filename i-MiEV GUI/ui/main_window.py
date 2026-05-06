@@ -11,9 +11,9 @@ from datetime import datetime
 import pyqtgraph as pg
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, Signal 
-# Импортируем кастомный виджет руля (предполагается, что он в ui/widgets.py)
-# Если вы не выносили его в отдельный файл, просто вставьте класс SteeringWidget сюда
 from ui.widgets import SteeringWidget 
+from utils import scan_carla_routes
+import os
 
 class MainWindow(QMainWindow):
     # --- Сигналы для связи с Контроллером (main.py) ---
@@ -116,6 +116,21 @@ class MainWindow(QMainWindow):
             self.combo_ports.addItem(p.device)
         conn_layout.addWidget(self.combo_ports)
         
+        # ================= СРЕДНЯЯ КОЛОНКА (Настройки) =================
+        gb_route = QGroupBox("Route Selection")
+        v_route = QVBoxLayout()
+        
+        self.combo_routes = QComboBox()
+        self.combo_routes.setMinimumWidth(250)
+        v_route.addWidget(QLabel("Select Scenario:"))
+        v_route.addWidget(self.combo_routes)
+        
+        btn_refresh = QPushButton("Refresh Routes")
+        btn_refresh.clicked.connect(self.refresh_route_list)
+        v_route.addWidget(btn_refresh)
+        
+        gb_route.setLayout(v_route)
+        mid_col.insertWidget(2, gb_route) # Вставляем перед CAN Monitor
         self.btn_connect = QPushButton("Connect")
         self.btn_connect.clicked.connect(self.on_connect_clicked)
         conn_layout.addWidget(self.btn_connect)
@@ -174,9 +189,39 @@ class MainWindow(QMainWindow):
                        self.spin_kp, self.spin_ki, self.spin_kd, 
                        self.chk_telemetry, self.chk_ai]:
             widget.setFocusPolicy(Qt.NoFocus)
-            
+        self.refresh_route_list()
         self.setFocusPolicy(Qt.StrongFocus)
         self.setFocus()
+    
+    def refresh_route_list(self):
+        """Заполняет выпадающий список доступными маршрутами."""
+        self.combo_routes.clear()
+        
+        # Получаем абсолютный путь к текущему файлу (ui/main_window.py)
+        current_file = os.path.abspath(__file__)
+        
+        # 1. Поднимаемся из 'ui' -> попадаем в 'i-MiEV GUI'
+        gui_dir = os.path.dirname(os.path.dirname(current_file))
+        
+        # 2. Поднимаемся из 'i-MiEV GUI' -> попадаем в корень 'MitsuNeuroPilotAPI'
+        project_root = os.path.dirname(gui_dir)
+        
+        # Для отладки выведем итоговый путь в консоль
+        print(f"[DEBUG] Calculated Project Root: {project_root}")
+        
+        routes = scan_carla_routes(project_root)
+        
+        if not routes:
+            self.combo_routes.addItem("No routes found", None)
+            return
+
+        for r in routes:
+            self.combo_routes.addItem(r["label"], r["path"])
+
+    def get_selected_route(self):
+        """Возвращает путь к выбранному XML файлу."""
+        return self.combo_routes.currentData()
+    
     def update_camera_frame(self, pixmap: QPixmap):
             """
             Обновляет QLabel новым кадром с камеры автомобиля.
