@@ -84,7 +84,9 @@ class AppController(QObject):
 
         self.is_virtual = False
         self.control_active = False
-
+        self.ai_control_requested = False
+        self.ai_agent_loading = False
+        self.ai_agent_running = False
         self.ui_update_timer = QTimer()
         self.ui_update_timer.timeout.connect(self.update_view)
         self.ui_update_timer.start(50)
@@ -115,6 +117,7 @@ class AppController(QObject):
         self.cmd_cruise = utils.Serial_Data(bytearray.fromhex("AA 00000000 7700 00 02 01 00 00 00 01 00 00"))
 
     def handle_connect(self, port_name):
+        self.stop_ai_agent()
         if port_name == "VIRTUAL_DEMO_MODE":
             self.is_virtual = True
             self.physics_timer.start(PHYSICS_UPDATE_RATE_MS)
@@ -138,49 +141,81 @@ class AppController(QObject):
             self.cmd_cruise.store_crc8()
             self.serial.send_command(self.cmd_cruise)
 
-    def handle_ai_toggle(self, is_active):
         if is_active:
-            self.start_ai_agent()
+            if self.ai_control_requested:
+                self.start_ai_agent()
+        else:
+            if self.agent_thread or self.raw_telemetry_reader:
+                self.stop_ai_agent()
+
+
+    def handle_ai_toggle(self, is_active):
+        self.ai_control_requested = bool(is_active)
+        if is_active:
+            self.view.statusBar().showMessage("AI Control armed: press Activate Control to start scenario")
+            if hasattr(self.view, "set_route_runtime_state"):
+                self.view.set_route_runtime_state("armed")
         else:
             self.stop_ai_agent()
 
     def start_ai_agent(self):
-        gui_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(gui_dir)
-        
-        # ПОЛУЧАЕМ МАРШРУТ ИЗ UI
-        selected_route_path = self.view.get_selected_route()
-        
+        if self.agent_thread or self.ai_agent_loading:
+            return
+
+        selected_route_path = None
+        if hasattr(self.view, "get_selected_route"):
+            selected_route_path = self.view.get_selected_route()
+
         if not selected_route_path:
-            self.view.statusBar().showMessage("AI ERROR: No route selected!")
+            message = "AI Control: маршрут не выбран, запуск отменен"
+            print(message)
+            self.view.statusBar().showMessage(message)
+            if hasattr(self.view, "set_route_error_status"):
+                self.view.set_route_error_status("Выберите маршрут перед Activate Control")
             self.view.set_ai_checkbox(False)
             return
 
+        gui_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(gui_dir)
+
+        telemetry_file = os.path.join(project_root, "trace_log.jsonl")
+        try:
+            if os.path.exists(telemetry_file):
+                os.remove(telemetry_file)
+        except OSError:
+            pass
+
         config = {
             "project_root": project_root,
-            "routes": selected_route_path, # Используем выбранный путь
+            "routes": selected_route_path,
             "checkpoint_path": os.path.join(project_root, "model_2.pth"),
-            "telemetry_file": os.path.join(project_root, "trace_log.jsonl"),
+            "telemetry_file": telemetry_file,
             "expert_mode": True,
             "host": "localhost"
         }
-        
+
         try:
-            # Прекращаем работу старого ридера, если он был
-            self.raw_telemetry_timer.stop()
-            
+            self.ai_agent_loading = True
+            self.ai_agent_running = False
+            if hasattr(self.view, "set_route_loading_status"):
+                self.view.set_route_loading_status("Загрузка мира и сценария")
+            self.view.statusBar().showMessage("AI Status: loading scenario")
+
             self.agent_thread = LeadAgentThread(config)
             self.agent_thread.log_received.connect(self.handle_agent_log)
-            self.agent_thread.status_changed.connect(lambda s: self.view.statusBar().showMessage(f"AI Status: {s}"))
+            self.agent_thread.status_changed.connect(self.handle_agent_status)
             self.agent_thread.error_occurred.connect(self.handle_agent_error)
-            
             self.agent_thread.start()
-            
+
             self.raw_telemetry_reader = RawTelemetryJsonlReader(config["telemetry_file"])
             self.raw_telemetry_timer.start(50)
-            
+
         except Exception as e:
+            self.ai_agent_loading = False
+            self.ai_agent_running = False
             print(f"Error starting AI thread: {e}")
+            if hasattr(self.view, "set_route_error_status"):
+                self.view.set_route_error_status(str(e))
             self.view.set_ai_checkbox(False)
 
     def stop_ai_agent(self):
@@ -189,7 +224,12 @@ class AppController(QObject):
             self.agent_thread = None
         self.raw_telemetry_timer.stop()
         self.raw_telemetry_reader = None
+        was_active = self.ai_agent_loading or self.ai_agent_running
+        self.ai_agent_loading = False
+        self.ai_agent_running = False
         self.view.statusBar().showMessage("Lead Agent: Offline")
+        if was_active and hasattr(self.view, "set_route_stopped_status"):
+            self.view.set_route_stopped_status("Сценарий остановлен")
 
     def poll_ai_telemetry(self):
         if not self.raw_telemetry_reader: 
@@ -198,6 +238,12 @@ class AppController(QObject):
         data = self.raw_telemetry_reader.get_latest_data()
         
         if data is not None:
+            if not self.ai_agent_running:
+                self.ai_agent_loading = False
+                self.ai_agent_running = True
+                if hasattr(self.view, "set_route_running_status"):
+                    self.view.set_route_running_status("Сценарий выполняется: телеметрия получена")
+                self.view.statusBar().showMessage("AI Status: scenario running")
             # Извлекаем значения
             steer = data.get("steer", 0.0)
             throttle = data.get("throttle", 0.0)
@@ -237,11 +283,37 @@ class AppController(QObject):
 
     @Slot(str)
     def handle_agent_log(self, message):
-        self.view.statusBar().showMessage(f"AI: {message[:40]}")
+        text = str(message)
+        self.view.statusBar().showMessage(f"AI: {text[:40]}")
+        self._update_route_loading_from_text(text)
+
+
+    @Slot(str)
+    def handle_agent_status(self, status):
+        text = str(status)
+        self.view.statusBar().showMessage(f"AI Status: {text}")
+        self._update_route_loading_from_text(text)
+
+
+    def _update_route_loading_from_text(self, text):
+        low = str(text or "").lower()
+        if any(token in low for token in ("error", "exception", "failed", "traceback")):
+            if hasattr(self.view, "set_route_error_status"):
+                self.view.set_route_error_status(str(text))
+            return
+        if not self.ai_agent_running and self.ai_agent_loading:
+            if any(token in low for token in ("spawn", "world", "map", "route", "scenario", "carla", "load", "loading", "connect")):
+                if hasattr(self.view, "set_route_loading_status"):
+                    self.view.set_route_loading_status(str(text))
+
 
     @Slot(str)
     def handle_agent_error(self, error):
+        self.ai_agent_loading = False
+        self.ai_agent_running = False
         self.view.statusBar().showMessage(f"AI ERROR: {error}")
+        if hasattr(self.view, "set_route_error_status"):
+            self.view.set_route_error_status(str(error))
         self.view.set_ai_checkbox(False)
 
     def handle_manual_input(self, angle, accel, brake):
