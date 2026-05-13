@@ -83,10 +83,23 @@ class AppController(QObject):
         self.raw_telemetry_timer.timeout.connect(self.poll_ai_telemetry)
 
         self.is_virtual = False
+        self.is_connected = False
         self.control_active = False
         self.ai_control_requested = False
         self.ai_agent_loading = False
         self.ai_agent_running = False
+
+        # Очередь маршрутов запускается кооперативно: один LeadAgentThread на один XML.
+        # Второй маршрут стартует только после finished текущего thread. Принудительный
+        # переход к следующему маршруту убран, потому что он рвал QThread/CARLA lifecycle.
+        self.pending_route_queue = []
+        self.current_route_index = -1
+        self.queue_mode = None  # None / "single" / "queue"
+        self.queue_stop_requested = False
+        self.route_plan_prepared = False
+        self.route_transition_delay_ms = 6000
+        self._agent_stop_requested = False
+
         self.ui_update_timer = QTimer()
         self.ui_update_timer.timeout.connect(self.update_view)
         self.ui_update_timer.start(50)
@@ -102,8 +115,21 @@ class AppController(QObject):
         self.view.manual_input_updated.connect(self.handle_manual_input)
         self.view.telemetry_toggled.connect(self.handle_telemetry_toggle)
         self.view.ai_toggled.connect(self.handle_ai_toggle)
+
+        # Новый UI отправляет один список: 1 маршрут => одиночный запуск, N маршрутов => очередь.
+        # Старые сигналы single/queue оставлены как fallback, но основной путь — route_launch_requested.
+        if hasattr(self.view, "route_launch_requested"):
+            self.view.route_launch_requested.connect(self.handle_route_launch_requested)
+        else:
+            if hasattr(self.view, "route_single_launch_requested"):
+                self.view.route_single_launch_requested.connect(lambda route: self.handle_route_launch_requested([route] if route else []))
+            if hasattr(self.view, "route_queue_launch_requested"):
+                self.view.route_queue_launch_requested.connect(self.handle_route_launch_requested)
+        if hasattr(self.view, "route_queue_updated"):
+            self.view.route_queue_updated.connect(self.handle_route_queue_updated)
         
         self.serial.connection_status.connect(self.view.set_connection_status)
+        self.serial.connection_status.connect(self.handle_serial_connection_status)
         self.serial.data_received.connect(self.handle_can_packet)
         self.latest_frame_path = os.path.join("outputs", "visualizations", "latest_front_cam.png")
         self.init_commands()
@@ -117,67 +143,226 @@ class AppController(QObject):
         self.cmd_cruise = utils.Serial_Data(bytearray.fromhex("AA 00000000 7700 00 02 01 00 00 00 01 00 00"))
 
     def handle_connect(self, port_name):
-        self.stop_ai_agent()
+        # Подготовленная очередь не сбрасывается при подключении: пользователь может
+        # выбрать/подготовить маршруты до Connect, после Connect или после AI Control.
         if port_name == "VIRTUAL_DEMO_MODE":
             self.is_virtual = True
+            self.is_connected = True
             self.physics_timer.start(PHYSICS_UPDATE_RATE_MS)
             self.view.set_connection_status(True, "Virtual Mode Active")
         else:
             self.is_virtual = False
+            self.is_connected = False
             asyncio.create_task(self.serial.connect_serial(port_name))
 
+    @Slot(bool, str)
+    def handle_serial_connection_status(self, is_connected, message):
+        self.is_connected = bool(is_connected)
+
     def handle_disconnect(self):
+        self.abort_active_scenario("Disconnected", keep_plan=True)
         self.is_virtual = False
+        self.is_connected = False
         self.physics_timer.stop()
         self.serial.close()
         self.view.set_connection_status(False, "Disconnected")
 
-    def handle_control_toggle(self, is_active):
-        self.control_active = is_active
-        if not self.is_virtual:
+    def _set_control_button_checked_later(self, checked):
+        btn = getattr(self.view, "btn_control", None)
+        if btn is not None and btn.isChecked() != checked:
+            QTimer.singleShot(0, lambda: btn.setChecked(checked))
+
+    def _reject_control_activation(self, message):
+        self.control_active = False
+        print(f"AI CONTROL: запуск отклонен: {message}")
+        self.view.statusBar().showMessage(message)
+        if hasattr(self.view, "set_route_runtime_state"):
+            state = "prepared" if self.route_plan_prepared else "selected"
+            self.view.set_route_runtime_state(state, message)
+        elif hasattr(self.view, "set_route_error_status"):
+            self.view.set_route_error_status(message)
+        self._set_control_button_checked_later(False)
+
+    def _validate_control_start_requirements(self):
+        if not self.is_connected:
+            return False, "Сначала нажмите Connect"
+        if not self.ai_control_requested:
+            return False, "Включите AI Control"
+        if not self.pending_route_queue:
+            return False, "Выберите маршрут и подготовьте запуск"
+        if not self.route_plan_prepared:
+            count = len(self.pending_route_queue)
+            if count > 1:
+                return False, "Нажмите «Подготовить очередь» перед Activate Control"
+            return False, "Нажмите «Подготовить маршрут» перед Activate Control"
+        if self.agent_thread is not None or self.ai_agent_loading:
+            return False, "Текущий сценарий еще запускается или выполняется"
+        return True, ""
+
+    def _send_cruise_state(self, is_active):
+        if self.is_virtual:
+            return
+        try:
             import time
             self.cmd_cruise.TIME = int(time.time())
             self.cmd_cruise.CAN_DATA.DATA[1] = 1 if is_active else 0
             self.cmd_cruise.store_crc8()
             self.serial.send_command(self.cmd_cruise)
+        except Exception as exc:
+            print(f"AI CONTROL: ошибка отправки cruise state: {exc}")
 
+    def handle_control_toggle(self, is_active):
         if is_active:
-            if self.ai_control_requested:
-                self.start_ai_agent()
-        else:
-            if self.agent_thread or self.raw_telemetry_reader:
-                self.stop_ai_agent()
+            ok, message = self._validate_control_start_requirements()
+            if not ok:
+                self._reject_control_activation(message)
+                return
 
+            self.control_active = True
+            self.queue_stop_requested = False
+            self._agent_stop_requested = False
+            self._send_cruise_state(True)
+
+            if hasattr(self.vehicle, "force_drive_gear"):
+                self.vehicle.force_drive_gear()
+
+            print("AI CONTROL: Activate Control включен; запуск подготовленного сценария")
+            self.start_pending_route()
+            return
+
+        # Повторное нажатие Activate Control выключает активный сценарий. План маршрутов
+        # остается подготовленным, чтобы можно было повторно стартовать с первого маршрута.
+        self.control_active = False
+        self._send_cruise_state(False)
+        self.abort_active_scenario("Control выключен: сценарий остановлен", keep_plan=True)
 
     def handle_ai_toggle(self, is_active):
         self.ai_control_requested = bool(is_active)
         if is_active:
-            self.view.statusBar().showMessage("AI Control armed: press Activate Control to start scenario")
+            if self.route_plan_prepared:
+                message = "AI Control включен. Нажмите Activate Control для запуска"
+                state = "prepared"
+            else:
+                message = "AI Control включен. Подготовьте маршрут/очередь"
+                state = "armed"
+            self.view.statusBar().showMessage(message)
             if hasattr(self.view, "set_route_runtime_state"):
-                self.view.set_route_runtime_state("armed")
+                self.view.set_route_runtime_state(state, message)
         else:
-            self.stop_ai_agent()
+            self.abort_active_scenario("AI Control выключен", keep_plan=True)
+            self.view.statusBar().showMessage("AI Control выключен")
+            if hasattr(self.view, "set_route_runtime_state"):
+                self.view.set_route_runtime_state("selected", "AI Control выключен")
 
-    def start_ai_agent(self):
-        if self.agent_thread or self.ai_agent_loading:
-            return
+    def _route_path_from_record(self, route):
+        if route is None:
+            return None
+        if isinstance(route, (str, os.PathLike)):
+            return os.fspath(route)
+        if isinstance(route, dict):
+            return (
+                route.get("path")
+                or route.get("xml_path")
+                or route.get("file_path")
+                or route.get("route_path")
+                or route.get("relative_path")
+            )
+        return getattr(route, "path", None) or getattr(route, "xml_path", None) or getattr(route, "file_path", None)
 
-        selected_route_path = None
+    def _fallback_route_queue_from_view(self):
+        if hasattr(self.view, "get_route_queue"):
+            queue = self.view.get_route_queue()
+            if queue:
+                return list(queue)
+        if hasattr(self.view, "get_selected_route_data"):
+            route = self.view.get_selected_route_data()
+            if route:
+                return [route]
         if hasattr(self.view, "get_selected_route"):
-            selected_route_path = self.view.get_selected_route()
+            route = self.view.get_selected_route()
+            if route:
+                return [route]
+        return []
 
-        if not selected_route_path:
-            message = "AI Control: маршрут не выбран, запуск отменен"
-            print(message)
+    def handle_route_queue_updated(self, routes):
+        # Изменение выбора не запускает и не готовит сценарий. Оно только делает
+        # предыдущий план устаревшим: пользователь должен явно нажать кнопку подготовки.
+        if self.ai_agent_loading or self.ai_agent_running:
+            return
+        queue = list(routes or [])
+        self.pending_route_queue = [route for route in queue if route]
+        self.current_route_index = -1
+        self.queue_mode = "queue" if len(self.pending_route_queue) > 1 else ("single" if self.pending_route_queue else None)
+        self.route_plan_prepared = False
+        self.queue_stop_requested = False
+        self._agent_stop_requested = False
+
+    def handle_route_launch_requested(self, routes):
+        # Кнопка маршрута/очереди только подготавливает план. CARLA/LeadAgentThread
+        # стартуют строго по событию Activate Control ON.
+        queue = list(routes or self._fallback_route_queue_from_view())
+        queue = [route for route in queue if route]
+        self.pending_route_queue = queue
+        self.current_route_index = -1
+        self.queue_mode = "queue" if len(queue) > 1 else ("single" if queue else None)
+        self.queue_stop_requested = False
+        self._agent_stop_requested = False
+        self.route_plan_prepared = bool(queue)
+
+        if not queue:
+            message = "Маршрут не выбран"
+            print(f"AI ROUTES: {message}")
             self.view.statusBar().showMessage(message)
             if hasattr(self.view, "set_route_error_status"):
-                self.view.set_route_error_status("Выберите маршрут перед Activate Control")
-            self.view.set_ai_checkbox(False)
+                self.view.set_route_error_status(message)
+            return
+
+        label = f"очередь из {len(queue)} маршрутов" if len(queue) > 1 else "маршрут"
+        message = f"Подготовлено: {label}. Нажмите Activate Control для запуска"
+        print(f"AI ROUTES: {message}")
+        self.view.statusBar().showMessage(message)
+        if hasattr(self.view, "set_route_runtime_state"):
+            self.view.set_route_runtime_state("prepared", message)
+        elif hasattr(self.view, "set_route_loading_status"):
+            self.view.set_route_loading_status(message)
+
+    def start_pending_route(self):
+        if self.agent_thread is not None or self.ai_agent_loading:
+            self.view.statusBar().showMessage("AI Status: текущий сценарий еще выполняется")
+            return
+
+        ok, message = self._validate_control_start_requirements()
+        if not ok:
+            self._reject_control_activation(message)
+            return
+
+        # Каждый новый запуск очереди начинается с первого подготовленного маршрута.
+        self.current_route_index = 0
+        self.queue_stop_requested = False
+        self._agent_stop_requested = False
+        self._start_current_route()
+
+    # Старое имя оставлено для совместимости с прежним flow.
+    def start_ai_agent(self):
+        self.start_pending_route()
+
+    def _start_current_route(self):
+        if self.queue_stop_requested:
+            return
+        if self.agent_thread is not None or self.ai_agent_loading:
+            return
+        if not (0 <= self.current_route_index < len(self.pending_route_queue)):
+            self._finish_route_queue("Очередь завершена")
+            return
+
+        route_record = self.pending_route_queue[self.current_route_index]
+        selected_route_path = self._route_path_from_record(route_record)
+        if not selected_route_path:
+            self.handle_agent_error("У выбранного маршрута нет XML path")
             return
 
         gui_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(gui_dir)
-
         telemetry_file = os.path.join(project_root, "trace_log.jsonl")
         try:
             if os.path.exists(telemetry_file):
@@ -197,14 +382,29 @@ class AppController(QObject):
         try:
             self.ai_agent_loading = True
             self.ai_agent_running = False
-            if hasattr(self.view, "set_route_loading_status"):
-                self.view.set_route_loading_status("Загрузка мира и сценария")
-            self.view.statusBar().showMessage("AI Status: loading scenario")
+            self._agent_stop_requested = False
+            total = len(self.pending_route_queue)
+            idx = self.current_route_index
+
+            if hasattr(self.view, "set_active_route"):
+                self.view.set_active_route(
+                    route_record,
+                    index=idx,
+                    total=total,
+                    state="loading",
+                    message=f"Загрузка сценария {idx + 1} / {total}",
+                )
+            elif hasattr(self.view, "set_route_loading_status"):
+                self.view.set_route_loading_status(f"Загрузка сценария {idx + 1} / {total}")
+
+            self.view.statusBar().showMessage(f"AI Status: loading route {idx + 1}/{total}")
+            print(f"AI ROUTES: старт маршрута {idx + 1}/{total}: {selected_route_path}")
 
             self.agent_thread = LeadAgentThread(config)
             self.agent_thread.log_received.connect(self.handle_agent_log)
             self.agent_thread.status_changed.connect(self.handle_agent_status)
             self.agent_thread.error_occurred.connect(self.handle_agent_error)
+            self.agent_thread.finished.connect(self.handle_agent_finished)
             self.agent_thread.start()
 
             self.raw_telemetry_reader = RawTelemetryJsonlReader(config["telemetry_file"])
@@ -213,23 +413,136 @@ class AppController(QObject):
         except Exception as e:
             self.ai_agent_loading = False
             self.ai_agent_running = False
+            self.agent_thread = None
             print(f"Error starting AI thread: {e}")
             if hasattr(self.view, "set_route_error_status"):
                 self.view.set_route_error_status(str(e))
             self.view.set_ai_checkbox(False)
 
-    def stop_ai_agent(self):
-        if self.agent_thread:
-            self.agent_thread.stop()
-            self.agent_thread = None
+    def _reset_local_vehicle_state(self):
+        try:
+            if hasattr(self.vehicle, "reset_motion"):
+                self.vehicle.reset_motion()
+            self.vehicle.target_angle = 0
+            self.vehicle.angle = 0
+            self.vehicle.target_accel = 0
+            self.vehicle.target_brake = 0
+            self.vehicle.accel = 0
+            self.vehicle.brake = 0
+        except Exception as exc:
+            print(f"AI CONTROL: ошибка сброса локального состояния: {exc}")
+
+    def _request_stop_current_agent(self, message="Lead Agent: stopping"):
         self.raw_telemetry_timer.stop()
         self.raw_telemetry_reader = None
-        was_active = self.ai_agent_loading or self.ai_agent_running
         self.ai_agent_loading = False
         self.ai_agent_running = False
-        self.view.statusBar().showMessage("Lead Agent: Offline")
-        if was_active and hasattr(self.view, "set_route_stopped_status"):
-            self.view.set_route_stopped_status("Сценарий остановлен")
+        self._agent_stop_requested = True
+        self.view.statusBar().showMessage(message)
+
+        thread = self.agent_thread
+        if thread is None:
+            return True
+
+        try:
+            thread.stop()
+        except Exception as exc:
+            print(f"AI ROUTES: ошибка stop(): {exc}")
+
+        # Не обнуляем self.agent_thread здесь. Иначе Qt может уничтожить QThread,
+        # пока он еще завершает CARLA/ScenarioRunner: это и давало
+        # 'QThread: Destroyed while thread is still running'.
+        try:
+            if hasattr(thread, "isRunning") and thread.isRunning():
+                print("AI ROUTES: ожидаем штатного завершения LeadAgentThread")
+                return False
+        except RuntimeError:
+            pass
+
+        self.agent_thread = None
+        return True
+
+    def stop_ai_agent(self):
+        self.abort_active_scenario("Lead Agent: stopping", keep_plan=True)
+
+    def abort_active_scenario(self, message="Сценарий остановлен", keep_plan=True):
+        # Безопасная остановка: просим LeadAgentThread завершиться, но не уничтожаем
+        # объект QThread до сигнала finished.
+        self.queue_stop_requested = True
+        self.current_route_index = -1
+        if not keep_plan:
+            self.pending_route_queue = []
+            self.queue_mode = None
+            self.route_plan_prepared = False
+        self._reset_local_vehicle_state()
+        self._request_stop_current_agent(message)
+        if hasattr(self.view, "set_route_stopped_status"):
+            suffix = " Очередь остается подготовленной." if keep_plan and self.route_plan_prepared else ""
+            self.view.set_route_stopped_status(f"{message}.{suffix}")
+
+    # Старое имя оставлено для совместимости.
+    def stop_route_queue(self, message="Очередь остановлена"):
+        self.abort_active_scenario(message, keep_plan=True)
+
+    @Slot()
+    def handle_agent_finished(self):
+        self.raw_telemetry_timer.stop()
+        self.raw_telemetry_reader = None
+        self.agent_thread = None
+        self.ai_agent_loading = False
+        self.ai_agent_running = False
+
+        if self._agent_stop_requested or self.queue_stop_requested:
+            self._agent_stop_requested = False
+            self.queue_stop_requested = False
+            self.current_route_index = -1
+            if hasattr(self.view, "set_route_runtime_state"):
+                if self.route_plan_prepared and self.pending_route_queue:
+                    self.view.set_route_runtime_state(
+                        "prepared",
+                        "Сценарий прерван. CARLA очищена, можно снова нажать Activate Control",
+                    )
+                else:
+                    self.view.set_route_runtime_state("stopped", "Сценарий прерван")
+            return
+
+        total = len(self.pending_route_queue)
+        finished_index = self.current_route_index
+        if total <= 0 or finished_index < 0:
+            return
+
+        print(f"AI ROUTES: маршрут {finished_index + 1}/{total} завершен")
+
+        if (
+            self.queue_mode == "queue"
+            and self.control_active
+            and self.ai_control_requested
+            and self.route_plan_prepared
+            and finished_index + 1 < total
+        ):
+            self.current_route_index += 1
+            if hasattr(self.view, "set_route_queue_position"):
+                self.view.set_route_queue_position(self.current_route_index + 1, total)
+            self.view.statusBar().showMessage(
+                f"AI Status: next route in {self.route_transition_delay_ms / 1000:.1f}s"
+            )
+            QTimer.singleShot(self.route_transition_delay_ms, self._start_current_route)
+        else:
+            self._finish_route_queue("Очередь завершена" if self.queue_mode == "queue" else "Маршрут завершен")
+
+    def _finish_route_queue(self, message):
+        self.pending_route_queue = []
+        self.current_route_index = -1
+        self.queue_mode = None
+        self.queue_stop_requested = False
+        self.route_plan_prepared = False
+        self._agent_stop_requested = False
+        self.control_active = False
+        self._send_cruise_state(False)
+        self._set_control_button_checked_later(False)
+        if hasattr(self.view, "set_route_queue_finished"):
+            self.view.set_route_queue_finished(message)
+        self.view.statusBar().showMessage(message)
 
     def poll_ai_telemetry(self):
         if not self.raw_telemetry_reader: 
@@ -285,13 +598,6 @@ class AppController(QObject):
                 pass
             else:
                 self.vehicle.update_physics(dt=0.05)
-            if os.path.exists(self.latest_frame_path):
-                try:
-                    pixmap = QPixmap(self.latest_frame_path)
-                    self.view.update_camera_frame(pixmap)
-                except Exception as e:
-                    print(f"Ошибка загрузки кадра камеры: {e}")
-
             # Если управление активно, отправляем в CAN
             if self.control_active:
                 self.handle_manual_input(target_angle, target_accel, target_brake)
@@ -326,9 +632,14 @@ class AppController(QObject):
     def handle_agent_error(self, error):
         self.ai_agent_loading = False
         self.ai_agent_running = False
+        self.queue_stop_requested = True
+        self.route_plan_prepared = False
+        self.control_active = False
+        self._set_control_button_checked_later(False)
         self.view.statusBar().showMessage(f"AI ERROR: {error}")
         if hasattr(self.view, "set_route_error_status"):
             self.view.set_route_error_status(str(error))
+        print(f"AI ERROR: {error}")
         self.view.set_ai_checkbox(False)
 
     def handle_manual_input(self, angle, accel, brake):
