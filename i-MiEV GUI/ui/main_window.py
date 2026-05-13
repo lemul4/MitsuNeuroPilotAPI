@@ -35,20 +35,53 @@ class DecimalAxis(pg.AxisItem):
 
 
 class FixedVideoLabel(QLabel):
-    """QLabel без sizeHint от текущего кадра, чтобы видеоблок не прыгал при запуске потока."""
+    """Video label that follows the aspect ratio of the incoming frame.
 
-    def __init__(self, text="", parent=None, width=860, height=470):
+    The service sends one JPEG frame. This widget adjusts its height to that
+    frame ratio and then scales with KeepAspectRatio, so the allocated window
+    matches the camera layout instead of leaving large outer black bands.
+    """
+
+    def __init__(self, text="", parent=None, width=860, height=484, aspect=16 / 9):
         super().__init__(text, parent)
-        self._fixed_hint = QSize(width, height)
-        self.setMinimumSize(640, height)
-        self.setFixedHeight(height)
+        self._aspect = float(aspect)
+        self._min_w = 640
+        self._min_h = 300
+        self._max_h = 620
+        self._fixed_hint = QSize(width, int(round(width / self._aspect)))
+        self.setMinimumSize(self._min_w, self._min_h)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFixedHeight(self.heightForWidth(width))
+
+    def set_frame_aspect(self, width, height):
+        try:
+            width = float(width)
+            height = float(height)
+        except Exception:
+            return
+        if width <= 0 or height <= 0:
+            return
+        self._aspect = width / height
+        self._fixed_hint = QSize(self._fixed_hint.width(), self.heightForWidth(self._fixed_hint.width()))
+        self.setFixedHeight(self.heightForWidth(max(1, self.width())))
 
     def sizeHint(self):
         return self._fixed_hint
 
     def minimumSizeHint(self):
-        return QSize(640, self._fixed_hint.height())
+        return QSize(self._min_w, self._min_h)
+
+    def heightForWidth(self, width):
+        return max(self._min_h, min(self._max_h, int(round(width / max(self._aspect, 0.1)))))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def resizeEvent(self, event):
+        target_h = self.heightForWidth(max(1, self.width()))
+        if abs(target_h - self.height()) > 2:
+            self.setFixedHeight(target_h)
+        super().resizeEvent(event)
 
 
 class UiLogStream(QObject):
@@ -169,6 +202,8 @@ class RoutePreviewWidget(QWidget):
         if self.mode != "idle":
             if self.mode in {"loading", "starting", "running", "error"}:
                 pass
+            elif self.mode == "prepared":
+                pass
             elif self.ai_active and not self.control_active:
                 self.mode = "armed"
                 self.subtitle = "AI Control включен. Нажмите Activate Control"
@@ -192,6 +227,8 @@ class RoutePreviewWidget(QWidget):
             return "НЕТ МАРШРУТА"
         if self.mode == "armed":
             return "AI ГОТОВ"
+        if self.mode == "prepared":
+            return "ПОДГОТОВЛЕНО"
         if self.mode in {"loading", "starting"}:
             return "ЗАГРУЗКА"
         if self.mode == "running":
@@ -207,7 +244,7 @@ class RoutePreviewWidget(QWidget):
             return QColor("#14c832")
         if self.mode == "manual":
             return QColor("#2f80ed")
-        if self.mode in {"loading", "starting", "armed", "selected"}:
+        if self.mode in {"loading", "starting", "armed", "selected", "prepared"}:
             return QColor("#ffc107")
         if self.mode == "error":
             return QColor("#ff5b5b")
@@ -615,11 +652,7 @@ class RoutePickerDialog(QDialog):
         self.clear_btn.clicked.connect(self.clear_selection)
         filters.addWidget(self.clear_btn)
 
-        self.start_current_btn = QPushButton("Запустить строку")
-        self.start_current_btn.clicked.connect(self.apply_current_route)
-        filters.addWidget(self.start_current_btn)
-
-        self.start_btn = QPushButton("Запуск")
+        self.start_btn = QPushButton("Применить выбор")
         self.start_btn.setObjectName("PrimaryButton")
         self.start_btn.clicked.connect(self.apply_selection)
         filters.addWidget(self.start_btn)
@@ -822,10 +855,14 @@ class MainWindow(QMainWindow):
     # Сигналы маршрутов оставлены как UI-обертка: контроллер может подключиться к нужному.
     # Если в main.py они не используются, ничего в backend-логике не меняется.
     route_queue_updated = Signal(list)
-    route_launch_requested = Signal(list)
-    routes_launch_requested = Signal(list)
+    route_launch_requested = Signal(list)          # legacy: выбранная очередь
+    routes_launch_requested = Signal(list)         # legacy: выбранная очередь
     route_selected = Signal(object)
-    route_start_requested = Signal(object)
+    route_start_requested = Signal(object)         # legacy: текущий маршрут
+    route_single_launch_requested = Signal(object) # новый: запустить только текущий маршрут
+    route_queue_launch_requested = Signal(list)    # новый: запустить очередь последовательно
+    route_queue_next_requested = Signal()          # новый: перейти к следующему маршруту
+    route_queue_stop_requested = Signal()          # новый: остановить очередь
 
     # Сигнал для ручного управления (angle, accel, brake)
     manual_input_updated = Signal(int, int, int)
@@ -957,6 +994,9 @@ class MainWindow(QMainWindow):
         self.btn_control = QPushButton("Activate Control")
         self.btn_control.setCheckable(True)
         self.btn_control.setObjectName("ControlButton")
+        self.btn_control.setStyleSheet(
+            "background-color: #8a1f2d; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
+        )
         self.btn_control.toggled.connect(self.on_control_toggled)
         left_col.addWidget(self.btn_control)
 
@@ -1039,8 +1079,9 @@ class MainWindow(QMainWindow):
         self.btn_select_routes.clicked.connect(self.open_route_picker)
         layout.addWidget(self.btn_select_routes)
 
-        self.btn_route_launch = QPushButton("Запуск")
+        self.btn_route_launch = QPushButton("Выберите маршрут")
         self.btn_route_launch.setObjectName("PrimaryButton")
+        self.btn_route_launch.setEnabled(False)
         self.btn_route_launch.clicked.connect(self.on_route_launch_clicked)
         layout.addWidget(self.btn_route_launch)
         return gb_route
@@ -1057,7 +1098,7 @@ class MainWindow(QMainWindow):
         video_title.setObjectName("StrongText")
         video_layout.addWidget(video_title)
 
-        self.video_panel = FixedVideoLabel("VIDEO STREAM\n\nкамера не подключена", height=470)
+        self.video_panel = FixedVideoLabel("VIDEO STREAM\n\nкамера не подключена", width=860)
         self.camera_label = self.video_panel  # совместимость со старым кодом камеры
         self._last_camera_pixmap = None
         self.video_panel.setAlignment(Qt.AlignCenter)
@@ -1499,7 +1540,7 @@ class MainWindow(QMainWindow):
                 border-color: #8e711e;
                 font-weight: 900;
             }
-            #ControlButton { background: #3c3d46; }
+            #ControlButton { background: #8a1f2d; font-weight: 800; }
             #DangerButton { color: #bd8585; border-color: #553035; }
             QProgressBar {
                 background: #101114;
@@ -1597,11 +1638,24 @@ class MainWindow(QMainWindow):
         if clear_queue:
             self.set_route_queue([])
 
+    def _sync_route_launch_button(self):
+        count = len(getattr(self, "route_queue", []) or [])
+        if not hasattr(self, "btn_route_launch"):
+            return
+        self.btn_route_launch.setEnabled(count > 0)
+        if count <= 0:
+            self.btn_route_launch.setText("Выберите маршрут")
+        elif count == 1:
+            self.btn_route_launch.setText("Подготовить маршрут")
+        else:
+            self.btn_route_launch.setText(f"Подготовить очередь ({count})")
+
     def set_route_queue(self, routes):
         self.route_queue = list(routes or [])
         count = len(self.route_queue)
         self.routes_selected_pill.setText(f"{count} выбрано")
         self.lbl_queue_count.value_label.setText(f"0 / {count}")
+        self._sync_route_launch_button()
 
         if not self.route_queue:
             self.lbl_first_route.setText("Маршрут не выбран")
@@ -1615,12 +1669,12 @@ class MainWindow(QMainWindow):
 
         first = self.route_queue[0]
         self.lbl_first_route.setText(str(first.get("name", "Маршрут")))
-        self.queue_empty_label.setText("Очередь подготовлена")
+        self.queue_empty_label.setText("Маршруты выбраны" if count > 1 else "Маршрут выбран")
         self.lbl_queue_route.value_label.setText(str(first.get("name", "—")))
         self.lbl_queue_city.value_label.setText(str(first.get("city", "—")))
         self.lbl_queue_scenario.value_label.setText(str(first.get("scenario", "—")))
         if hasattr(self, "chk_ai") and self.chk_ai.isChecked():
-            subtitle = "AI Control включен. Нажмите Activate Control"
+            subtitle = "AI Control включен. Нажмите Подготовить маршрут/очередь"
             mode = "armed"
         else:
             subtitle = f"{first.get('city', '—')} · {first.get('scenario', '—')}"
@@ -1673,17 +1727,77 @@ class MainWindow(QMainWindow):
         """Возвращает текущую UI-очередь маршрутов без преобразования."""
         return list(self.route_queue)
 
+    def set_route_queue_position(self, current_index, total=None):
+        """Обновляет счетчик очереди без изменения самой очереди."""
+        if total is None:
+            total = len(self.route_queue)
+        try:
+            current_index = int(current_index)
+        except Exception:
+            current_index = 0
+        shown = max(0, current_index)
+        if hasattr(self, "lbl_queue_count"):
+            self.lbl_queue_count.value_label.setText(f"{shown} / {max(0, int(total or 0))}")
+
+    def set_active_route(self, route, index=0, total=None, state="loading", message="Запуск сценария"):
+        """Показывает активный маршрут очереди."""
+        if not route:
+            return
+        if total is None:
+            total = len(self.route_queue) or 1
+        name = str(route.get("name", "Маршрут")) if isinstance(route, dict) else str(route)
+        city = str(route.get("city", "—")) if isinstance(route, dict) else "—"
+        scenario = str(route.get("scenario", "—")) if isinstance(route, dict) else "—"
+        if hasattr(self, "lbl_queue_route"):
+            self.lbl_queue_route.value_label.setText(name)
+            self.lbl_queue_city.value_label.setText(city)
+            self.lbl_queue_scenario.value_label.setText(scenario)
+            self.lbl_queue_count.value_label.setText(f"{index + 1} / {total}")
+            self.queue_empty_label.setText("Очередь выполняется" if total > 1 else "Выполняется один маршрут")
+        self.route_preview.set_route_state(name, message, 0, state, route=route if isinstance(route, dict) else None)
+
+    def set_route_queue_finished(self, message="Очередь завершена"):
+        if hasattr(self, "queue_empty_label"):
+            self.queue_empty_label.setText(message)
+            self.queue_state_badge.setText("● Готово")
+        self._append_log(f"UI ROUTES: {message}")
+
     def on_route_launch_clicked(self):
         if not self.route_queue:
             self._append_log("UI READY: выберите маршрут перед запуском.")
             return
+
+        count = len(self.route_queue)
         first = self.route_queue[0]
-        self.route_preview.set_route_state(str(first.get("name", "Маршрут")), "Запуск сценария", 0, "loading", route=first)
-        self._append_log("UI ROUTES: нажата кнопка запуска; выбранная очередь передана сигналом.")
-        self.route_launch_requested.emit(self.route_queue)
-        self.routes_launch_requested.emit(self.route_queue)
-        self.route_selected.emit(first)
-        self.route_start_requested.emit(first)
+        if count == 1:
+            message = "Маршрут подготовлен. Нажмите Activate Control"
+            self._append_log("UI ROUTES: подготовлен одиночный маршрут; запуск будет по Activate Control.")
+        else:
+            message = f"Очередь из {count} маршрутов подготовлена. Нажмите Activate Control"
+            self._append_log(f"UI ROUTES: подготовлена очередь: {count} маршрутов; запуск будет по Activate Control.")
+
+        self.route_preview.set_route_state(
+            str(first.get("name", "Маршрут")) if isinstance(first, dict) else str(first),
+            message,
+            0,
+            "prepared",
+            route=first if isinstance(first, dict) else None,
+        )
+        # Подготовка плана. CARLA/LeadAgentThread стартуют только после Activate Control.
+        self.route_launch_requested.emit(list(self.route_queue))
+
+    # Совместимость со старыми именами обработчиков.
+    def on_single_route_launch_clicked(self):
+        self.on_route_launch_clicked()
+
+    def on_queue_launch_clicked(self):
+        self.on_route_launch_clicked()
+
+    def on_queue_next_clicked(self):
+        self._append_log("UI ROUTES: ручной переход к следующему маршруту отключен; очередь идет по завершению текущего сценария.")
+
+    def on_queue_stop_clicked(self):
+        self._append_log("UI ROUTES: остановка выполняется через выключение Activate Control или Disconnect.")
 
     def on_connect_clicked(self):
         if self.btn_connect.text() == "Connect":
@@ -1706,9 +1820,9 @@ class MainWindow(QMainWindow):
         self.control_active = checked
         self.btn_control.setText("Control ACTIVE" if checked else "Activate Control")
         self.btn_control.setStyleSheet(
-            "background-color: #11823a; color: white; padding: 10px; border-radius: 8px;"
+            "background-color: #11823a; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
             if checked else
-            "background-color: #3c3d46; color: white; padding: 10px; border-radius: 8px;"
+            "background-color: #8a1f2d; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
         )
         self.control_toggled.emit(checked)
 
@@ -1719,12 +1833,12 @@ class MainWindow(QMainWindow):
             if is_active:
                 self.route_preview.set_route_state(
                     str(first.get("name", "Маршрут")),
-                    "AI Control включен. Нажмите Activate Control",
+                    "AI Control включен. Нажмите Подготовить маршрут/очередь",
                     0,
                     "armed",
                     route=first,
                 )
-                self._append_log("UI AI: AI Control включен; сценарий запустится по Activate Control.")
+                self._append_log("UI AI: AI Control включен; подготовьте маршрут/очередь, запуск будет по Activate Control.")
             else:
                 self.route_preview.set_route_state(
                     str(first.get("name", "Маршрут")),
@@ -1756,7 +1870,8 @@ class MainWindow(QMainWindow):
             route = first
 
         default_messages = {
-            "armed": "AI Control включен. Нажмите Activate Control",
+            "armed": "AI Control включен. Подготовьте маршрут/очередь",
+            "prepared": "Запуск подготовлен. Нажмите Activate Control",
             "loading": "Загрузка мира и сценария",
             "starting": "Запуск агента и спавн машины",
             "running": "Сценарий выполняется",
@@ -1890,6 +2005,8 @@ class MainWindow(QMainWindow):
     def _render_camera_pixmap(self):
         if not self._last_camera_pixmap:
             return
+        if hasattr(self.video_panel, "set_frame_aspect"):
+            self.video_panel.set_frame_aspect(self._last_camera_pixmap.width(), self._last_camera_pixmap.height())
         target_size = self.video_panel.size()
         if target_size.width() <= 1 or target_size.height() <= 1:
             return

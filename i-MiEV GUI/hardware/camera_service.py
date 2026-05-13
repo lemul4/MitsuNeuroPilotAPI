@@ -197,6 +197,37 @@ class CarlaCameraService:
         bgr = array[:, :, :3]
         return np.ascontiguousarray(bgr)
 
+
+    @staticmethod
+    def _fit_cover(frame, slot_w, slot_h):
+        """Resize without distortion and crop the excess so the slot is filled."""
+        if frame is None:
+            return np.zeros((slot_h, slot_w, 3), dtype=np.uint8)
+
+        h, w = frame.shape[:2]
+        if w <= 0 or h <= 0:
+            return np.zeros((slot_h, slot_w, 3), dtype=np.uint8)
+
+        scale = max(slot_w / float(w), slot_h / float(h))
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        x = max(0, (new_w - slot_w) // 2)
+        y = max(0, (new_h - slot_h) // 2)
+        return np.ascontiguousarray(resized[y:y + slot_h, x:x + slot_w])
+
+    @staticmethod
+    def _draw_panel(canvas, frame, x, y, w, h, label):
+        panel = CarlaCameraService._fit_cover(frame, w, h)
+        CarlaCameraService._put_label(panel, label)
+
+        # subtle frame, so the thumbnail reads as a camera window instead of a black block
+        cv2.rectangle(panel, (0, 0), (w - 1, h - 1), (28, 32, 42), 3)
+        cv2.rectangle(panel, (2, 2), (w - 3, h - 3), (190, 200, 220), 1)
+
+        canvas[y:y + h, x:x + w] = panel
+
     @staticmethod
     def _put_label(frame, text):
         cv2.rectangle(frame, (0, 0), (210, 34), (0, 0, 0), -1)
@@ -220,28 +251,20 @@ class CarlaCameraService:
         if front is None and left is None and right is None:
             return None
 
-        placeholder = np.zeros((450, 800, 3), dtype=np.uint8)
-        if front is None:
-            front = placeholder.copy()
-            self._put_label(front, "FRONT: waiting")
-        if left is None:
-            left = placeholder.copy()
-            self._put_label(left, "LEFT: waiting")
-        if right is None:
-            right = placeholder.copy()
-            self._put_label(right, "RIGHT: waiting")
+        # 16:9 output. The UI video widget is also 16:9, so no outer black bars are needed.
+        # FRONT fills the whole canvas. LEFT/RIGHT are picture-in-picture panels.
+        canvas = self._fit_cover(front, 1280, 720)
+        self._put_label(canvas, "FRONT")
 
-        front = cv2.resize(front, (1280, 450), interpolation=cv2.INTER_AREA)
-        left = cv2.resize(left, (640, 270), interpolation=cv2.INTER_AREA)
-        right = cv2.resize(right, (640, 270), interpolation=cv2.INTER_AREA)
+        thumb_w = 390
+        thumb_h = 219  # 16:9
+        margin = 22
+        bottom = 720 - margin - thumb_h
 
-        self._put_label(front, "FRONT")
-        self._put_label(left, "LEFT")
-        self._put_label(right, "RIGHT")
+        self._draw_panel(canvas, left, margin, bottom, thumb_w, thumb_h, "LEFT")
+        self._draw_panel(canvas, right, 1280 - margin - thumb_w, bottom, thumb_w, thumb_h, "RIGHT")
 
-        bottom = np.hstack([left, right])
-        mosaic = np.vstack([front, bottom])
-        return mosaic
+        return canvas
 
     def _process_image(self, camera_name, image):
         try:
