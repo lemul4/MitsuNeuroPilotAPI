@@ -207,3 +207,6 @@ visualization/
 *:Zone.Identifier
 telemetry_*
 *.txt
+*.jsonl
+.mnp_runtime/
+.idea/
