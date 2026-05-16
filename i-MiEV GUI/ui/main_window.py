@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QGroupBox, QGridLayout,
     QProgressBar, QTableWidget, QTableWidgetItem,
     QHeaderView, QDoubleSpinBox, QCheckBox, QDialog,
-    QLineEdit, QScrollArea, QFrame, QSizePolicy, QTextEdit, QTreeView
+    QLineEdit, QScrollArea, QFrame, QSizePolicy, QTextEdit, QTreeView, QStackedWidget
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QEvent, QThread, QAbstractItemModel, QModelIndex, QObject, QSize, QRect
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QBrush, QFont, QLinearGradient
@@ -19,6 +19,11 @@ import xml.etree.ElementTree as ET
 import pyqtgraph as pg
 
 from ui.widgets import SteeringWidget
+
+try:
+    from ui.real_mission_panel import RealMissionPanel
+except Exception:
+    RealMissionPanel = None
 
 try:
     from utils import discover_routes_fast
@@ -851,6 +856,8 @@ class MainWindow(QMainWindow):
     pid_update_requested = Signal(float, float, float)
     ai_toggled = Signal(bool)
     telemetry_toggled = Signal(bool)
+    real_mission_validated = Signal(dict)
+    real_speed_cap_changed = Signal(float)
 
     # Сигналы маршрутов оставлены как UI-обертка: контроллер может подключиться к нужному.
     # Если в main.py они не используются, ничего в backend-логике не меняется.
@@ -895,6 +902,7 @@ class MainWindow(QMainWindow):
         self._route_loader_thread = None
         self._stdout_redirect = None
         self._stderr_redirect = None
+        self.current_ui_mode = "carla"
 
         self.setup_ui()
 
@@ -933,9 +941,47 @@ class MainWindow(QMainWindow):
 
         self._install_console_redirect()
         self.statusBar().messageChanged.connect(self._on_status_message_changed)
+        self.set_ui_mode("carla")
 
         self.setFocusPolicy(Qt.StrongFocus)
         self.setFocus()
+
+    def _on_real_mission_validated(self, mission):
+        self._append_log(f"REAL MISSION: validated {mission.get('name', 'mission')}")
+        self.real_mission_validated.emit(dict(mission or {}))
+
+    def on_device_selection_changed(self, text):
+        text = str(text or "")
+        if text == "VIRTUAL_DEMO_MODE":
+            self.set_ui_mode("carla")
+        else:
+            self.set_ui_mode("real")
+
+    def set_ui_mode(self, mode):
+        mode = "real" if str(mode).lower() in {"real", "mock", "vehicle", "real_vehicle"} else "carla"
+        self.current_ui_mode = mode
+        if hasattr(self, "mode_launcher_stack"):
+            self.mode_launcher_stack.setCurrentIndex(1 if mode == "real" else 0)
+        if hasattr(self, "right_panel_title"):
+            self.right_panel_title.setText("Mission" if mode == "real" else "Очередь")
+        if hasattr(self, "chk_ai"):
+            self.chk_ai.setText("AI Preview" if mode == "real" else "AI Control")
+        if hasattr(self, "btn_control") and not self.btn_control.isChecked():
+            self.btn_control.setText("Activate Control")
+        if hasattr(self, "btn_select_routes"):
+            self.btn_select_routes.setEnabled(mode != "real")
+        if hasattr(self, "btn_route_launch"):
+            self.btn_route_launch.setEnabled(mode != "real" and bool(getattr(self, "route_queue", [])))
+
+    def set_real_vehicle_state(self, state, message=""):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_runtime_status"):
+            self.real_mission_panel.set_runtime_status(str(state), str(message or ""))
+        if message:
+            self._append_log(f"REAL VEHICLE: {state}: {message}")
+
+    def set_real_readiness(self, route=False, pose=False, cameras=False, ai=False, vehicle=False):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_readiness"):
+            self.real_mission_panel.set_readiness(route=route, pose=pose, cameras=cameras, ai=ai, vehicle=vehicle)
 
     def _build_left_dashboard(self):
         panel = QFrame()
@@ -1014,8 +1060,12 @@ class MainWindow(QMainWindow):
         self.combo_ports = QComboBox()
         import serial.tools.list_ports
         self.combo_ports.addItem("VIRTUAL_DEMO_MODE")
+        self.combo_ports.addItem("TEST_MOCK_VEHICLE")
+        self.combo_ports.addItem("TEST_REPLAY_LOG")
+        self.combo_ports.addItem("TEST_SERIAL_LOOPBACK")
         for port in serial.tools.list_ports.comports():
             self.combo_ports.addItem(port.device)
+        self.combo_ports.currentTextChanged.connect(self.on_device_selection_changed)
         conn_layout.addWidget(self.combo_ports, stretch=1)
 
         self.btn_connect = QPushButton("Connect")
@@ -1043,9 +1093,37 @@ class MainWindow(QMainWindow):
         pid_layout.addWidget(btn_send_pid)
         mid_col.addWidget(gb_pid)
 
-        mid_col.addWidget(self._build_route_launcher())
+        mid_col.addWidget(self._build_mode_specific_launcher())
         mid_col.addLayout(self._build_media_and_plots(), stretch=1)
         return panel
+
+    def _build_mode_specific_launcher(self):
+        # Fixed-height stack: changing VIRTUAL/REAL/MOCK must not reflow the
+        # whole center panel. Extra real-mode controls live in the Details
+        # drop-down inside RealMissionPanel.
+        launcher_height = 110
+        self.mode_launcher_stack = QStackedWidget()
+        self.mode_launcher_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mode_launcher_stack.setFixedHeight(launcher_height)
+
+        self.carla_route_launcher = self._build_route_launcher()
+        self.carla_route_launcher.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.carla_route_launcher.setFixedHeight(104)
+        self.mode_launcher_stack.addWidget(self.carla_route_launcher)
+
+        if RealMissionPanel is not None:
+            self.real_mission_panel = RealMissionPanel(self)
+            self.real_mission_panel.mission_validated.connect(self._on_real_mission_validated)
+            self.real_mission_panel.speed_cap_changed.connect(self.real_speed_cap_changed.emit)
+        else:
+            self.real_mission_panel = QGroupBox("Navigator / Mission")
+            self.real_mission_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.real_mission_panel.setFixedHeight(104)
+            fallback_layout = QHBoxLayout(self.real_mission_panel)
+            fallback_layout.addWidget(QLabel("RealMissionPanel is unavailable"))
+
+        self.mode_launcher_stack.addWidget(self.real_mission_panel)
+        return self.mode_launcher_stack
 
     def _build_route_launcher(self):
         gb_route = QGroupBox("Route Launcher")
@@ -1135,9 +1213,9 @@ class MainWindow(QMainWindow):
         right_col.setContentsMargins(12, 12, 12, 12)
         right_col.setSpacing(10)
 
-        title = QLabel("Очередь")
-        title.setObjectName("PanelTitle")
-        right_col.addWidget(title)
+        self.right_panel_title = QLabel("Очередь")
+        self.right_panel_title.setObjectName("PanelTitle")
+        right_col.addWidget(self.right_panel_title)
 
         status_card = QFrame()
         status_card.setObjectName("Card")
@@ -1818,7 +1896,10 @@ class MainWindow(QMainWindow):
 
     def on_control_toggled(self, checked):
         self.control_active = checked
-        self.btn_control.setText("Control ACTIVE" if checked else "Activate Control")
+        if checked and getattr(self, "current_ui_mode", "carla") == "real":
+            self.btn_control.setText("Deactivate to Manual")
+        else:
+            self.btn_control.setText("Control ACTIVE" if checked else "Activate Control")
         self.btn_control.setStyleSheet(
             "background-color: #11823a; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
             if checked else
@@ -1828,6 +1909,12 @@ class MainWindow(QMainWindow):
 
     def _on_ai_checkbox_changed(self, *_):
         is_active = self.chk_ai.isChecked()
+        if getattr(self, "current_ui_mode", "carla") == "real":
+            self._append_log("REAL AI: AI Preview включен." if is_active else "REAL AI: AI Preview выключен.")
+            if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_readiness"):
+                self.real_mission_panel.set_readiness(route=True, pose=True, cameras=True, ai=is_active, vehicle=False)
+            self.ai_toggled.emit(is_active)
+            return
         if self.route_queue:
             first = self.route_queue[0]
             if is_active:
