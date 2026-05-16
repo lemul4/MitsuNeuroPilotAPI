@@ -1049,6 +1049,8 @@ class TrainingConfig(BaseConfig):
                 return "a4000"
             elif "rtx 3080" in name:
                 return "rtx3080"
+            elif "rtx 3060" in name:
+                return "rtx3060"
             else:
                 raise Exception(
                     f"Unknown GPU name: {name}. Please register it in the config."
