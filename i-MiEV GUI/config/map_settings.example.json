@@ -1,0 +1,13 @@
+{
+  "default_center": {
+    "lat": 55.000000,
+    "lon": 37.000000,
+    "zoom": 17
+  },
+  "current_location": {
+    "lat": 55.000000,
+    "lon": 37.000000,
+    "yaw_deg": 0.0
+  },
+  "use_default_center_as_current": false
+}

@@ -1,0 +1,533 @@
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import webbrowser
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Dict, Tuple
+
+from PySide6.QtCore import QObject, Signal, Slot, Qt, QUrl
+from PySide6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QLabel,
+    QPushButton,
+    QFrame,
+    QSizePolicy,
+    QMessageBox,
+    QLineEdit,
+)
+
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebChannel import QWebChannel
+    WEBENGINE_AVAILABLE = True
+except Exception:  # pragma: no cover - depends on local GUI environment
+    QWebEngineView = None
+    QWebEnginePage = None
+    QWebChannel = None
+    WEBENGINE_AVAILABLE = False
+
+
+@dataclass
+class MapPoint:
+    lat: float
+    lon: float
+    yaw_deg: float = 0.0
+
+    def to_dict(self) -> Dict[str, float]:
+        return {"lat": float(self.lat), "lon": float(self.lon), "yaw_deg": float(self.yaw_deg)}
+
+
+class MapBridge(QObject):
+    point_changed = Signal(str, float, float)
+    current_changed = Signal(float, float)
+    status_changed = Signal(str)
+
+    @Slot(str, float, float)
+    def setPoint(self, label: str, lat: float, lon: float) -> None:
+        label = str(label or "").upper()
+        if label not in {"A", "B"}:
+            return
+        self.point_changed.emit(label, float(lat), float(lon))
+
+    @Slot(float, float)
+    def setCurrent(self, lat: float, lon: float) -> None:
+        self.current_changed.emit(float(lat), float(lon))
+
+    @Slot(str)
+    def log(self, message: str) -> None:
+        self.status_changed.emit(str(message or ""))
+
+
+def _float_or_none(value):
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return float(str(value).replace(",", "."))
+    except Exception:
+        return None
+
+
+def _project_config_candidates() -> Tuple[Path, ...]:
+    here = Path(__file__).resolve()
+    return (
+        Path.cwd() / "config" / "map_settings.json",
+        here.parent.parent / "config" / "map_settings.json",
+        here.parent.parent.parent / "config" / "map_settings.json",
+    )
+
+
+def _load_map_settings() -> dict:
+    data: dict = {}
+    for path in _project_config_candidates():
+        try:
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data.update(loaded)
+        except Exception:
+            continue
+    return data
+
+
+def _point_from_env(prefix: str) -> Optional[MapPoint]:
+    lat = _float_or_none(os.environ.get(f"MITSU_{prefix}_LAT"))
+    lon = _float_or_none(os.environ.get(f"MITSU_{prefix}_LON"))
+    yaw = _float_or_none(os.environ.get(f"MITSU_{prefix}_YAW"))
+    if lat is None or lon is None:
+        return None
+    return MapPoint(lat, lon, yaw or 0.0)
+
+
+def _point_from_settings_key(settings: dict, key: str) -> Optional[MapPoint]:
+    value = settings.get(key)
+    if not isinstance(value, dict):
+        return None
+    lat = _float_or_none(value.get("lat", value.get("latitude")))
+    lon = _float_or_none(value.get("lon", value.get("lng", value.get("longitude"))))
+    yaw = _float_or_none(value.get("yaw_deg", value.get("yaw")))
+    if lat is None or lon is None:
+        return None
+    return MapPoint(lat, lon, yaw or 0.0)
+
+
+def _load_current_location() -> Optional[MapPoint]:
+    env = _point_from_env("CURRENT")
+    if env is not None:
+        return env
+    settings = _load_map_settings()
+    point = _point_from_settings_key(settings, "current_location")
+    if point is not None:
+        return point
+    if bool(settings.get("use_default_center_as_current", False)):
+        return _point_from_settings_key(settings, "default_center")
+    return None
+
+
+def _load_default_center() -> Tuple[float, float, int]:
+    env_lat = _float_or_none(os.environ.get("MITSU_MAP_CENTER_LAT"))
+    env_lon = _float_or_none(os.environ.get("MITSU_MAP_CENTER_LON"))
+    env_zoom = _float_or_none(os.environ.get("MITSU_MAP_CENTER_ZOOM"))
+    if env_lat is not None and env_lon is not None:
+        return env_lat, env_lon, int(env_zoom or 17)
+
+    current = _load_current_location()
+    if current is not None:
+        return current.lat, current.lon, 18
+
+    settings = _load_map_settings()
+    center = settings.get("default_center", settings)
+    if isinstance(center, dict):
+        lat = _float_or_none(center.get("lat", center.get("latitude")))
+        lon = _float_or_none(center.get("lon", center.get("lng", center.get("longitude"))))
+        zoom = _float_or_none(center.get("zoom"))
+        if lat is not None and lon is not None:
+            return lat, lon, int(zoom or 17)
+
+    return 0.0, 0.0, 2
+
+
+class MapPickerDialog(QDialog):
+    """Interactive A/B point picker.
+
+    A defaults to the configured/current location when it is available. The user
+    can still drag A or click another position to override it manually.
+    """
+
+    points_selected = Signal(dict)
+
+    def __init__(self, parent=None, start: Optional[dict] = None, goal: Optional[dict] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Карта маршрута: A → B")
+        self.resize(1120, 720)
+        self.setMinimumSize(920, 560)
+        self.current_location: Optional[MapPoint] = _load_current_location()
+        self.start_point: Optional[MapPoint] = self._point_from_dict(start) or self.current_location
+        self.goal_point: Optional[MapPoint] = self._point_from_dict(goal)
+        self._setup_ui()
+
+    @staticmethod
+    def _point_from_dict(data) -> Optional[MapPoint]:
+        if not isinstance(data, dict):
+            return None
+        try:
+            lat = data.get("lat", data.get("latitude"))
+            lon = data.get("lon", data.get("lng", data.get("longitude")))
+            if lat is None or lon is None:
+                return None
+            return MapPoint(float(lat), float(lon), float(data.get("yaw_deg", data.get("yaw", 0.0)) or 0.0))
+        except Exception:
+            return None
+
+    def _setup_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("Карта A → B")
+        title.setObjectName("StrongText")
+        title.setStyleSheet("font-weight: 800; font-size: 18px;")
+        header.addWidget(title)
+        self.status_label = QLabel(
+            "A по умолчанию = текущее местоположение. Клик 1 задает/переставляет B, маркеры можно перетаскивать."
+        )
+        self.status_label.setObjectName("MutedText")
+        header.addWidget(self.status_label, stretch=1)
+        root.addLayout(header)
+
+        if WEBENGINE_AVAILABLE:
+            self.bridge = MapBridge(self)
+            self.bridge.point_changed.connect(self._on_bridge_point)
+            self.bridge.current_changed.connect(self._on_bridge_current)
+            self.bridge.status_changed.connect(self.status_label.setText)
+            self.channel = QWebChannel(self)
+            self.channel.registerObject("bridge", self.bridge)
+            self.web = QWebEngineView(self)
+            self.web.page().setWebChannel(self.channel)
+            if QWebEnginePage is not None:
+                try:
+                    self.web.page().featurePermissionRequested.connect(self._grant_web_permission)
+                except Exception:
+                    pass
+            self.web.setHtml(self._build_html(embedded=True), QUrl("https://localhost/"))
+            root.addWidget(self.web, stretch=1)
+        else:
+            fallback = QFrame()
+            fallback.setObjectName("Card")
+            fallback.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            layout = QVBoxLayout(fallback)
+            msg = QLabel(
+                "Встроенная карта недоступна: в окружении нет QtWebEngine.\n\n"
+                "Для PySide6 WebEngine ставится через пакет PySide6-Addons, а не PySide6-WebEngine:\n"
+                "    pip install --upgrade PySide6 PySide6-Addons PySide6-Essentials\n\n"
+                "Можно открыть карту во внешнем браузере, выбрать A/B и скопировать lat/lon в поля ниже."
+            )
+            msg.setAlignment(Qt.AlignCenter)
+            msg.setWordWrap(True)
+            layout.addWidget(msg)
+            btn_external = QPushButton("Открыть карту во внешнем браузере")
+            btn_external.clicked.connect(self._open_external_map)
+            layout.addWidget(btn_external)
+            root.addWidget(fallback, stretch=1)
+
+        form = QGridLayout()
+        form.addWidget(QLabel("A lat"), 0, 0)
+        self.input_a_lat = QLineEdit()
+        form.addWidget(self.input_a_lat, 0, 1)
+        form.addWidget(QLabel("A lon"), 0, 2)
+        self.input_a_lon = QLineEdit()
+        form.addWidget(self.input_a_lon, 0, 3)
+        form.addWidget(QLabel("B lat"), 1, 0)
+        self.input_b_lat = QLineEdit()
+        form.addWidget(self.input_b_lat, 1, 1)
+        form.addWidget(QLabel("B lon"), 1, 2)
+        self.input_b_lon = QLineEdit()
+        form.addWidget(self.input_b_lon, 1, 3)
+        root.addLayout(form)
+        self._sync_inputs_from_points()
+
+        bottom = QHBoxLayout()
+        self.coord_label = QLabel(self._coord_text())
+        self.coord_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        bottom.addWidget(self.coord_label, stretch=1)
+        btn_current_as_a = QPushButton("A = мое местоположение")
+        btn_current_as_a.clicked.connect(self._set_a_to_current)
+        bottom.addWidget(btn_current_as_a)
+        btn_clear = QPushButton("Очистить")
+        btn_clear.clicked.connect(self._clear_points)
+        bottom.addWidget(btn_clear)
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        bottom.addWidget(btn_cancel)
+        btn_apply = QPushButton("Применить A/B")
+        btn_apply.setObjectName("PrimaryButton")
+        btn_apply.clicked.connect(self._apply_points)
+        bottom.addWidget(btn_apply)
+        root.addLayout(bottom)
+
+    def _grant_web_permission(self, security_origin, feature):
+        try:
+            if QWebEnginePage is None:
+                return
+            allowed_features = []
+            if hasattr(QWebEnginePage, "Geolocation"):
+                allowed_features.append(QWebEnginePage.Geolocation)
+            if feature in allowed_features:
+                self.web.page().setFeaturePermission(
+                    security_origin,
+                    feature,
+                    QWebEnginePage.PermissionGrantedByUser,
+                )
+        except Exception:
+            pass
+
+    def _center(self):
+        if self.start_point and self.goal_point:
+            return ((self.start_point.lat + self.goal_point.lat) * 0.5, (self.start_point.lon + self.goal_point.lon) * 0.5, 18)
+        if self.start_point:
+            return (self.start_point.lat, self.start_point.lon, 18)
+        if self.current_location:
+            return (self.current_location.lat, self.current_location.lon, 18)
+        return _load_default_center()
+
+    def _build_html(self, embedded: bool = True) -> str:
+        center_lat, center_lon, zoom = self._center()
+        start_json = json.dumps(self.start_point.to_dict() if self.start_point else None)
+        goal_json = json.dumps(self.goal_point.to_dict() if self.goal_point else None)
+        current_json = json.dumps(self.current_location.to_dict() if self.current_location else None)
+        bridge_script = "<script src=\"qrc:///qtwebchannel/qwebchannel.js\"></script>" if embedded else ""
+        bridge_init = "try { if (typeof qt !== 'undefined' && typeof QWebChannel !== 'undefined' && qt.webChannelTransport) { new QWebChannel(qt.webChannelTransport, function(channel) { bridge = channel.objects.bridge; }); } } catch (e) { console.log('QWebChannel init failed: ' + e.message); }" if embedded else ""
+        external_note = "" if embedded else "<div class='copybox'>После выбора A/B скопируйте координаты из этого поля в GUI.</div>"
+        return f"""<!doctype html>
+<html>
+<head>
+<meta charset=\"utf-8\" />
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\" />
+<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>
+{bridge_script}
+<style>
+  html, body, #map {{ width:100%; height:100%; margin:0; background:#111216; }}
+  .toolbar {{ position:absolute; z-index:1000; top:10px; left:10px; background:rgba(20,20,24,.92); color:#fff; padding:8px 10px; border-radius:8px; font-family:Arial,sans-serif; font-size:13px; max-width:520px; }}
+  .toolbar b {{ color:#ffd66e; }}
+  .toolbar button {{ margin-top:6px; padding:5px 8px; margin-right:5px; }}
+  #coords {{ margin-top:6px; width:480px; max-width:75vw; height:72px; }}
+  .copybox {{ color:#ffd66e; margin-top:4px; }}
+  .source-note {{ position:absolute; z-index:1000; right:10px; bottom:10px; background:rgba(255,255,255,.86); color:#111; padding:4px 7px; border-radius:5px; font:11px Arial,sans-serif; }}
+</style>
+</head>
+<body>
+<div id=\"map\"></div>
+<div class=\"toolbar\"><b>Выбор маршрута A → B</b><br/>Синий маркер = текущее местоположение. A можно перетащить вручную.<br/>
+<button onclick=\"locateMe()\">Мое местоположение</button>
+<button onclick=\"setAToCurrent()\">A = мое местоположение</button>
+<button onclick=\"previewRoadRoute()\">Показать маршрут по дорогам</button><br/>
+<textarea id=\"coords\" readonly></textarea>{external_note}</div>
+<div class=\"source-note\">Данные карты: OpenStreetMap</div>
+<script>
+var bridge = null;
+{bridge_init}
+var map = L.map('map', {{attributionControl:false}}).setView([{center_lat:.8f}, {center_lon:.8f}], {int(zoom)});
+L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{maxZoom: 20, attribution: ''}}).addTo(map);
+var points = {{A: {start_json}, B: {goal_json}}};
+var current = {current_json};
+var markers = {{A: null, B: null, current: null}};
+var line = null;
+var roadLine = null;
+function markerColor(label) {{ return label === 'A' ? '#1f9d55' : '#d93025'; }}
+function makeIcon(label) {{
+  return L.divIcon({{html:'<div style=\"background:' + markerColor(label) + '; color:white; border-radius:14px; width:28px; height:28px; line-height:28px; text-align:center; font-weight:800; border:2px solid white; box-shadow:0 1px 5px #000;\">'+label+'</div>', className:'', iconSize:[28,28], iconAnchor:[14,14]}});
+}}
+function makeCurrentIcon() {{
+  return L.divIcon({{html:'<div style=\"background:#2474ff; border:3px solid white; border-radius:13px; width:20px; height:20px; box-shadow:0 0 0 5px rgba(36,116,255,.25), 0 1px 6px #000;\"></div>', className:'', iconSize:[26,26], iconAnchor:[13,13]}});
+}}
+function status(msg) {{ if (bridge) bridge.log(msg); }}
+function updateCoordsBox() {{
+  var a = points.A ? (points.A.lat.toFixed(7) + ', ' + points.A.lon.toFixed(7)) : 'не задана';
+  var b = points.B ? (points.B.lat.toFixed(7) + ', ' + points.B.lon.toFixed(7)) : 'не задана';
+  var c = current ? (current.lat.toFixed(7) + ', ' + current.lon.toFixed(7)) : 'не определено';
+  document.getElementById('coords').value = 'Текущая: ' + c + '\\nA: ' + a + '\\nB: ' + b;
+}}
+function emit(label) {{ if (bridge && points[label]) bridge.setPoint(label, points[label].lat, points[label].lon); }}
+function emitCurrent() {{ if (bridge && current) bridge.setCurrent(current.lat, current.lon); }}
+function redrawCurrent() {{
+  if (!current) return;
+  var ll = [current.lat, current.lon];
+  if (!markers.current) {{
+    markers.current = L.marker(ll, {{draggable:false, icon:makeCurrentIcon(), title:'Текущее местоположение'}}).addTo(map);
+  }} else {{ markers.current.setLatLng(ll); }}
+  emitCurrent();
+}}
+function redraw() {{
+  ['A','B'].forEach(function(label) {{
+    if (!points[label]) return;
+    var ll = [points[label].lat, points[label].lon];
+    if (!markers[label]) {{
+      markers[label] = L.marker(ll, {{draggable:true, icon:makeIcon(label)}}).addTo(map);
+      markers[label].on('dragend', function(e) {{
+        var p = e.target.getLatLng();
+        points[label] = {{lat:p.lat, lon:p.lng}};
+        emit(label); redraw();
+      }});
+    }} else {{ markers[label].setLatLng(ll); }}
+    emit(label);
+  }});
+  redrawCurrent();
+  if (line) map.removeLayer(line);
+  if (points.A && points.B) {{
+    line = L.polyline([[points.A.lat, points.A.lon], [points.B.lat, points.B.lon]], {{color:'#ffd66e', weight:3, opacity:0.55, dashArray:'7,8'}}).addTo(map);
+  }}
+  updateCoordsBox();
+}}
+function setPoint(label, latlng) {{
+  points[label] = {{lat:latlng.lat, lon:latlng.lng}};
+  status('Точка ' + label + ': ' + latlng.lat.toFixed(7) + ', ' + latlng.lng.toFixed(7));
+  redraw();
+}}
+function setAToCurrent() {{
+  if (!current) {{ locateMe(true); return; }}
+  setPoint('A', L.latLng(current.lat, current.lon));
+}}
+function locateMe(assignA) {{
+  if (!navigator.geolocation) {{ status('Геолокация браузера недоступна. Задайте current_location в config/map_settings.json или выберите A вручную.'); return; }}
+  navigator.geolocation.getCurrentPosition(function(pos) {{
+    var lat = pos.coords.latitude;
+    var lon = pos.coords.longitude;
+    current = {{lat:lat, lon:lon}};
+    map.setView([lat, lon], 18);
+    redrawCurrent();
+    if (assignA || !points.A) setPoint('A', L.latLng(lat, lon));
+    else redraw();
+    status('Текущее местоположение: ' + lat.toFixed(7) + ', ' + lon.toFixed(7));
+  }}, function(err) {{
+    status('Геолокация недоступна: ' + err.message + '. Задайте config/map_settings.json или выберите A вручную.');
+  }}, {{enableHighAccuracy:true, timeout:8000, maximumAge:10000}});
+}}
+function previewRoadRoute() {{
+  if (!points.A || !points.B) {{ status('Для road-routing задайте A и B.'); return; }}
+  var url = 'https://router.project-osrm.org/route/v1/driving/' +
+      points.A.lon.toFixed(7) + ',' + points.A.lat.toFixed(7) + ';' +
+      points.B.lon.toFixed(7) + ',' + points.B.lat.toFixed(7) +
+      '?overview=full&geometries=geojson&steps=false&alternatives=false';
+  status('Запрос road-routing OSRM...');
+  fetch(url).then(function(r) {{ return r.json(); }}).then(function(data) {{
+    if (!data.routes || !data.routes.length || !data.routes[0].geometry) throw new Error(data.message || data.code || 'маршрут не найден');
+    var coords = data.routes[0].geometry.coordinates.map(function(p) {{ return [p[1], p[0]]; }});
+    if (roadLine) map.removeLayer(roadLine);
+    roadLine = L.polyline(coords, {{color:'#2474ff', weight:5, opacity:0.9}}).addTo(map);
+    map.fitBounds(roadLine.getBounds(), {{padding:[30,30]}});
+    var dist = data.routes[0].distance || 0;
+    status('Road-routing OK: ' + coords.length + ' точек, ' + (dist/1000.0).toFixed(2) + ' км. В GUI выберите режим "По дорогам" и нажмите Validate.');
+  }}).catch(function(err) {{
+    status('OSRM не построил маршрут: ' + err.message + '. Проверьте интернет, координаты и наличие дорог в OSM.');
+  }});
+}}
+map.on('click', function(e) {{
+  if (!points.A) setPoint('A', e.latlng);
+  else if (!points.B) setPoint('B', e.latlng);
+  else setPoint('B', e.latlng);
+}});
+redraw();
+if (!current && !points.A && !points.B) {{ setTimeout(locateMe, 600); }}
+if (points.A && points.B) {{ setTimeout(previewRoadRoute, 700); }}
+</script>
+</body>
+</html>"""
+
+    def _open_external_map(self):
+        try:
+            html = self._build_html(embedded=False)
+            path = Path(tempfile.gettempdir()) / "mitsu_ab_map_picker.html"
+            path.write_text(html, encoding="utf-8")
+            webbrowser.open(path.as_uri())
+            self.status_label.setText("Карта открыта во внешнем браузере. Скопируйте A/B в поля ниже.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось открыть карту", str(exc))
+
+    def _on_bridge_point(self, label: str, lat: float, lon: float) -> None:
+        point = MapPoint(float(lat), float(lon), 0.0)
+        if label == "A":
+            self.start_point = point
+        elif label == "B":
+            self.goal_point = point
+        self._sync_inputs_from_points()
+        self.coord_label.setText(self._coord_text())
+
+    def _on_bridge_current(self, lat: float, lon: float) -> None:
+        self.current_location = MapPoint(float(lat), float(lon), 0.0)
+        if self.start_point is None:
+            self.start_point = self.current_location
+        self._sync_inputs_from_points()
+        self.coord_label.setText(self._coord_text())
+
+    def _coord_text(self) -> str:
+        def fmt(p):
+            return "не задана" if p is None else f"{p.lat:.7f}, {p.lon:.7f}"
+        cur = "не определено" if self.current_location is None else f"{self.current_location.lat:.7f}, {self.current_location.lon:.7f}"
+        return f"Текущая: {cur}    A: {fmt(self.start_point)}    B: {fmt(self.goal_point)}"
+
+    def _sync_inputs_from_points(self):
+        if not hasattr(self, "input_a_lat"):
+            return
+        if self.start_point is not None:
+            self.input_a_lat.setText(f"{self.start_point.lat:.7f}")
+            self.input_a_lon.setText(f"{self.start_point.lon:.7f}")
+        if self.goal_point is not None:
+            self.input_b_lat.setText(f"{self.goal_point.lat:.7f}")
+            self.input_b_lon.setText(f"{self.goal_point.lon:.7f}")
+
+    def _sync_points_from_inputs(self) -> bool:
+        a_lat = _float_or_none(self.input_a_lat.text())
+        a_lon = _float_or_none(self.input_a_lon.text())
+        b_lat = _float_or_none(self.input_b_lat.text())
+        b_lon = _float_or_none(self.input_b_lon.text())
+        if None in (a_lat, a_lon, b_lat, b_lon):
+            return False
+        self.start_point = MapPoint(a_lat, a_lon, 0.0)
+        self.goal_point = MapPoint(b_lat, b_lon, 0.0)
+        self.coord_label.setText(self._coord_text())
+        return True
+
+    def _set_a_to_current(self):
+        if self.current_location is None:
+            QMessageBox.information(
+                self,
+                "Текущее местоположение не задано",
+                "Задайте current_location в config/map_settings.json, переменные MITSU_CURRENT_LAT/MITSU_CURRENT_LON или нажмите кнопку геолокации на карте.",
+            )
+            return
+        self.start_point = self.current_location
+        self._sync_inputs_from_points()
+        self.coord_label.setText(self._coord_text())
+        if WEBENGINE_AVAILABLE and hasattr(self, "web"):
+            self.web.setHtml(self._build_html(embedded=True), QUrl("https://localhost/"))
+
+    def _clear_points(self):
+        self.start_point = self.current_location
+        self.goal_point = None
+        for widget in (self.input_b_lat, self.input_b_lon):
+            widget.clear()
+        if self.start_point is not None:
+            self.input_a_lat.setText(f"{self.start_point.lat:.7f}")
+            self.input_a_lon.setText(f"{self.start_point.lon:.7f}")
+        else:
+            self.input_a_lat.clear()
+            self.input_a_lon.clear()
+        self.coord_label.setText(self._coord_text())
+        if WEBENGINE_AVAILABLE and hasattr(self, "web"):
+            self.web.setHtml(self._build_html(embedded=True), QUrl("https://localhost/"))
+
+    def _apply_points(self):
+        if not self._sync_points_from_inputs():
+            QMessageBox.warning(self, "A/B не выбраны", "Сначала задайте A и B lat/lon.")
+            return
+        payload = {"start_geo": self.start_point.to_dict(), "goal_geo": self.goal_point.to_dict()}
+        self.points_selected.emit(payload)
+        self.accept()
