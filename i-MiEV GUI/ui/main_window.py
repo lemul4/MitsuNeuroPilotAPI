@@ -963,11 +963,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "mode_launcher_stack"):
             self.mode_launcher_stack.setCurrentIndex(1 if mode == "real" else 0)
         if hasattr(self, "right_panel_title"):
-            self.right_panel_title.setText("Mission" if mode == "real" else "Очередь")
+            self.right_panel_title.setText("Миссия" if mode == "real" else "Очередь")
         if hasattr(self, "chk_ai"):
-            self.chk_ai.setText("AI Preview" if mode == "real" else "AI Control")
+            self.chk_ai.setText("Предпросмотр ИИ" if mode == "real" else "AI Control")
         if hasattr(self, "btn_control") and not self.btn_control.isChecked():
-            self.btn_control.setText("Activate Control")
+            self.btn_control.setText("Активировать управление")
         if hasattr(self, "btn_select_routes"):
             self.btn_select_routes.setEnabled(mode != "real")
         if hasattr(self, "btn_route_launch"):
@@ -982,6 +982,14 @@ class MainWindow(QMainWindow):
     def set_real_readiness(self, route=False, pose=False, cameras=False, ai=False, vehicle=False):
         if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_readiness"):
             self.real_mission_panel.set_readiness(route=route, pose=pose, cameras=cameras, ai=ai, vehicle=vehicle)
+
+    def set_real_mission_summary(self, mission):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_mission_summary"):
+            self.real_mission_panel.set_mission_summary(mission)
+
+    def set_real_nav_goal(self, goal):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_nav_goal"):
+            self.real_mission_panel.set_nav_goal(goal)
 
     def _build_left_dashboard(self):
         panel = QFrame()
@@ -1897,9 +1905,9 @@ class MainWindow(QMainWindow):
     def on_control_toggled(self, checked):
         self.control_active = checked
         if checked and getattr(self, "current_ui_mode", "carla") == "real":
-            self.btn_control.setText("Deactivate to Manual")
+            self.btn_control.setText("Отключить ИИ / ручное")
         else:
-            self.btn_control.setText("Control ACTIVE" if checked else "Activate Control")
+            self.btn_control.setText("Управление активно" if checked else "Активировать управление")
         self.btn_control.setStyleSheet(
             "background-color: #11823a; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
             if checked else
@@ -2191,7 +2199,13 @@ class MainWindow(QMainWindow):
             self.pressed_keys.remove(event.key())
 
     def process_held_keys(self):
-        if not self.control_active:
+        manual_real_connected = (
+            getattr(self, "current_ui_mode", "carla") == "real"
+            and hasattr(self, "btn_connect")
+            and self.btn_connect.text() == "Disconnect"
+            and not self.control_active
+        )
+        if not self.control_active and not manual_real_connected:
             return
 
         MAX_ANGLE = 630  # Из config.py

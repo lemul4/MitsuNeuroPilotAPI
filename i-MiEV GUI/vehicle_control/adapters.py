@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from typing import Dict, Optional
 
@@ -102,6 +103,18 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
                 self.telemetry.accel_pct = float(data[0])
             elif can_id == 0x0004:
                 self.telemetry.gear = Gear.from_value(data[0])
+            # Optional future localization telemetry. These IDs are intentionally
+            # isolated here; if the MCU uses different IDs, change only this adapter.
+            elif can_id == 0x0100:
+                self.telemetry.x_m = float(int.from_bytes(data[0:2], "little", signed=True)) / 100.0
+                self.telemetry.y_m = float(int.from_bytes(data[2:4], "little", signed=True)) / 100.0
+                self.telemetry.pose_valid = True
+                self.telemetry.pose_source = "mcu_can_0x0100"
+            elif can_id == 0x0101:
+                raw_yaw = int.from_bytes(data[0:2], "little", signed=True)
+                self.telemetry.yaw_deg = float(raw_yaw) / 100.0
+                self.telemetry.pose_valid = True
+                self.telemetry.pose_source = "mcu_can_0x0101"
             self.telemetry.last_rx_monotonic = time.monotonic()
             self.telemetry.heartbeat_ok = True
         except Exception as exc:
@@ -126,6 +139,11 @@ class MockVehicleAdapter(BaseVehicleAdapter):
             gear=Gear.P,
             requested_gear=Gear.P,
             speed_kmh=0.0,
+            x_m=0.0,
+            y_m=0.0,
+            yaw_deg=0.0,
+            pose_valid=True,
+            pose_source="mock_odometry",
             last_rx_monotonic=time.monotonic(),
         )
 
@@ -168,11 +186,27 @@ class MockVehicleAdapter(BaseVehicleAdapter):
         brake_term = float(command.brake_pct) * 0.035
         drag = self.telemetry.speed_kmh * 0.015
         self.telemetry.speed_kmh = max(0.0, self.telemetry.speed_kmh + accel_term - brake_term - drag * dt)
+
+        # Lightweight bicycle-like mock odometry. This is for UI/HIL testing only.
+        steering_fraction = max(-1.0, min(1.0, float(command.steering_raw) / 100.0))
+        yaw_rate_deg_s = steering_fraction * max(10.0, self.telemetry.speed_kmh * 8.0)
+        self.telemetry.yaw_deg = (self.telemetry.yaw_deg + yaw_rate_deg_s * dt + 180.0) % 360.0 - 180.0
+        distance_m = (self.telemetry.speed_kmh / 3.6) * dt
+        yaw_rad = math.radians(self.telemetry.yaw_deg)
+        self.telemetry.x_m += math.cos(yaw_rad) * distance_m
+        self.telemetry.y_m += math.sin(yaw_rad) * distance_m
+        self.telemetry.pose_valid = True
+        self.telemetry.pose_source = "mock_odometry"
         self.telemetry.last_rx_monotonic = time.monotonic()
 
     def get_telemetry(self) -> VehicleTelemetry:
         if self.inject_heartbeat_loss:
             self.telemetry.heartbeat_ok = False
+        elif self.telemetry.connected:
+            self.telemetry.heartbeat_ok = True
+            self.telemetry.pose_valid = True
+            self.telemetry.pose_source = self.telemetry.pose_source or "mock_odometry"
+            self.telemetry.last_rx_monotonic = time.monotonic()
         return self.telemetry
 
 
