@@ -801,8 +801,9 @@ if __name__ == "__main__":
     dataset_name = "carla_leaderboard2"
 
     # Keep existing scenario filtering behavior
-    scenario_white_lists = ["BlockedIntersection", "DynamicObjectCrossing", "VehicleTurningRoute", "ParkedObstacle", "Accident", "ConstructionObstacle", "ParkingExit", "RedLightWithoutLeadVehicle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "VehicleTurningRoutePedestrian", "ParkingCutIn", "PedestrianCrossing", "StaticCutIn", "HardBreakRoute", "ConstructionObstacle", "VehicleTurningRoutePedestrian", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios" ]
-    #scenario_white_lists = ["DynamicObjectCrossing", "ParkingExit", "noScenarios", "ParkingCrossingPedestrian", "BlockedIntersection"]
+    # scenario_white_lists ="RedLightWithoutLeadVehicle", "ParkingExit","VehicleTurningRoutePedestrian", "VehicleTurningRoute", "StaticCutIn", "PedestrianCrossing", 
+    scenario_white_lists = ["BlockedIntersection", "DynamicObjectCrossing", "ParkedObstacle", "Accident", "ConstructionObstacle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "ParkingCutIn", "HardBreakRoute", "ConstructionObstacle", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios" ]
+    # scenario_white_lists = ["DynamicObjectCrossing", "ParkingExit", "noScenarios", "ParkingCrossingPedestrian", "BlockedIntersection"]
     scenario_blacklist = ["YieldToEmergencyVehicle", ]
 
     root_folder = Path(args.root_folder).expanduser()
