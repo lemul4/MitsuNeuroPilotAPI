@@ -190,6 +190,33 @@ class BaseConfig:
                     "fov": 60,
                 },
             }
+        elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+            return {
+                1: {
+                    "pos": [0.900, -0.0675, 1.550],
+                    "rot": [0.0, 0.0, 0.0],
+                    "width": 384,
+                    "height": 384,
+                    "cropped_height": 384,
+                    "fov": 90,
+                },
+                2: {
+                    "pos": [0.900, -0.0225, 1.550],
+                    "rot": [0.0, 0.0, 0.0],
+                    "width": 384,
+                    "height": 384,
+                    "cropped_height": 384,
+                    "fov": 26.27,
+                },
+                3: {
+                    "pos": [0.900, 0.0675, 1.550],
+                    "rot": [0.0, 0.0, 0.0],
+                    "width": 384,
+                    "height": 384,
+                    "cropped_height": 384,
+                    "fov": 50.03,
+                },
+            }
         elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             return {
                 1: {
