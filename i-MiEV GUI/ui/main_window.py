@@ -26,6 +26,11 @@ except Exception:
     RealMissionPanel = None
 
 try:
+    from ui.marquee_label import ScrollingLabel
+except Exception:
+    ScrollingLabel = QLabel
+
+try:
     from utils import discover_routes_fast
 except Exception:
     discover_routes_fast = None
@@ -876,7 +881,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MitsuNeuroPilot GUI")
+        self.setWindowTitle("MitsuNeuroPilot — интерфейс управления")
         self.resize(1600, 820)
         self.setMinimumSize(1280, 720)
 
@@ -965,7 +970,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "right_panel_title"):
             self.right_panel_title.setText("Миссия" if mode == "real" else "Очередь")
         if hasattr(self, "chk_ai"):
-            self.chk_ai.setText("Предпросмотр ИИ" if mode == "real" else "AI Control")
+            self.chk_ai.setText("Предпросмотр ИИ" if mode == "real" else "Управление ИИ")
         if hasattr(self, "btn_control") and not self.btn_control.isChecked():
             self.btn_control.setText("Активировать управление")
         if hasattr(self, "btn_select_routes"):
@@ -999,7 +1004,7 @@ class MainWindow(QMainWindow):
         left_col.setContentsMargins(12, 12, 12, 12)
         left_col.setSpacing(10)
 
-        app_title = QLabel("MitsuNeuroPilot GUI")
+        app_title = QLabel("MitsuNeuroPilot")
         app_title.setObjectName("MutedText")
         left_col.addWidget(app_title)
 
@@ -1011,11 +1016,11 @@ class MainWindow(QMainWindow):
         self.lbl_speed.setStyleSheet("font-size: 28px; font-weight: 900; color: #ffc107;")
         left_col.addWidget(self.lbl_speed)
 
-        self.lbl_angle_text = QLabel("Angle: 0° · T.: 0°")
+        self.lbl_angle_text = QLabel("Угол: 0° · Цель: 0°")
         self.lbl_angle_text.setObjectName("MutedText")
         left_col.addWidget(self.lbl_angle_text)
 
-        lbl_pedals = QLabel("Pedals")
+        lbl_pedals = QLabel("Педали")
         lbl_pedals.setObjectName("MutedText")
         left_col.addWidget(lbl_pedals)
 
@@ -1031,7 +1036,7 @@ class MainWindow(QMainWindow):
         self.pb_brake.setTextVisible(True)
         left_col.addWidget(self.pb_brake)
 
-        gb_gears = QGroupBox("Transmission")
+        gb_gears = QGroupBox("Передача")
         grid_gears = QGridLayout(gb_gears)
         grid_gears.setContentsMargins(8, 12, 8, 8)
         grid_gears.setSpacing(6)
@@ -1045,7 +1050,7 @@ class MainWindow(QMainWindow):
             grid_gears.addWidget(lbl, 0, i)
         left_col.addWidget(gb_gears)
 
-        self.btn_control = QPushButton("Activate Control")
+        self.btn_control = QPushButton("Активировать управление")
         self.btn_control.setCheckable(True)
         self.btn_control.setObjectName("ControlButton")
         self.btn_control.setStyleSheet(
@@ -1076,13 +1081,13 @@ class MainWindow(QMainWindow):
         self.combo_ports.currentTextChanged.connect(self.on_device_selection_changed)
         conn_layout.addWidget(self.combo_ports, stretch=1)
 
-        self.btn_connect = QPushButton("Connect")
+        self.btn_connect = QPushButton("Подключить")
         self.btn_connect.setMinimumWidth(190)
         self.btn_connect.clicked.connect(self.on_connect_clicked)
         conn_layout.addWidget(self.btn_connect)
         mid_col.addLayout(conn_layout)
 
-        gb_pid = QGroupBox("PID Controller Tuning")
+        gb_pid = QGroupBox("Настройка PID-контроллера")
         pid_layout = QHBoxLayout(gb_pid)
         pid_layout.setContentsMargins(8, 18, 8, 8)
         pid_layout.setSpacing(8)
@@ -1094,7 +1099,7 @@ class MainWindow(QMainWindow):
         pid_layout.addWidget(self.spin_ki)
         pid_layout.addWidget(self.spin_kd)
 
-        btn_send_pid = QPushButton("Update PID")
+        btn_send_pid = QPushButton("Обновить PID")
         btn_send_pid.clicked.connect(lambda: self.pid_update_requested.emit(
             self.spin_kp.value(), self.spin_ki.value(), self.spin_kd.value()
         ))
@@ -1134,7 +1139,7 @@ class MainWindow(QMainWindow):
         return self.mode_launcher_stack
 
     def _build_route_launcher(self):
-        gb_route = QGroupBox("Route Launcher")
+        gb_route = QGroupBox("Запуск маршрута")
         layout = QHBoxLayout(gb_route)
         layout.setContentsMargins(8, 18, 8, 8)
         layout.setSpacing(8)
@@ -1144,7 +1149,7 @@ class MainWindow(QMainWindow):
         lbl_first = QLabel("Первый маршрут")
         lbl_first.setObjectName("MutedText")
         title_row.addWidget(lbl_first)
-        self.lbl_first_route = QLabel("Маршрут не выбран")
+        self.lbl_first_route = ScrollingLabel("Маршрут не выбран")
         self.lbl_first_route.setObjectName("StrongText")
         title_row.addWidget(self.lbl_first_route)
         title_row.addStretch(1)
@@ -1201,12 +1206,12 @@ class MainWindow(QMainWindow):
         charts_title.setObjectName("StrongText")
         charts_layout.addWidget(charts_title)
 
-        self.plot_widget = pg.PlotWidget(title="Speed History", axisItems={"left": DecimalAxis(orientation="left")})
+        self.plot_widget = pg.PlotWidget(title="История скорости", axisItems={"left": DecimalAxis(orientation="left")})
         self._style_plot(self.plot_widget)
         self.curve_speed = self.plot_widget.plot(pen=pg.mkPen("#ffc107", width=2), name="Speed")
         charts_layout.addWidget(self.plot_widget)
 
-        self.plot_accel_widget = pg.PlotWidget(title="Accel History", axisItems={"left": DecimalAxis(orientation="left")})
+        self.plot_accel_widget = pg.PlotWidget(title="История ускорения", axisItems={"left": DecimalAxis(orientation="left")})
         self._style_plot(self.plot_accel_widget)
         self.curve_accel = self.plot_accel_widget.plot(pen=pg.mkPen("#14c832", width=2), name="Accel")
         charts_layout.addWidget(self.plot_accel_widget)
@@ -1238,7 +1243,7 @@ class MainWindow(QMainWindow):
         status_top.addStretch(1)
         status_layout.addLayout(status_top)
 
-        self.queue_empty_label = QLabel("Очередь пуста")
+        self.queue_empty_label = ScrollingLabel("Очередь пуста")
         self.queue_empty_label.setObjectName("MutedText")
         self.queue_empty_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.queue_empty_label)
@@ -1263,9 +1268,9 @@ class MainWindow(QMainWindow):
         modules_card.setObjectName("Card")
         modules_layout = QHBoxLayout(modules_card)
         modules_layout.setContentsMargins(10, 8, 10, 8)
-        self.chk_telemetry = QCheckBox("Telemetry CSV")
+        self.chk_telemetry = QCheckBox("Телеметрия CSV")
         self.chk_telemetry.stateChanged.connect(lambda: self.telemetry_toggled.emit(self.chk_telemetry.isChecked()))
-        self.chk_ai = QCheckBox("AI Control")
+        self.chk_ai = QCheckBox("Управление ИИ")
         self.chk_ai.stateChanged.connect(self._on_ai_checkbox_changed)
         modules_layout.addWidget(self.chk_telemetry)
         modules_layout.addWidget(self.chk_ai)
@@ -1293,7 +1298,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         title_lbl = QLabel(title)
         title_lbl.setObjectName("MutedText")
-        value_lbl = QLabel(value)
+        value_lbl = ScrollingLabel(value)
         value_lbl.setObjectName("StatValue")
         layout.addWidget(title_lbl)
         layout.addWidget(value_lbl)
@@ -1886,7 +1891,7 @@ class MainWindow(QMainWindow):
         self._append_log("UI ROUTES: остановка выполняется через выключение Activate Control или Disconnect.")
 
     def on_connect_clicked(self):
-        if self.btn_connect.text() == "Connect":
+        if self.btn_connect.text() in ("Connect", "Подключить"):
             port = self.combo_ports.currentText()
             if port:
                 self.connect_requested.emit(port)
@@ -1897,10 +1902,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
         if is_connected:
             self.combo_ports.setDisabled(True)
-            self.btn_connect.setText("Disconnect")
+            self.btn_connect.setText("Отключить")
         else:
             self.combo_ports.setDisabled(False)
-            self.btn_connect.setText("Connect")
+            self.btn_connect.setText("Подключить")
 
     def on_control_toggled(self, checked):
         self.control_active = checked
@@ -2045,7 +2050,7 @@ class MainWindow(QMainWindow):
         """Совместимость с VideoReceiver: принимает QImage/QPixmap или numpy-frame и выводит его в видеопанель."""
         if frame is None:
             self.video_panel.clear()
-            self.video_panel.setText("VIDEO STREAM\n\nкадр отсутствует")
+            self.video_panel.setText("ВИДЕОПОТОК\n\nкадр отсутствует")
             self._last_camera_pixmap = None
             return
 
@@ -2090,7 +2095,7 @@ class MainWindow(QMainWindow):
                 pixmap = QPixmap.fromImage(image)
             except Exception as exc:
                 self.video_panel.clear()
-                self.video_panel.setText(f"VIDEO STREAM\n\nне удалось отобразить кадр: {exc}")
+                self.video_panel.setText(f"ВИДЕОПОТОК\n\nне удалось отобразить кадр: {exc}")
                 self._last_camera_pixmap = None
                 return
 
@@ -2131,7 +2136,7 @@ class MainWindow(QMainWindow):
         """Единственный метод, обновляющий UI данными из физической модели."""
         self.wheel_widget.set_angle(vehicle_state.angle)
         self.lbl_speed.setText(f"{vehicle_state.speed:.2f} km/h")
-        self.lbl_angle_text.setText(f"Angle: {vehicle_state.angle}° · T.: {vehicle_state.target_angle}°")
+        self.lbl_angle_text.setText(f"Угол: {vehicle_state.angle}° · Цель: {vehicle_state.target_angle}°")
 
         self.pb_accel.setValue(int(vehicle_state.accel))
         self.pb_brake.setValue(int(vehicle_state.brake))

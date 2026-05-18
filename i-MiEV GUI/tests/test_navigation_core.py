@@ -78,3 +78,50 @@ class RoadRouteProviderTests(unittest.TestCase):
         self.assertGreater(len(mission.waypoints), 2)
         self.assertEqual(mission.metadata.get("routing_provider"), "osrm")
         self.assertEqual(mission.waypoints[-1].command, NavCommand.STOP.value)
+
+class RoadRouteLaneOffsetTests(unittest.TestCase):
+    def test_right_side_offset_moves_control_trajectory_off_centerline(self):
+        from vehicle_control.geo import GeoPoint
+        from vehicle_control.road_routing import OsrmRoadRouteProvider, RoadRouteRequest
+
+        class FakeProvider(OsrmRoadRouteProvider):
+            def _fetch_osrm_geojson(self, request):
+                # Northbound route in local coordinates. Right-hand side should
+                # offset east (positive x) by approximately lane_offset_m.
+                return [(55.0, 37.0), (55.0001, 37.0), (55.0002, 37.0)]
+
+        request = RoadRouteRequest(
+            mission_id="road_lane",
+            name="road_lane",
+            start=GeoPoint(55.0, 37.0),
+            goal=GeoPoint(55.0002, 37.0),
+            speed_cap_kmh=2.0,
+            spacing_m=2.0,
+            lane_policy="right_side",
+            lane_offset_m=1.7,
+            traffic_side="right",
+        )
+        mission = FakeProvider().build_mission(request)
+        self.assertEqual(mission.metadata.get("trajectory_geometry"), "right_side_offset_approximation")
+        self.assertGreater(mission.waypoints[0].x_m, 1.0)
+        self.assertAlmostEqual(float(mission.metadata.get("lane_offset_m")), 1.7, places=2)
+
+    def test_centerline_policy_keeps_centerline(self):
+        from vehicle_control.geo import GeoPoint
+        from vehicle_control.road_routing import OsrmRoadRouteProvider, RoadRouteRequest
+
+        class FakeProvider(OsrmRoadRouteProvider):
+            def _fetch_osrm_geojson(self, request):
+                return [(55.0, 37.0), (55.0001, 37.0)]
+
+        request = RoadRouteRequest(
+            mission_id="center",
+            name="center",
+            start=GeoPoint(55.0, 37.0),
+            goal=GeoPoint(55.0001, 37.0),
+            lane_policy="centerline",
+            lane_offset_m=1.7,
+        )
+        mission = FakeProvider().build_mission(request)
+        self.assertEqual(mission.metadata.get("trajectory_geometry"), "centerline")
+        self.assertAlmostEqual(mission.waypoints[0].x_m, 0.0, places=3)
