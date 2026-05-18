@@ -632,8 +632,9 @@ def discover_routes(
     if shuffle_routes:
         random.seed(42)
         random.shuffle(routes)
-    # Exclude specific towns based on route XML metadata, not file path.
-    excluded_towns = {"town13",}
+    # Include/exclude towns based on route XML metadata, not file path.
+    allowed_towns = {"town13"}
+    excluded_towns = {}
     excluded_by_town = 0
     filtered_by_town: list[str] = []
     for route in routes:
@@ -644,16 +645,24 @@ def discover_routes(
             filtered_by_town.append(route)
             continue
 
-        if town.lower() in excluded_towns:
+        town_lower = town.lower()
+        if allowed_towns and town_lower not in allowed_towns:
+            excluded_by_town += 1
+            continue
+
+        if town_lower in excluded_towns:
             excluded_by_town += 1
             continue
 
         filtered_by_town.append(route)
 
     routes = filtered_by_town
+    allowed_label = ", ".join(sorted(allowed_towns)) if allowed_towns else "<any>"
+    excluded_label = ", ".join(sorted(excluded_towns)) if excluded_towns else "<none>"
     print(
         f"Found {len(routes)} routes in total "
-        f"(excluded by town: {excluded_by_town}; excluded towns: {', '.join(sorted(excluded_towns))})."
+        f"(excluded by town: {excluded_by_town}; allowed towns: {allowed_label}; "
+        f"excluded towns: {excluded_label})."
     )
 
     if len(scenario_white_lists) > 0:
@@ -792,8 +801,9 @@ if __name__ == "__main__":
     dataset_name = "carla_leaderboard2"
 
     # Keep existing scenario filtering behavior
-    # scenario_white_lists = ["DynamicObjectCrossing", "VehicleTurningRoute", "ParkedObstacle", "Accident", "ConstructionObstacle", "ParkingExit", "RedLightWithoutLeadVehicle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "VehicleTurningRoutePedestrian", "ParkingCutIn", "PedestrianCrossing", "StaticCutIn", "HardBreakRoute", "ConstructionObstacle", "VehicleTurningRoutePedestrian", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios" ]
-    scenario_white_lists = ["DynamicObjectCrossing", "ParkingExit", "noScenarios", "ParkingCrossingPedestrian", "BlockedIntersection"]
+    # scenario_white_lists ="RedLightWithoutLeadVehicle", "ParkingExit","VehicleTurningRoutePedestrian", "VehicleTurningRoute", "StaticCutIn", "PedestrianCrossing", 
+    scenario_white_lists = ["BlockedIntersection", "DynamicObjectCrossing", "ParkedObstacle", "Accident", "ConstructionObstacle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "ParkingCutIn", "HardBreakRoute", "ConstructionObstacle", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios" ]
+    # scenario_white_lists = ["DynamicObjectCrossing", "ParkingExit", "noScenarios", "ParkingCrossingPedestrian", "BlockedIntersection"]
     scenario_blacklist = ["YieldToEmergencyVehicle", ]
 
     root_folder = Path(args.root_folder).expanduser()

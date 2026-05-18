@@ -17,6 +17,7 @@ class TargetDataset(IntEnum):
     UNKNOWN = 0
     CARLA_LEADERBOARD2_3CAMERAS = auto()
     CARLA_LEADERBOARD2_ONLY3CAMERAS = auto()
+    CARLA_LEADERBOARD2_ONLY2CAMERAS = auto()
     CARLA_LEADERBOARD2_6CAMERAS = auto()
     CARLA_LEADERBOARD2_1CAMERA = auto()
     NAVSIM_4CAMERAS = auto()
@@ -141,6 +142,7 @@ class TransfuserBEVSemanticClass(IntEnum):
     TRAFFIC_GREEN = 10
     TRAFFIC_RED_NORMAL = 11
     TRAFFIC_RED_NOT_NORMAL = 12
+    LANE_MARKERS_BROKEN = 13
 
 
 class TransfuserBEVOccupancyClass(IntEnum):
@@ -256,6 +258,7 @@ CARLA_TRANSFUSER_BEV_SEMANTIC_COLOR_CONVERTER = {
     TransfuserBEVSemanticClass.TRAFFIC_GREEN: rgb(0, 255, 0),
     TransfuserBEVSemanticClass.TRAFFIC_RED_NORMAL: rgb(255, 0, 0),
     TransfuserBEVSemanticClass.TRAFFIC_RED_NOT_NORMAL: rgb(0, 0, 255),
+    TransfuserBEVSemanticClass.LANE_MARKERS_BROKEN: rgb(255, 140, 255),
 }
 
 # TransFuser++ semantic segmentation colors for CARLA data
@@ -332,6 +335,24 @@ CHAFFEURNET_TO_TRANSFUSER_BEV_SEMANTIC_CONVERTER = {
     ChaffeurNetBEVSemanticClass.TRAFFIC_YELLOW: TransfuserBEVSemanticClass.UNLABELED,  # traffic light yellow
     ChaffeurNetBEVSemanticClass.TRAFFIC_RED: TransfuserBEVSemanticClass.UNLABELED,  # traffic light red
 }
+
+CHAFFEURNET_TO_TRANSFUSER_BEV_SEMANTIC_WITH_BROKEN_LANE_MARKERS_CONVERTER = {
+    **CHAFFEURNET_TO_TRANSFUSER_BEV_SEMANTIC_CONVERTER,
+    ChaffeurNetBEVSemanticClass.LANE_MARKERS_BROKEN: (
+        TransfuserBEVSemanticClass.LANE_MARKERS_BROKEN
+    ),
+}
+
+
+def get_chauffeurnet_to_transfuser_bev_semantic_converter(
+    include_broken_lane_markers: bool,
+):
+    if include_broken_lane_markers:
+        return (
+            CHAFFEURNET_TO_TRANSFUSER_BEV_SEMANTIC_WITH_BROKEN_LANE_MARKERS_CONVERTER
+        )
+    return CHAFFEURNET_TO_TRANSFUSER_BEV_SEMANTIC_CONVERTER
+
 
 SCENARIO_TYPES = [
     "Accident",
@@ -644,6 +665,9 @@ SIM2REAL_BEV_SEMANTIC_SEGMENTATION_CONVERTER = {
     TransfuserBEVSemanticClass.TRAFFIC_GREEN: TransfuserBEVSemanticClass.TRAFFIC_GREEN,
     TransfuserBEVSemanticClass.TRAFFIC_RED_NORMAL: TransfuserBEVSemanticClass.TRAFFIC_RED_NORMAL,
     TransfuserBEVSemanticClass.TRAFFIC_RED_NOT_NORMAL: TransfuserBEVSemanticClass.TRAFFIC_RED_NORMAL,
+    TransfuserBEVSemanticClass.LANE_MARKERS_BROKEN: (
+        TransfuserBEVSemanticClass.LANE_MARKERS_BROKEN
+    ),
 }
 
 SIM2REAL_BOUNDING_BOX_CLASS_CONVERTER = {

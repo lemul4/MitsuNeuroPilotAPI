@@ -69,9 +69,12 @@ class CARLAData(Dataset):
         self.semantic_converter = np.uint8(
             list(constants.SEMANTIC_SEGMENTATION_CONVERTER.values())
         )
-        self.hdmap_converter = np.uint8(
-            list(constants.CHAFFEURNET_TO_TRANSFUSER_BEV_SEMANTIC_CONVERTER.values())
+        hdmap_converter = (
+            constants.get_chauffeurnet_to_transfuser_bev_semantic_converter(
+                include_broken_lane_markers=self.config.use_bev_broken_lane_markers
+            )
         )
+        self.hdmap_converter = np.uint8(list(hdmap_converter.values()))
         self.image_augmenter_func = image_augmenter(config, config.use_color_aug_prob)
         self.random = random
         self.build_cache = build_cache
@@ -85,7 +88,6 @@ class CARLAData(Dataset):
         self.sim2real_bev_occupancy_converter = np.uint8(
             list(constants.SIM2REAL_BEV_OCCUPANCY_CLASS_CONVERTER.values())
         )
-
         self.bucket_collection = self.config.carla_bucket_collection(root, config)
         self.shuffle(0)
         if self.rank == 0:
@@ -93,6 +95,100 @@ class CARLAData(Dataset):
             LOG.info(f"Trainable routes: {self.bucket_collection.trainable_routes}")
             LOG.info(f"All frames: {self.bucket_collection.all_frames}")
             LOG.info(f"Trainable frames: {self.bucket_collection.trainable_frames}")
+
+    def _rgb_camera_ids(self) -> tuple[int, ...]:
+        camera_ids = getattr(self.config, "rgb_camera_ids", ())
+        if camera_ids:
+            return tuple(int(camera_id) for camera_id in camera_ids)
+        return tuple(
+            sorted(int(camera_id) for camera_id in self.config.camera_calibration)
+        )
+
+    def _existing_image_path(self, image_path: str) -> str | None:
+        if os.path.exists(image_path):
+            return image_path
+        root, ext = os.path.splitext(image_path)
+        for candidate_ext in (".jpg", ".jpeg", ".png"):
+            if candidate_ext == ext:
+                continue
+            candidate = root + candidate_ext
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _read_rgb_file(self, image_path: str) -> tuple[np.ndarray, bytes]:
+        with open(image_path, "rb") as f:
+            raw_image_bytes = f.read()
+        image = cv2.imdecode(
+            np.frombuffer(raw_image_bytes, np.uint8), cv2.IMREAD_UNCHANGED
+        )
+        if image is None:
+            raise ValueError(f"Could not decode RGB image: {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        return image, raw_image_bytes
+
+    def _load_rgb_images(
+        self, image_path: str
+    ) -> tuple[
+        np.ndarray | None,
+        bytes | None,
+        np.ndarray | None,
+        bytes | None,
+        np.ndarray | None,
+        bytes | None,
+    ]:
+        """Load legacy panorama RGB or separate dual-camera RGB images."""
+        existing_image_path = self._existing_image_path(image_path)
+        if existing_image_path is not None:
+            image, raw_image_bytes = self._read_rgb_file(existing_image_path)
+            return image, raw_image_bytes, None, None, None, None
+
+        camera_paths = [
+            self._existing_image_path(
+                os.path.join(
+                    os.path.dirname(image_path),
+                    f"cam{camera_id}",
+                    os.path.basename(image_path),
+                )
+            )
+            for camera_id in self._rgb_camera_ids()
+        ]
+        if any(path is not None for path in camera_paths):
+            if not self.config.dual_front_camera_mode:
+                raise FileNotFoundError(
+                    f"RGB panorama not found at {image_path}. Found per-camera RGB, "
+                    "but separate camera loading is enabled only in dual front camera mode."
+                )
+            missing = [
+                f"cam{camera_id}"
+                for camera_id, path in zip(
+                    self._rgb_camera_ids(), camera_paths, strict=False
+                )
+                if path is None
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    f"RGB panorama not found at {image_path}, and missing per-camera "
+                    f"RGB folders/files for: {', '.join(missing)}"
+                )
+            if len(camera_paths) != 2:
+                raise ValueError(
+                    f"Dual front camera mode expects exactly 2 RGB cameras, "
+                    f"got {len(camera_paths)}."
+                )
+
+            image_left, raw_image_left_bytes = self._read_rgb_file(camera_paths[0])
+            image_right, raw_image_right_bytes = self._read_rgb_file(camera_paths[1])
+            return (
+                None,
+                None,
+                image_left,
+                raw_image_left_bytes,
+                image_right,
+                raw_image_right_bytes,
+            )
+
+        raise FileNotFoundError(f"RGB image not found: {image_path}")
 
     def __getitem__(self, index):
         # ----------------------------------------------------------------------------------------
@@ -513,15 +609,33 @@ class CARLAData(Dataset):
                 else None
             )
         # RGB
-        if self.config.use_color_aug:
-            processed_image = self.image_augmenter_func(image=sensor_data.image)
+        if self.config.dual_front_camera_mode:
+            left_key = str(getattr(self.config, "left_camera_key", "rgb_left"))
+            right_key = str(getattr(self.config, "right_camera_key", "rgb_right"))
+            image_augmenter_func = (
+                self.image_augmenter_func.to_deterministic()
+                if self.config.use_color_aug
+                else None
+            )
+            for key, image in (
+                (left_key, sensor_data.image_left),
+                (right_key, sensor_data.image_right),
+            ):
+                if image is None:
+                    raise ValueError(f"Missing {key} image in dual front camera mode.")
+                if image_augmenter_func is not None:
+                    image = image_augmenter_func(image=image)
+                data[key] = np.transpose(image, (2, 0, 1))
         else:
-            processed_image = sensor_data.image
-        data["rgb"] = (
-            np.transpose(processed_image, (2, 0, 1))
-            if processed_image is not None
-            else None
-        )
+            if self.config.use_color_aug:
+                processed_image = self.image_augmenter_func(image=sensor_data.image)
+            else:
+                processed_image = sensor_data.image
+            data["rgb"] = (
+                np.transpose(processed_image, (2, 0, 1))
+                if processed_image is not None
+                else None
+            )
         # Radars
         if self.config.use_radars:
             radar_list = carla_dataset_utils.preprocess_radar_input(
@@ -618,8 +732,12 @@ class CARLAData(Dataset):
                 ]
 
             mask = loaded_bev_occupancy != TransfuserBEVOccupancyClass.UNLABELED
-            loaded_hdmap[mask] = loaded_bev_occupancy[mask] + (
-                len(TransfuserBEVSemanticClass) - len(TransfuserBEVOccupancyClass)
+            occupancy_class_offset = (
+                TransfuserBEVSemanticClass.VEHICLE
+                - TransfuserBEVOccupancyClass.VEHICLE
+            )
+            loaded_hdmap[mask] = (
+                loaded_bev_occupancy[mask] + occupancy_class_offset
             )  # Add offset to BEV occupancy classes
             data["bev_semantic"] = loaded_hdmap
             if not self.config.carla_leaderboard_mode:
@@ -640,7 +758,10 @@ class CARLAData(Dataset):
         data["loading_sensor_time"] = time.time() - start_loading_sensor_time
 
         # Cut cameras down to only used cameras
-        if self.config.num_used_cameras != self.config.num_available_cameras:
+        if (
+            not self.config.dual_front_camera_mode
+            and self.config.num_used_cameras != self.config.num_available_cameras
+        ):
             n = self.config.num_available_cameras
             w = data["rgb"].shape[2] // n
 
@@ -662,14 +783,26 @@ class CARLAData(Dataset):
 
         # We crop of the image if specified in the config by self.config.crop_height pixels
         if self.config.crop_height > 0:
+            dual_rgb_keys = (
+                str(getattr(self.config, "left_camera_key", "rgb_left")),
+                str(getattr(self.config, "right_camera_key", "rgb_right")),
+            )
             if self.config.carla_crop_height_type == CarlaImageCroppingType.BOTTOM:
-                data["rgb"] = data["rgb"][:, : -self.config.crop_height, :]
+                if data.get("rgb") is not None:
+                    data["rgb"] = data["rgb"][:, : -self.config.crop_height, :]
+                for key in dual_rgb_keys:
+                    if data.get(key) is not None:
+                        data[key] = data[key][:, : -self.config.crop_height, :]
                 if data.get("depth") is not None:
                     data["depth"] = data["depth"][: -self.config.crop_height]
                 if data.get("semantic") is not None:
                     data["semantic"] = data["semantic"][: -self.config.crop_height]
             elif self.config.carla_crop_height_type == CarlaImageCroppingType.TOP:
-                data["rgb"] = data["rgb"][:, self.config.crop_height :, :]
+                if data.get("rgb") is not None:
+                    data["rgb"] = data["rgb"][:, self.config.crop_height :, :]
+                for key in dual_rgb_keys:
+                    if data.get(key) is not None:
+                        data[key] = data[key][:, self.config.crop_height :, :]
                 if data.get("depth") is not None:
                     data["depth"] = data["depth"][self.config.crop_height :]
                 if data.get("semantic") is not None:
@@ -687,14 +820,19 @@ class CARLAData(Dataset):
         if self.config.horizontal_fov_reduction > 0:
             crop_pixels = self.config.horizontal_fov_reduction
             # RGB: (C, H, W)
-            if data["rgb"] is not None:
-                _, h, w = data["rgb"].shape
-                data["rgb"] = data["rgb"][:, :, crop_pixels:-crop_pixels]
-                data["rgb"] = np.transpose(data["rgb"], (1, 2, 0))  # -> (H, W_crop, C)
-                data["rgb"] = cv2.resize(
-                    data["rgb"], (w, h), interpolation=cv2.INTER_LINEAR
-                )
-                data["rgb"] = np.transpose(data["rgb"], (2, 0, 1))  # -> (C, H, W)
+            dual_rgb_keys = (
+                str(getattr(self.config, "left_camera_key", "rgb_left")),
+                str(getattr(self.config, "right_camera_key", "rgb_right")),
+            )
+            for key in ("rgb", *dual_rgb_keys):
+                if data.get(key) is not None:
+                    _, h, w = data[key].shape
+                    data[key] = data[key][:, :, crop_pixels:-crop_pixels]
+                    data[key] = np.transpose(data[key], (1, 2, 0))
+                    data[key] = cv2.resize(
+                        data[key], (w, h), interpolation=cv2.INTER_LINEAR
+                    )
+                    data[key] = np.transpose(data[key], (2, 0, 1))
             # Depth: (H, W)
             if data.get("depth") is not None:
                 h, w = data["depth"].shape
@@ -828,6 +966,8 @@ class CARLAData(Dataset):
             selected_data = sensor_data_normal
         return SensorData(
             image=selected_data.image,
+            image_left=selected_data.image_left,
+            image_right=selected_data.image_right,
             rasterized_lidar=selected_data.rasterized_lidar,
             semantic=selected_data.semantic,
             hdmap=selected_data.hdmap,
@@ -889,9 +1029,11 @@ class CARLAData(Dataset):
         lidar_path = self.lidars[index]  # LiDAR is always the same
         boxes_path = self.bboxes[index]  # Boxes are always the same
 
-        bev_3rd_person_images = image = raw_image_bytes = rasterized_lidar = (
-            semantic
-        ) = hdmap = depth = boxes = bev_occupancy = radars = None
+        bev_3rd_person_images = image = raw_image_bytes = None
+        image_left = raw_image_left_bytes = None
+        image_right = raw_image_right_bytes = None
+        rasterized_lidar = semantic = hdmap = depth = None
+        boxes = bev_occupancy = radars = None
 
         if self.config.load_bev_3rd_person_images:
             try:
@@ -905,29 +1047,14 @@ class CARLAData(Dataset):
                 bev_3rd_person_images = np.zeros((800, 600, 3), dtype=np.uint8)
         # Read raw bytes of the JPEG image to avoid re-encoding it later aka. double JPEG artifacts.
         image_path_str = str(image_path, encoding="utf-8")
-        if not os.path.exists(image_path_str):
-            cam1_path = os.path.join(
-                os.path.dirname(image_path_str),
-                "cam1",
-                os.path.basename(image_path_str),
-            )
-            if os.path.exists(cam1_path):
-                raise FileNotFoundError(
-                    f"Panoramic RGB image not found: {image_path_str}. "
-                    f"Found per-camera image at {cam1_path}. "
-                    "This dataset appears to be saved with "
-                    "SAVE_CAM_IMAGES_IN_SUBFOLDERS=True and "
-                    "SAVE_CAM_IMAGES_AS_PANORAMA=False. "
-                    "Current CARLA loader expects panoramic RGB files. "
-                    "Re-generate data with SAVE_CAM_IMAGES_AS_PANORAMA=True."
-                )
-            raise FileNotFoundError(f"Panoramic RGB image not found: {image_path_str}")
-        with open(image_path_str, "rb") as f:
-            raw_image_bytes = f.read()
-        image = cv2.imdecode(
-            np.frombuffer(raw_image_bytes, np.uint8), cv2.IMREAD_UNCHANGED
-        )
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        (
+            image,
+            raw_image_bytes,
+            image_left,
+            raw_image_left_bytes,
+            image_right,
+            raw_image_right_bytes,
+        ) = self._load_rgb_images(image_path_str)
 
         if self.config.use_radars:
             radars = np.load(str(radar_path, encoding="utf-8"), allow_pickle=True)
@@ -1004,6 +1131,8 @@ class CARLAData(Dataset):
         # Create SensorData object with loaded data
         sensor_data = SensorData(
             image=image,
+            image_left=image_left,
+            image_right=image_right,
             rasterized_lidar=rasterized_lidar,
             semantic=semantic,
             hdmap=hdmap,
@@ -1027,7 +1156,11 @@ class CARLAData(Dataset):
         if self.training_session_cache is not None or self.persistent_cache is not None:
             # Use our new compression API for cleaner code
             compressed_sensor_data = sensor_data.compress(
-                raw_image_bytes, self.config, meta
+                raw_image_bytes,
+                self.config,
+                meta,
+                raw_image_left_bytes=raw_image_left_bytes,
+                raw_image_right_bytes=raw_image_right_bytes,
             )
 
             # Store CompressedSensorData object directly in cache
@@ -1141,6 +1274,7 @@ class CARLAData(Dataset):
             # Shuffle all arrays together
             indices = np.arange(len(self.images))
             rng.shuffle(indices)
+            carla_dataset_fraction = self.config.carla_dataset_fraction
             if self.config.carla_num_samples > 0:
                 if self.config.carla_num_samples <= len(indices):
                     indices = indices[: self.config.carla_num_samples]
@@ -1150,6 +1284,28 @@ class CARLAData(Dataset):
                     indices = np.concatenate(
                         [indices] * num_repeat + [indices[:remainder]]
                     )
+            elif 0 < carla_dataset_fraction < 1:
+                num_fraction_samples = max(
+                    1, int(len(indices) * carla_dataset_fraction)
+                )
+                indices = indices[:num_fraction_samples]
+                if self.rank == 0:
+                    LOG.info(
+                        "Using %.6f of CARLA dataset: %d/%d samples.",
+                        carla_dataset_fraction,
+                        len(indices),
+                        len(self.images),
+                    )
+            elif carla_dataset_fraction not in (-1, 1) and carla_dataset_fraction <= 0:
+                raise ValueError(
+                    "carla_dataset_fraction must be in (0, 1], or -1 to use all data. "
+                    f"Got {carla_dataset_fraction}."
+                )
+            elif carla_dataset_fraction > 1:
+                raise ValueError(
+                    "carla_dataset_fraction must be in (0, 1], or -1 to use all data. "
+                    f"Got {carla_dataset_fraction}."
+                )
 
             self.bev_3rd_person_images = self.bev_3rd_person_images[indices]
             self.images = self.images[indices]
