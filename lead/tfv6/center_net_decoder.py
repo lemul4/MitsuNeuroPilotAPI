@@ -22,6 +22,7 @@ from lead.common.constants import (
 )
 from lead.data_loader import carla_dataset_utils
 from lead.tfv6 import transfuser_utils as fn
+from lead.training import metrics
 from lead.training.config_training import TrainingConfig
 
 
@@ -293,6 +294,26 @@ class CenterNetDecoder(nn.Module):
             loss_velocity = (
                 loss_velocity_per_sample * source_mask
             ).sum() / source_mask.sum().clamp(min=1)
+
+        if data.get("compute_additional_metrics", False):
+            source_mask_np = source_mask.detach().bool().cpu().numpy()
+            pred_boxes = bounding_box_features.pred_bounding_box_image_system[
+                source_mask_np
+            ]
+            gt_boxes = (
+                data[f"{prefix}center_net_bounding_boxes"]
+                .detach()
+                .float()
+                .cpu()
+                .numpy()[source_mask_np]
+            )
+            log[f"metric/{prefix}center_net_map"] = metrics.mean_average_precision_bev(
+                pred_boxes=pred_boxes,
+                gt_boxes=gt_boxes,
+                num_classes=self.num_classes,
+                iou_threshold=self.config.additional_metrics_map_iou_threshold,
+                score_threshold=self.config.additional_metrics_map_score_threshold,
+            )
 
         # Add dataset name prefix
         losses.update(

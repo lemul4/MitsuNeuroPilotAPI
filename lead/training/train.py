@@ -1,5 +1,7 @@
+import argparse
 import logging
 import os
+import sys
 import warnings
 from itertools import islice
 
@@ -33,8 +35,8 @@ warnings.filterwarnings(
 
 
 class Trainer:
-    def __init__(self):
-        self.config = training_utils.initialize_config()
+    def __init__(self, config_path: str | None = None):
+        self.config = training_utils.initialize_config(config_path)
 
         self.ssd_cache = training_utils.initialize_training_session_cache(self.config)
         self.num_worker = training_utils.initialize_torch(self.config)
@@ -149,6 +151,15 @@ class Trainer:
             )
             data["iteration"] = epoch_iteration
             data["training_step"] = self.step
+            should_compute_additional_metrics = (
+                self.config.additional_metrics_frequency > 0
+                and (epoch_iteration + 1) % self.config.additional_metrics_frequency
+                == 0
+            )
+            data["compute_additional_metrics"] = (
+                self.config.use_additional_metrics
+                and should_compute_additional_metrics
+            )
             with torch.amp.autocast(
                 device_type="cuda",
                 dtype=self.config.torch_float_type,
@@ -324,11 +335,43 @@ class Trainer:
 
 
 @record  # Records error and tracebacks in case of failure
-def main():
+def main(config_path: str | None = None):
     training_utils.increase_limit_file_descriptors()
-    Trainer().train_loop()
+    Trainer(config_path=config_path).train_loop()
+
+
+def parse_args() -> argparse.Namespace:
+    def parse_fraction(value: str) -> float:
+        return float(value.replace(",", "."))
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        dest="config_path",
+        default=None,
+        help="Path to a training config JSON file.",
+    )
+    parser.add_argument(
+        "--carla-dataset-fraction",
+        dest="carla_dataset_fraction",
+        type=parse_fraction,
+        default=None,
+        help="Fraction of the CARLA dataset to train on, e.g. 0.1 or 0.001.",
+    )
+    args, remaining = parser.parse_known_args()
+    if args.config_path is None and remaining and remaining[0].endswith(".json"):
+        args.config_path = remaining.pop(0)
+    if args.carla_dataset_fraction is not None:
+        remaining.append(f"carla_dataset_fraction={args.carla_dataset_fraction}")
+    remaining = [
+        arg.replace(",", ".") if arg.startswith("carla_dataset_fraction=") else arg
+        for arg in remaining
+    ]
+    sys.argv = [sys.argv[0], *remaining]
+    return args
 
 
 if __name__ == "__main__":
     training_utils.set_start_method()
-    main()
+    args = parse_args()
+    main(config_path=args.config_path)

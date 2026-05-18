@@ -128,6 +128,7 @@ class BaseConfig:
         return {
             TargetDataset.CARLA_LEADERBOARD2_6CAMERAS: 6,
             TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS: 3,
+            TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS: 2,
             TargetDataset.CARLA_LEADERBOARD2_3CAMERAS: 3,
             TargetDataset.CARLA_LEADERBOARD2_1CAMERA: 1,
             TargetDataset.CARLA_PY123D_1CAMERA: 1,
@@ -189,7 +190,7 @@ class BaseConfig:
                     "fov": 60,
                 },
             }
-        elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+        elif self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             return {
                 1: {
                     "pos": [0.900, -0.0675, 1.550],

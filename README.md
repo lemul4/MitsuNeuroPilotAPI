@@ -93,7 +93,7 @@ conda deactivate && conda activate lead
 echo "Project Root: \$LEAD_PROJECT_ROOT"
 echo "Scenario Runner: \$SCENARIO_RUNNER_ROOT"
 
-echo "source $(pwd)/scripts/main.sh" >> ~/.bashrc       # Persist more environment variables
+echo "scripts/main.sh" >> ~/.bashrc       # Persist more environment variables
 source ~/.bashrc                                        # Reload config
 ```
 

@@ -36,13 +36,17 @@ class TrainingConfig(BaseConfig):
             loaded_config=self._loaded_config,
             raise_error_on_missing_key=raise_error_on_missing_key,
         )
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
+            self._loaded_config["use_depth"] = False
 
-    @property
+    @overridable_property
     def target_dataset(self):
         if "expert_debug" in self.carla_root:
             return TargetDataset.CARLA_LEADERBOARD2_3CAMERAS
         elif "carla_leaderboad2_v3" in self.carla_root:
             return TargetDataset.CARLA_LEADERBOARD2_3CAMERAS
+        elif "carla_leaderboard2_dual_cameras" in self.carla_root:
+            return TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS
         elif "carla_leaderboard2" in self.carla_root:
             return TargetDataset.CARLA_LEADERBOARD2_3CAMERAS
         elif "carla_leaderboad2_v8" in self.carla_root:
@@ -55,13 +59,13 @@ class TrainingConfig(BaseConfig):
             f"Unknown CARLA root path: {self.carla_root}. Please register it in the config."
         )
 
-    @property
+    @overridable_property
     def num_available_cameras(self):
         """Number of available cameras based on the target dataset."""
         return {
             TargetDataset.CARLA_LEADERBOARD2_3CAMERAS: 3,
             TargetDataset.CARLA_LEADERBOARD2_6CAMERAS: 6,
-            TargetDataset.CARLA_LEADERBOARD2_3CAMERAS: 3,
+            TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS: 2,
             TargetDataset.NAVSIM_4CAMERAS: 4,
             TargetDataset.WAYMO_E2E_2025_3CAMERAS: 3,
         }[self.target_dataset]
@@ -72,7 +76,7 @@ class TrainingConfig(BaseConfig):
         Can be overridden, if a camera is false it will be ignored during training."""
         return [True] * self.num_available_cameras
 
-    @property
+    @overridable_property
     def num_used_cameras(self):
         """Number of cameras used during training."""
         return sum(int(use) for use in self.used_cameras)
@@ -81,14 +85,14 @@ class TrainingConfig(BaseConfig):
     # How many pixels make up 1 meter in BEV grids.
     pixels_per_meter = 4.0
 
-    @property
+    @overridable_property
     def min_x_meter(self):
         """Back boundary of the planning area in meters."""
         if self.target_dataset == TargetDataset.WAYMO_E2E_2025_3CAMERAS:
             return 0
         return -32
 
-    @property
+    @overridable_property
     def max_x_meter(self):
         """Front boundary of the planning area in meters."""
         if self.carla_leaderboard_mode:
@@ -97,36 +101,36 @@ class TrainingConfig(BaseConfig):
             return 64
         return 32
 
-    @property
+    @overridable_property
     def min_y_meter(self):
         """Left boundary of the planning area in meters."""
         if self.carla_leaderboard_mode:
             return -40
         return -32
 
-    @property
+    @overridable_property
     def max_y_meter(self):
         """Right boundary of the planning area in meters."""
         if self.carla_leaderboard_mode:
             return 40
         return 32
 
-    @property
+    @overridable_property
     def lidar_width_pixel(self):
         """Width resolution of LiDAR BEV representation in pixels."""
         return int((self.max_x_meter - self.min_x_meter) * self.pixels_per_meter)
 
-    @property
+    @overridable_property
     def lidar_height_pixel(self):
         """Height resolution of LiDAR BEV representation in pixels."""
         return int((self.max_y_meter - self.min_y_meter) * self.pixels_per_meter)
 
-    @property
+    @overridable_property
     def lidar_width_meter(self):
         """Width of LiDAR coverage area in meters."""
         return int(self.max_x_meter - self.min_x_meter)
 
-    @property
+    @overridable_property
     def lidar_height_meter(self):
         """Height of LiDAR coverage area in meters."""
         return int(self.max_y_meter - self.min_y_meter)
@@ -146,7 +150,7 @@ class TrainingConfig(BaseConfig):
     # must, allow, never
     wandb_resume = "never"
 
-    @property
+    @overridable_property
     def wandb_project_name(self):
         """Name of the WandB project based on the training phase."""
         if self.is_pretraining:
@@ -170,7 +174,7 @@ class TrainingConfig(BaseConfig):
     # If true continue the training from a failed training checkpoint.
     continue_failed_training = False
 
-    @property
+    @overridable_property
     def epoch_checkpoints_keep(self):
         """Number of checkpoints to keep during training."""
         if self.carla_leaderboard_mode and not self.mixed_data_training:
@@ -185,10 +189,10 @@ class TrainingConfig(BaseConfig):
     # If true force rebuild the cache for each training run.
     force_rebuild_data_cache = False
 
-    @property
+    @overridable_property
     def carla_cache_path(self):
         """Tuple of cache characteristics used to identify cached data compatibility."""
-        return (
+        cache_path = (
             str(self.image_width_before_camera_subselection),
             str(self.final_image_height),
             str(self.min_x_meter),
@@ -202,8 +206,14 @@ class TrainingConfig(BaseConfig):
             str(self.load_bev_3rd_person_images),
             str(self.training_used_lidar_steps),
         )
+        if self.dual_front_camera_mode:
+            cache_path += (
+                "dual_front_camera_separate_rgb",
+                "_".join(str(camera_id) for camera_id in self.rgb_camera_ids),
+            )
+        return cache_path
 
-    @property
+    @overridable_property
     def training_session_cache_path(self):
         """Path to SSD cache directory."""
         tmp_folder = "/scratch/" + str(os.environ.get("SLURM_JOB_ID"))
@@ -214,7 +224,7 @@ class TrainingConfig(BaseConfig):
     # Root directory for CARLA sensor data.
     carla_root = "data/carla_leaderboard2"
 
-    @property
+    @overridable_property
     def carla_data(self):
         """Path to CARLA data directory."""
         return os.path.join(self.carla_root, "data")
@@ -229,13 +239,13 @@ class TrainingConfig(BaseConfig):
     # Minimum number of visible pixels for a vehicle to be considered valid.
     vehicle_min_num_visible_pixels = 1
     # Minimum number of LiDAR points for a pedestrian to be considered valid.
-    pedestrian_min_num_lidar_points = 5
+    pedestrian_min_num_lidar_points = 1
     # Minimum number of visible pixels for a pedestrian to be considered valid.
-    pedestrian_min_num_visible_pixels = 15
+    pedestrian_min_num_visible_pixels = 1
     # Minimum number of LiDAR points for a parking vehicle to be considered valid.
-    parking_vehicle_min_num_lidar_points = 3
+    parking_vehicle_min_num_lidar_points = 1
     # Minimum number of visible pixels for a parking vehicle to be considered valid.
-    parking_vehicle_min_num_visible_pixels = 5
+    parking_vehicle_min_num_visible_pixels = 1
     # First scale we use for the gradient scaler.
     grad_scaler_init_scale = 1024
     # Factor by which we grow the gradient scaler.
@@ -247,7 +257,7 @@ class TrainingConfig(BaseConfig):
     # Maximum gradient scale we use for the gradient scaler.
     grad_scaler_max_grad_scale = 2**16
 
-    @property
+    @overridable_property
     def sync_batchnorm(self) -> bool:
         """If true synchronize batch normalization across distributed processes."""
         return False
@@ -272,19 +282,19 @@ class TrainingConfig(BaseConfig):
             return 2
         return 64
 
-    @property
+    @overridable_property
     def torch_float_type(self):
         """PyTorch float precision type for training."""
-        if self.use_mixed_precision_training and self.gpu_name in ["a100", "l40s"]:
+        if self.use_mixed_precision_training and self.gpu_name in ["a100", "l40s", "3060", "4090", "5090"]:
             return torch.bfloat16
         return torch.float32
 
-    @property
+    @overridable_property
     def use_mixed_precision_training(self):
         """If true use mixed precision training."""
         return self.gpu_name in ["a100", "l40s"]
 
-    @property
+    @overridable_property
     def need_grad_scaler(self):
         """If true gradient scaling is needed for mixed precision training."""
         return (
@@ -294,14 +304,14 @@ class TrainingConfig(BaseConfig):
     # If true use ZeRO redundancy optimizer for distributed training.
     use_zero_redundancy = False
 
-    @property
+    @overridable_property
     def save_model_checkpoint(self):
         """If true save model checkpoints during training."""
         if self.is_on_slurm:
             return True
         return True
 
-    @property
+    @overridable_property
     def is_pretraining(self):
         """If true indicates pretraining phase."""
         return not self.use_planning_decoder
@@ -313,12 +323,12 @@ class TrainingConfig(BaseConfig):
     # Number of data loader workers to prefetch batches.
     prefetch_factor = 16
 
-    @property
+    @overridable_property
     def compile(self):
         """If true compile the model for optimization."""
         return True
 
-    @property
+    @overridable_property
     def channel_last(self):
         """If true use channel last memory format for input tensors."""
         return True
@@ -328,14 +338,14 @@ class TrainingConfig(BaseConfig):
     lr = 3e-4
 
     # --- Model input ---
-    @property
+    @overridable_property
     def skip_first(self):
         """Number of frames to skip at the beginning of sequences."""
         if self.is_pretraining and not self.mixed_data_training:
             return 1
         return self.num_way_points_prediction
 
-    @property
+    @overridable_property
     def skip_last(self):
         """Number of frames to skip at the end of sequences."""
         if self.is_pretraining:
@@ -351,7 +361,7 @@ class TrainingConfig(BaseConfig):
         )
 
     # --- RaDAR ---
-    @property
+    @overridable_property
     def radar_detection(self):
         """If true use radar points as additional input to the model."""
         return self.carla_leaderboard_mode
@@ -394,7 +404,7 @@ class TrainingConfig(BaseConfig):
     # If true then we skip Town13 routes during training
     hold_out_town13_routes = False
 
-    @property
+    @overridable_property
     def carla_bucket_collection(self):
         """Name of the bucket collection to use for training data."""
         from lead.data_buckets.failed_bucket_collection import FailedBucketCollection
@@ -441,7 +451,7 @@ class TrainingConfig(BaseConfig):
             return Town13HeldoutPosttrainBucketCollection
         return FullPosttrainBucketCollection
 
-    @property
+    @overridable_property
     def bucket_collection_path(self):
         """Path to bucket collection directory."""
         return os.path.join(self.carla_root, "buckets")
@@ -460,13 +470,13 @@ class TrainingConfig(BaseConfig):
         return 0.5
 
     # --- Regularization ---
-    @property
+    @overridable_property
     def use_color_aug(self):
         """If true apply image color based augmentations."""
         # If true apply image color based augmentations
         return not self.visualize_dataset
 
-    @property
+    @overridable_property
     def use_color_aug_prob(self):
         """Probability to apply the different image color augmentations."""
         if self.carla_leaderboard_mode:
@@ -490,7 +500,7 @@ class TrainingConfig(BaseConfig):
         return self.carla_leaderboard_mode
 
     # --- LiDAR setting ---
-    @property
+    @overridable_property
     def training_used_lidar_steps(self):
         """We stack lidar frames for motion cues. Number of past frames we stack for the model input."""
         return 10
@@ -502,12 +512,12 @@ class TrainingConfig(BaseConfig):
     # Max number of LiDAR points per pixel in voxelized LiDAR.
     hist_max_per_pixel = 5
 
-    @property
+    @overridable_property
     def lidar_vert_anchors(self):
         """Number of vertical anchors for LiDAR feature maps."""
         return self.lidar_height_pixel // 32
 
-    @property
+    @overridable_property
     def lidar_horz_anchors(self):
         """Number of horizontal anchors for LiDAR feature maps."""
         return self.lidar_width_pixel // 32
@@ -545,7 +555,7 @@ class TrainingConfig(BaseConfig):
             return False
         return True
 
-    @property
+    @overridable_property
     def discrete_command_dim(self):
         """Dimension of discrete command input."""
         if self.carla_leaderboard_mode:
@@ -569,7 +579,7 @@ class TrainingConfig(BaseConfig):
     # If true use the velocity as input to the network.
     use_velocity = True
 
-    @property
+    @overridable_property
     def max_speed(self):
         """Maximum speed limit for the vehicle in m/s."""
         if self.carla_leaderboard_mode:
@@ -584,14 +594,14 @@ class TrainingConfig(BaseConfig):
             return 33.33
         raise ValueError("Unknown target dataset. Not sure what max speed to use.")
 
-    @property
+    @overridable_property
     def use_acceleration(self):
         """If true use the acceleration as input to the network."""
         return not self.carla_leaderboard_mode and self.target_dataset not in [
             TargetDataset.WAYMO_E2E_2025_3CAMERAS
         ]
 
-    @property
+    @overridable_property
     def max_acceleration(self):
         """Maximum acceleration for normalization."""
         if self.carla_leaderboard_mode:
@@ -601,33 +611,33 @@ class TrainingConfig(BaseConfig):
         ]:
             return 4.0
 
-    @property
+    @overridable_property
     def use_previous_tp(self):
         """If true use the previous/visited target point as input to the network."""
         if self.carla_leaderboard_mode:
             return True
         return False
 
-    @property
+    @overridable_property
     def use_next_tp(self):
         """If true use the next/subsequent target point as input to the network."""
         if self.carla_leaderboard_mode:
             return True
         return False
 
-    @property
+    @overridable_property
     def use_tp(self):
         """If true use the current target point as input to the network."""
         if self.carla_leaderboard_mode:
             return True
         return False
 
-    @property
+    @overridable_property
     def target_points_normalization_constants(self):
         """Normalization constants for target points [x_norm, y_norm]."""
         return [[200.0, 50.0]]
 
-    @property
+    @overridable_property
     def tp_pop_distance(self):
         """Distance threshold for popping target points from route."""
         return 3.25
@@ -659,14 +669,14 @@ class TrainingConfig(BaseConfig):
     # Number of attention heads in BEV cross-attention.
     transfuser_num_bev_cross_attention_heads = 8
     # Dimension of tokens in the transformer.
-    transfuser_token_dim = 64
+    transfuser_token_dim = 256
 
-    @property
+    @overridable_property
     def predict_target_speed(self):
         """If true predict target speed."""
         return self.carla_leaderboard_mode
 
-    @property
+    @overridable_property
     def predict_spatial_path(self):
         """If true predict spatial path."""
         return self.carla_leaderboard_mode
@@ -683,7 +693,7 @@ class TrainingConfig(BaseConfig):
     # Used for TFv5 planning decoder
     gru_hidden_size = 64
 
-    @property
+    @overridable_property
     def target_speed_classes(self):
         """Carla target speed prediction classes in m/s."""
         return [
@@ -697,7 +707,7 @@ class TrainingConfig(BaseConfig):
             20.0,
         ]
 
-    @property
+    @overridable_property
     def target_speeds(self):
         return self.target_speed_classes
 
@@ -710,7 +720,7 @@ class TrainingConfig(BaseConfig):
     # Assume maximum distance between two future waypoints in meters.
     max_distance_future_waypoint = 10.0
 
-    @property
+    @overridable_property
     def num_way_points_prediction(self):
         """Number of waypoints to predict."""
         if self.carla_leaderboard_mode:
@@ -725,10 +735,13 @@ class TrainingConfig(BaseConfig):
             "Unknown target dataset. Not sure how long is the planning horizon."
         )
 
-    @property
+    @overridable_property
     def waypoints_spacing(self):
         """Spacing between predicted waypoints. For example: spacing 5 = 4Hz prediction."""
-        if self.carla_leaderboard_mode:
+        
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
+            return 3  # 4Hz
+        elif self.carla_leaderboard_mode:
             return 5  # 4Hz
         elif self.target_dataset in [
             TargetDataset.NAVSIM_4CAMERAS,
@@ -744,7 +757,7 @@ class TrainingConfig(BaseConfig):
     # Horizontal FOV reduction: number of pixels to crop from each side (left and right)
     horizontal_fov_reduction = 0
 
-    @property
+    @overridable_property
     def crop_height(self):
         """The amount of pixels cropped from the bottom of the image."""
         return (
@@ -752,7 +765,7 @@ class TrainingConfig(BaseConfig):
             - self.camera_calibration[1]["cropped_height"]
         )
 
-    @property
+    @overridable_property
     def carla_crop_height_type(self):
         """Type of cropping applied to CARLA images."""
         if self.carla_leaderboard_mode:
@@ -765,30 +778,104 @@ class TrainingConfig(BaseConfig):
             return CarlaImageCroppingType.NONE
         raise ValueError("Unknown target dataset. Not sure how to crop the images.")
 
-    @property
+    @overridable_property
     def image_width_before_camera_subselection(self):
         """Final width of images after loading from disk but before camera sub-selection."""
+        if self.dual_front_camera_mode:
+            return self.camera_calibration[1]["width"]
         return self.num_available_cameras * self.camera_calibration[1]["width"]
 
-    @property
+    @overridable_property
     def final_image_width(self):
         """Final width of images after cropping and camera sub-selection."""
+        if self.dual_front_camera_mode:
+            return self.camera_calibration[1]["width"]
         return self.num_used_cameras * self.camera_calibration[1]["width"]
 
-    @property
+    @overridable_property
     def final_image_height(self):
         """Final height of images after cropping."""
         return self.camera_calibration[1]["cropped_height"]
 
-    @property
+    @overridable_property
     def img_vert_anchors(self):
         """Number of vertical anchors for image feature maps."""
         return self.final_image_height // 32
 
-    @property
+    @overridable_property
     def img_horz_anchors(self):
         """Number of horizontal anchors for image feature maps."""
+        if self.dual_front_camera_mode:
+            return self.camera_calibration[1]["width"] // 32
         return self.num_used_cameras * self.camera_calibration[1]["width"] // 32
+
+    # --- Dual front camera backbone ---
+    # Optional mode used by CARLA_LEADERBOARD2_ONLY2CAMERAS. These fields are
+    # class attributes so JSON configs can override them through BaseConfig.
+    backbone_sensor_mode = "lidar_rgb"
+    left_camera_key = "rgb_left"
+    right_camera_key = "rgb_right"
+    left_camera_architecture = "resnet34"
+    right_camera_architecture = "resnet34"
+    share_dual_camera_encoder = False
+    dual_camera_pretrained = True
+    dual_camera_image_output = "left"
+    left_camera_token_grid = None
+    right_camera_token_grid = None
+    left_camera_vert_anchors = None
+    left_camera_horz_anchors = None
+    right_camera_vert_anchors = None
+    right_camera_horz_anchors = None
+    left_camera_fov_deg = 90.0
+    right_camera_fov_deg = 50.03
+    camera_baseline_m = 0.135
+    left_camera_translation_m = [ 0.9,
+        -0.0675,
+        1.550]
+    right_camera_translation_m = [ 0.9,
+        0.0675,
+        1.550]
+    left_camera_yaw_deg = 0.0
+    right_camera_yaw_deg = 0.0
+    left_camera_pitch_deg = 0.0
+    right_camera_pitch_deg = 0.0
+    left_camera_roll_deg = 0.0
+    right_camera_roll_deg = 0.0
+    dual_camera_left_fov_deg = 90.0
+    dual_camera_right_fov_deg = 50.0
+    dual_camera_baseline_m = 0.15
+    dual_camera_left_translation_m = [ 0.9,
+        -0.0675,
+        1.550]
+    dual_camera_right_translation_m =  [0.9,
+        0.0675,
+        1.550]
+    dual_camera_left_yaw_deg = 0.0
+    dual_camera_right_yaw_deg = 0.0
+    dual_camera_left_pitch_deg = 0.0
+    dual_camera_right_pitch_deg = 0.0
+    dual_camera_left_roll_deg = 0.0
+    dual_camera_right_roll_deg = 0.0
+    dual_camera_bev_projector = "ground_plane_ipm"
+    dual_camera_bev_ground_z_m = 0.0
+    dual_camera_ground_z_m = 0.0
+    dual_camera_projection_eps = 0.0001
+    dual_camera_bev_hidden_channels = 512
+    dual_camera_bev_output_channels = 512
+    dual_camera_bev_use_batch_norm = True
+    dual_camera_bev_reverse_x = False
+    dual_camera_bev_reverse_y = False
+    rgb_camera_ids = (1, 3)
+
+    @overridable_property
+    def dual_front_camera_mode(self):
+        """If true, train with two independent front RGB camera tensors."""
+        return str(self.backbone_sensor_mode).lower() in {
+            "dual_front_camera",
+            "dual_camera",
+            "two_front_cameras",
+            "two_camera",
+        }
 
     # --- TransFuser backbone ---
     # If true freeze the backbone weights during training.
@@ -859,6 +946,9 @@ class TrainingConfig(BaseConfig):
     use_carla_data = True
     # Number of CARLA samples to use in mixed data training. -1 = use all data.
     carla_num_samples = -1
+    # Fraction of CARLA samples to use. -1 or 1.0 = use all data.
+    # Ignored when carla_num_samples is set to a positive value.
+    carla_dataset_fraction = -1.0
     # If true use NavSim data for training.
     use_navsim_data = False
     # NavSim data root directory.
@@ -886,17 +976,17 @@ class TrainingConfig(BaseConfig):
     # Waymo E2E subsample factor for training data.
     waymo_e2e_subsample_factor = 5
 
-    @property
+    @overridable_property
     def navsim_num_bev_semantic_classes(self):
         """Number of BEV semantic classes in NavSim data."""
         return len(NavSimBEVSemanticClass)
 
-    @property
+    @overridable_property
     def navsim_num_bb_classes(self):
         """Number of bb classes in NavSim data."""
         return len(NavSimBBClass)
 
-    @property
+    @overridable_property
     def mixed_data_training(self):
         """If true use mixed data for training."""
         return (
@@ -906,13 +996,14 @@ class TrainingConfig(BaseConfig):
             > 1
         )
 
-    @property
+    @overridable_property
     def carla_leaderboard_mode(self):
         """If true use CARLA leaderboard mode settings."""
         return (
             self.target_dataset
             in [
                 TargetDataset.CARLA_LEADERBOARD2_3CAMERAS,
+                TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS,
                 TargetDataset.CARLA_LEADERBOARD2_6CAMERAS,
             ]
             and not self.mixed_data_training
@@ -990,7 +1081,7 @@ class TrainingConfig(BaseConfig):
 
         return weights
 
-    @property
+    @overridable_property
     def log_scalars_frequency(self):
         """How often to log scalar values during training."""
         if not self.is_on_slurm:
@@ -1007,7 +1098,7 @@ class TrainingConfig(BaseConfig):
             LOG.error(f"Error reading log frequency file: {e}.")
             return 1
 
-    @property
+    @overridable_property
     def log_images_frequency(self):
         """How often to log images during training."""
         if not self.is_on_slurm:
@@ -1024,15 +1115,25 @@ class TrainingConfig(BaseConfig):
             LOG.error(f"Error reading log frequency file: {e}.")
             return 100
 
-    @property
+    @overridable_property
     def log_wandb(self):
         """If true log metrics to Weights & Biases."""
         if self.is_on_slurm:
             return True
         return False
 
+    # --- Additional training metrics ---
+    # If true compute extra perception metrics during training.
+    use_additional_metrics = False
+    # How often to compute additional perception metrics during training.
+    additional_metrics_frequency = 100
+    # IoU threshold for CenterNet BEV mAP metric.
+    additional_metrics_map_iou_threshold = 0.5
+    # Minimum CenterNet score used by the BEV mAP metric.
+    additional_metrics_map_score_threshold = 0.05
+
     # --- Hardware configuration ---
-    @property
+    @overridable_property
     def gpu_name(self):
         """Normalized GPU name for hardware-specific configurations."""
         try:
@@ -1051,6 +1152,10 @@ class TrainingConfig(BaseConfig):
                 return "rtx3080"
             elif "rtx 3060" in name:
                 return "rtx3060"
+            elif "rtx 4090" in name:
+                return "rtx4090"
+            elif "rtx 5090" in name:
+                return "rtx5090"
             else:
                 raise Exception(
                     f"Unknown GPU name: {name}. Please register it in the config."
@@ -1058,29 +1163,29 @@ class TrainingConfig(BaseConfig):
         except RuntimeError:
             return ""
 
-    @property
+    @overridable_property
     def rank(self):
         """Current process rank in distributed training."""
         return int(os.environ.get("RANK", "0"))
 
-    @property
+    @overridable_property
     def world_size(self):
         """Total number of processes in distributed training."""
         return int(os.environ.get("WORLD_SIZE", "1"))
 
-    @property
+    @overridable_property
     def local_rank(self):
         """Local rank of current process on the node."""
         return int(os.environ.get("LOCAL_RANK", "0"))
 
-    @property
+    @overridable_property
     def device(self):
         """PyTorch device to use for training."""
         return torch.device(
             f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu"
         )
 
-    @property
+    @overridable_property
     def assigned_cpu_cores(self):
         """Number of CPU cores assigned to this job."""
         if "SLURM_JOB_ID" in os.environ:
@@ -1089,7 +1194,7 @@ class TrainingConfig(BaseConfig):
                 return int(cpus_per_task)
         return 8
 
-    @property
+    @overridable_property
     def workers_per_cpu_cores(self):
         """Number of data loader workers per CPU core."""
         if not self.mixed_data_training and not self.use_carla_data:

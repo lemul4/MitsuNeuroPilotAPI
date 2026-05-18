@@ -21,7 +21,7 @@ $env:TEAM_CONFIG = $env:ROUTES
 $env:DATAGEN = "1"
 
 # Expert config overrides:
-# TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS == 2
+# TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS == 3
 # One-line toggles:
 $env:SAVE_CAMERA_PC = "False"
 $env:ENABLE_PERTURBATED_SENSORS = "False"
@@ -31,7 +31,7 @@ $env:COMPRESS_IMAGES = "True"
 $env:CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ = "False"
 
 $env:PY123D_DATA_FORMAT = "False"
-$env:LEAD_EXPERT_CONFIG = "target_dataset=2 py123d_data_format=$($env:PY123D_DATA_FORMAT) save_legacy_outputs_with_py123d=$($env:PY123D_DATA_FORMAT) use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false save_camera_pc=$($env:SAVE_CAMERA_PC) perturbate_sensors=$($env:ENABLE_PERTURBATED_SENSORS) camera_lidar_sensor_tick_from_data_save_freq=$($env:CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ) sync_sensor_processing_with_data_save_freq=$($env:SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ) compute_camera_pc=$($env:COMPUTE_CAMERA_PC) compress_images=$($env:COMPRESS_IMAGES)"
+$env:LEAD_EXPERT_CONFIG = "target_dataset=3 py123d_data_format=$($env:PY123D_DATA_FORMAT) save_legacy_outputs_with_py123d=$($env:PY123D_DATA_FORMAT) use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false save_camera_pc=$($env:SAVE_CAMERA_PC) perturbate_sensors=$($env:ENABLE_PERTURBATED_SENSORS) camera_lidar_sensor_tick_from_data_save_freq=$($env:CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ) sync_sensor_processing_with_data_save_freq=$($env:SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ) compute_camera_pc=$($env:COMPUTE_CAMERA_PC) compress_images=$($env:COMPRESS_IMAGES)"
 
 if ($env:PY123D_DATA_FORMAT.ToLower() -eq "true") {
     $env:AGENT_MODULE = "lead/expert/expert_py123d.py"
