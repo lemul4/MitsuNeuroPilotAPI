@@ -40,7 +40,8 @@
         "dual_front_camera",
         "2cam",
         "fov90_50",
-        "baseline0.15"
+        "baseline0.15",
+        "bev_semantic_lane_markers_broken_v1"
     ],
     "ssd_cache_path": "/scratch/1895310",
     "carla_root": "data/carla_leaderboard2_dual_cameras/cache",
@@ -197,7 +198,7 @@
     "deconv_scale_factor_0": 4,
     "deconv_scale_factor_1": 8,
     "use_bev_semantic": true,
-    "num_bev_semantic_classes": 13,
+    "num_bev_semantic_classes": 14,
     "scale_pedestrian_bev_semantic_size": 2.5,
     "pedestrian_bev_min_extent": 0.4,
     "bev_features_chanels": 64,

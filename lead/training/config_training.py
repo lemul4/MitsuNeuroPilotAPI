@@ -38,6 +38,23 @@ class TrainingConfig(BaseConfig):
         )
         if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             self._loaded_config["use_depth"] = False
+        self._normalize_bev_semantic_label_schema()
+
+    def _normalize_bev_semantic_label_schema(self):
+        """Keep dual-front BEV schema explicit in configs and cache keys."""
+        if not self.use_bev_broken_lane_markers:
+            return
+
+        self._loaded_config["num_bev_semantic_classes"] = (
+            self.dual_front_num_bev_semantic_classes
+        )
+        if "carla_cache_path" not in self._loaded_config:
+            return
+
+        cache_path = tuple(self._loaded_config["carla_cache_path"])
+        if self.bev_semantic_cache_schema not in cache_path:
+            cache_path += (self.bev_semantic_cache_schema,)
+        self._loaded_config["carla_cache_path"] = cache_path
 
     @overridable_property
     def target_dataset(self):
@@ -211,6 +228,8 @@ class TrainingConfig(BaseConfig):
                 "dual_front_camera_separate_rgb",
                 "_".join(str(camera_id) for camera_id in self.rgb_camera_ids),
             )
+        if self.use_bev_broken_lane_markers:
+            cache_path += (self.bev_semantic_cache_schema,)
         return cache_path
 
     @overridable_property
@@ -928,8 +947,36 @@ class TrainingConfig(BaseConfig):
     # --- BEV Semantic ---
     # If true use bev semantic segmentation as auxiliary loss for training.
     use_bev_semantic = True
-    # Total number of BEV semantic segmentation classes.
-    num_bev_semantic_classes = len(TransfuserBEVSemanticClass)
+
+    @property
+    def use_bev_broken_lane_markers(self):
+        """If true, keep broken lane markers as a separate BEV semantic class."""
+        return self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS
+
+    @property
+    def bev_semantic_cache_schema(self):
+        """Persistent cache marker for the active CARLA BEV semantic label schema."""
+        if self.use_bev_broken_lane_markers:
+            return "bev_semantic_lane_markers_broken_v1"
+        return "bev_semantic_lane_markers_merged_v1"
+
+    @property
+    def default_num_bev_semantic_classes(self):
+        """Number of BEV classes in the legacy merged-lane-marker schema."""
+        return int(TransfuserBEVSemanticClass.LANE_MARKERS_BROKEN)
+
+    @property
+    def dual_front_num_bev_semantic_classes(self):
+        """Number of BEV classes in the dual-front separate-broken-lane schema."""
+        return len(TransfuserBEVSemanticClass)
+
+    @overridable_property
+    def num_bev_semantic_classes(self):
+        """Total number of BEV semantic segmentation classes."""
+        if self.use_bev_broken_lane_markers:
+            return self.dual_front_num_bev_semantic_classes
+        return self.default_num_bev_semantic_classes
+
     # Scale factor for pedestrian BEV semantic size.
     scale_pedestrian_bev_semantic_size = 2.5
     # Minimum extent for pedestrian BEV representation.

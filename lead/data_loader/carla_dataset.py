@@ -69,9 +69,12 @@ class CARLAData(Dataset):
         self.semantic_converter = np.uint8(
             list(constants.SEMANTIC_SEGMENTATION_CONVERTER.values())
         )
-        self.hdmap_converter = np.uint8(
-            list(constants.CHAFFEURNET_TO_TRANSFUSER_BEV_SEMANTIC_CONVERTER.values())
+        hdmap_converter = (
+            constants.get_chauffeurnet_to_transfuser_bev_semantic_converter(
+                include_broken_lane_markers=self.config.use_bev_broken_lane_markers
+            )
         )
+        self.hdmap_converter = np.uint8(list(hdmap_converter.values()))
         self.image_augmenter_func = image_augmenter(config, config.use_color_aug_prob)
         self.random = random
         self.build_cache = build_cache
@@ -609,14 +612,19 @@ class CARLAData(Dataset):
         if self.config.dual_front_camera_mode:
             left_key = str(getattr(self.config, "left_camera_key", "rgb_left"))
             right_key = str(getattr(self.config, "right_camera_key", "rgb_right"))
+            image_augmenter_func = (
+                self.image_augmenter_func.to_deterministic()
+                if self.config.use_color_aug
+                else None
+            )
             for key, image in (
                 (left_key, sensor_data.image_left),
                 (right_key, sensor_data.image_right),
             ):
                 if image is None:
                     raise ValueError(f"Missing {key} image in dual front camera mode.")
-                if self.config.use_color_aug:
-                    image = self.image_augmenter_func(image=image)
+                if image_augmenter_func is not None:
+                    image = image_augmenter_func(image=image)
                 data[key] = np.transpose(image, (2, 0, 1))
         else:
             if self.config.use_color_aug:
@@ -724,8 +732,12 @@ class CARLAData(Dataset):
                 ]
 
             mask = loaded_bev_occupancy != TransfuserBEVOccupancyClass.UNLABELED
-            loaded_hdmap[mask] = loaded_bev_occupancy[mask] + (
-                len(TransfuserBEVSemanticClass) - len(TransfuserBEVOccupancyClass)
+            occupancy_class_offset = (
+                TransfuserBEVSemanticClass.VEHICLE
+                - TransfuserBEVOccupancyClass.VEHICLE
+            )
+            loaded_hdmap[mask] = (
+                loaded_bev_occupancy[mask] + occupancy_class_offset
             )  # Add offset to BEV occupancy classes
             data["bev_semantic"] = loaded_hdmap
             if not self.config.carla_leaderboard_mode:
