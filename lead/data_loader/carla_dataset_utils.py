@@ -99,11 +99,14 @@ def image_augmenter(config: TrainingConfig, prob: float = 0.2):
     imgaug.imgaug.seed(config.seed)
     perturbations = [
         ia.Sometimes(prob, ia.GaussianBlur((0, 1.0))),
+        ia.Sometimes(prob, ia.MotionBlur(k=(3, 7), angle=(-10, 10))),
         ia.Sometimes(
             prob,
             ia.AdditiveGaussianNoise(loc=0, scale=(0.0, 0.05 * 255), per_channel=0.5),
         ),
         ia.Sometimes(prob, ia.Dropout((0.01, 0.1), per_channel=0.5)),  # Strong
+        ia.Sometimes(prob, ia.GammaContrast((0.7, 1.4), per_channel=False)),
+        ia.Sometimes(prob, ia.Add((-20, 20), per_channel=False)),
         ia.Sometimes(prob, ia.Multiply((1 / 1.2, 1.2), per_channel=0.5)),
         ia.Sometimes(prob, ia.LinearContrast((1 / 1.2, 1.2), per_channel=0.5)),
         ia.Sometimes(prob, ia.ElasticTransformation(alpha=(0.5, 1.5), sigma=0.25)),
