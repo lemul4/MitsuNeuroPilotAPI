@@ -210,3 +210,4 @@ telemetry_*
 *.jsonl
 .mnp_runtime/
 .idea/
+.agents/

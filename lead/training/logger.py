@@ -57,11 +57,14 @@ class Logger:
                 log_dir=config.logdir,
             )
             if self.config.log_wandb:
+                wandb_id = None
+                if self.config.wandb_resume != "never":
+                    wandb_id = config.wandb_id
                 wandb.init(
                     project=self.config.wandb_project_name,
                     name=config.description,
                     config=config.training_dict(),
-                    id=config.wandb_id,
+                    id=wandb_id,
                     resume=config.wandb_resume,
                     dir=self.config.logdir,
                     settings=wandb.Settings(_service_wait=300),
@@ -73,6 +76,8 @@ class Logger:
                 LOG.info(
                     f"WandB logger will log images every {self.config.log_images_frequency} steps"
                 )
+                if self.config.use_additional_metrics:
+                    LOG.info("Additional perception metrics logging is enabled.")
 
     def __del__(self):
         if self.config.rank == 0:

@@ -20,8 +20,10 @@ from lead.training.config_training import TrainingConfig
 @dataclass
 class SensorData:
     image: jt.UInt8[npt.NDArray, "img_height img_width 3"] | None
+    image_left: jt.UInt8[npt.NDArray, "left_img_height left_img_width 3"] | None
+    image_right: jt.UInt8[npt.NDArray, "right_img_height right_img_width 3"] | None
     rasterized_lidar: jt.Float32[npt.NDArray, "bev_height bev_width"] | None
-    semantic: jt.UInt8[npt.NDArray, "img_height img_width"] | None
+    semantic: jt.UInt8[npt.NDArray, "semantic_height semantic_width"] | None
     hdmap: jt.UInt8[npt.NDArray, "bev_semantic_height bev_semantic_width"] | None
     depth: jt.Float32[npt.NDArray, "depth_img_height depth_img_width"] | None
     boxes: jt.Float32[npt.NDArray, "num_boxes features"] | None
@@ -44,7 +46,12 @@ class SensorData:
 
     @beartype
     def compress(
-        self, raw_image_bytes, config: TrainingConfig, current_measurement: dict
+        self,
+        raw_image_bytes,
+        config: TrainingConfig,
+        current_measurement: dict,
+        raw_image_left_bytes=None,
+        raw_image_right_bytes=None,
     ) -> CompressedSensorData:
         # LiDAR BEV
         compressed_lidar_bev = None
@@ -93,6 +100,8 @@ class SensorData:
 
         return CompressedSensorData(
             image=raw_image_bytes,
+            image_left=raw_image_left_bytes,
+            image_right=raw_image_right_bytes,
             lidar_bev=compressed_lidar_bev,
             semantic=compressed_semantic,
             bev_semantic=compressed_bev_semantic,
@@ -113,6 +122,8 @@ class CompressedSensorData:
     """Compressed version of SensorData for efficient storage."""
 
     image: bytes | None  # JPEG compressed RGB image
+    image_left: bytes | None  # Encoded left RGB image
+    image_right: bytes | None  # Encoded right RGB image
     lidar_bev: (
         jt.UInt8[npt.NDArray, " lidar_bytes"] | None
     )  # PNG compressed float image
@@ -146,13 +157,18 @@ class CompressedSensorData:
     @beartype
     def decompress(self) -> SensorData:
         """Decompress all sensor data back to original format."""
-        # RGB image
-        decompressed_image = None
-        if self.image is not None:
-            decompressed_image = cv2.imdecode(
-                np.frombuffer(self.image, np.uint8), cv2.IMREAD_UNCHANGED
+        def decompress_rgb(encoded_image):
+            if encoded_image is None:
+                return None
+            decoded = cv2.imdecode(
+                np.frombuffer(encoded_image, np.uint8), cv2.IMREAD_UNCHANGED
             )
-            decompressed_image = cv2.cvtColor(decompressed_image, cv2.COLOR_BGR2RGB)
+            return cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+
+        # RGB image
+        decompressed_image = decompress_rgb(getattr(self, "image", None))
+        decompressed_image_left = decompress_rgb(getattr(self, "image_left", None))
+        decompressed_image_right = decompress_rgb(getattr(self, "image_right", None))
 
         # LiDAR BEV
         decompressed_lidar_bev = None
@@ -203,6 +219,8 @@ class CompressedSensorData:
 
         return SensorData(
             image=decompressed_image,
+            image_left=decompressed_image_left,
+            image_right=decompressed_image_right,
             rasterized_lidar=decompressed_lidar_bev,
             semantic=decompressed_semantic,
             hdmap=decompressed_bev_semantic,

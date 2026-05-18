@@ -44,14 +44,14 @@ class ExpertConfig(BaseConfig):
     @overridable_property
     def use_lidar(self):
         """Whether to attach/process LiDAR for the current target dataset."""
-        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS or self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             return True
         return True
 
     @overridable_property
     def use_radars(self):
         """Whether to attach/process radars for the current target dataset."""
-        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS or self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             return False
         return True
 
@@ -82,7 +82,7 @@ class ExpertConfig(BaseConfig):
     @overridable_property
     def py123d_camera_index(self):
         """Camera index used for single-camera Py123D export."""
-        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS or self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             # Use the center camera for ONLY3CAMERAS (cam2).
             return 2
         return 1
@@ -93,7 +93,7 @@ class ExpertConfig(BaseConfig):
 
         Lower means stronger compression.
         """
-        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS:
+        if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS or self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             return 50
         return 85
 
