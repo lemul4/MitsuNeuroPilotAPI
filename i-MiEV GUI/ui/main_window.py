@@ -26,9 +26,16 @@ except Exception:
     RealMissionPanel = None
 
 try:
-    from ui.marquee_label import ScrollingLabel
+    from ui.marquee_label import ScrollingLabel, MarqueeButton
 except Exception:
     ScrollingLabel = QLabel
+    MarqueeButton = QPushButton
+
+# В этом модуле все кнопки создаются через QPushButton. Переопределяем имя
+# на MarqueeButton, чтобы длинные подписи прокручивались плавно во всем UI,
+# а не только в панели навигатора. Qt stylesheet-селекторы QPushButton
+# продолжают применяться, потому что MarqueeButton наследуется от QPushButton.
+QPushButton = MarqueeButton
 
 try:
     from utils import discover_routes_fast
