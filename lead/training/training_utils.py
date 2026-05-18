@@ -46,9 +46,13 @@ def increase_limit_file_descriptors(n: int = 4096):
 
 
 @beartype
-def initialize_config() -> TrainingConfig:
+def initialize_config(config_path: str | None = None) -> TrainingConfig:
     config = TrainingConfig()
-    if config.load_file is not None:
+    if config_path is not None:
+        with open(config_path) as f:
+            loaded_config = json.load(f)
+        config = TrainingConfig(loaded_config, raise_error_on_missing_key=False)
+    elif config.load_file is not None:
         with open(
             os.path.join("/".join(config.load_file.split("/")[:-1]), "config.json")
         ) as f:

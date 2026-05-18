@@ -5,6 +5,7 @@ from torch.nn import functional as F
 
 import lead.common.common_utils as common_utils
 from lead.common.constants import SOURCE_DATASET_NAME_MAP, SourceDataset
+from lead.training import metrics
 from lead.training.config_training import TrainingConfig
 
 
@@ -125,6 +126,16 @@ class BEVDecoder(nn.Module):
             loss_bev = (
                 loss_bev_per_sample * source_mask
             ).sum() / source_mask.sum().clamp(min=1)
+
+        if data.get("compute_additional_metrics", False):
+            metric_prefix = f"{prefix}" if prefix else ""
+            metric_name = f"metric/{metric_prefix}bev_semantic_miou"
+            log[metric_name] = metrics.mean_iou_from_logits(
+                logits=pred[source_mask.bool()],
+                label=visible_label[source_mask.bool()],
+                num_classes=self.num_classes,
+                ignore_index=-1,
+            )
 
         # Add dataset name prefix
         loss[f"{prefix}loss_bev_semantic"] = loss_bev

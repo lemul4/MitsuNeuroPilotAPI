@@ -3922,6 +3922,7 @@ class ExpertData(ExpertBase):
         if self.config_expert.target_dataset in [
             TargetDataset.CARLA_LEADERBOARD2_3CAMERAS,
             TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS,
+            TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS,
             TargetDataset.CARLA_LEADERBOARD2_6CAMERAS,
         ]:
             if "semantics_camera_pc_1" not in self.tick_data:
@@ -3939,6 +3940,7 @@ class ExpertData(ExpertBase):
         if self.config_expert.target_dataset in [
             TargetDataset.CARLA_LEADERBOARD2_3CAMERAS,
             TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS,
+            TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS,
             TargetDataset.CARLA_LEADERBOARD2_6CAMERAS,
         ]:
             if "semantics_camera_pc_2" not in self.tick_data:
@@ -3956,6 +3958,7 @@ class ExpertData(ExpertBase):
         if self.config_expert.target_dataset in [
             TargetDataset.CARLA_LEADERBOARD2_3CAMERAS,
             TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS,
+            TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS,
             TargetDataset.CARLA_LEADERBOARD2_6CAMERAS,
         ]:
             if "semantics_camera_pc_3" not in self.tick_data:

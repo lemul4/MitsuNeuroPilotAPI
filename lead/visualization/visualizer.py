@@ -1436,65 +1436,107 @@ def visualize_feature_maps(
     save_path: str = None,
     postfix: str = None,
 ):
+    def to_numpy_or_none(value):
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            if value.numel() == 0:
+                return None
+            return value.detach().cpu().numpy()
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return None
+            return value
+        return value
+
+    def indexed_numpy_or_none(value, *indices):
+        if value is None:
+            return None
+        try:
+            if indices:
+                value = value[indices]
+        except (IndexError, KeyError, TypeError):
+            return None
+        return to_numpy_or_none(value)
+
+    pred_bounding_box = getattr(predictions, "pred_bounding_box", None)
+    pred_heatmap = None
+    if pred_bounding_box is not None:
+        pred_heatmap = indexed_numpy_or_none(
+            getattr(pred_bounding_box, "center_heatmap_pred", None), 0
+        )
+        if pred_heatmap is not None:
+            pred_heatmap = pred_heatmap.argmax(0)
+
+    pred_bev_semantic = indexed_numpy_or_none(
+        getattr(predictions, "pred_bev_semantic", None), 0
+    )
+    if pred_bev_semantic is not None:
+        pred_bev_semantic = pred_bev_semantic.argmax(0)
+
     n_rows = 4
     n_cols = 4
     _, axs = plt.subplots(n_rows, n_cols, figsize=(24, 12))
     images = [
-        (data["rasterized_lidar"][0, 0].detach().cpu().numpy(), "BEV LiDAR", "hot"),
+        (indexed_numpy_or_none(data.get("rasterized_lidar"), 0, 0), "BEV LiDAR", "hot"),
         (
-            data["center_net_heatmap"][0, 0].detach().cpu().numpy(),
+            indexed_numpy_or_none(data.get("center_net_heatmap"), 0, 0),
             "Heatmap Label",
             "hot",
         ),
-        (data["center_net_wh"][0, 0].detach().cpu().numpy(), "WH Label", "hot"),
+        (indexed_numpy_or_none(data.get("center_net_wh"), 0, 0), "WH Label", "hot"),
         (
-            data["center_net_yaw_class"][0].detach().cpu().numpy(),
+            indexed_numpy_or_none(data.get("center_net_yaw_class"), 0),
             "Yaw Class Label",
             "hot",
         ),
         (
-            data["center_net_yaw_res"][0, 0].detach().cpu().numpy(),
+            indexed_numpy_or_none(data.get("center_net_yaw_res"), 0, 0),
             "Yaw Res Label",
             "hot",
         ),
-        (data["center_net_offset"][0, 0].detach().cpu().numpy(), "Offset Label", "hot"),
         (
-            data["center_net_velocity"][0, 0].detach().cpu().numpy(),
+            indexed_numpy_or_none(data.get("center_net_offset"), 0, 0),
+            "Offset Label",
+            "hot",
+        ),
+        (
+            indexed_numpy_or_none(data.get("center_net_velocity"), 0, 0),
             "Velocity Label",
             "hot",
         ),
-        (data["bev_semantic"][0].detach().cpu().numpy(), "BEV Semantic Label", "hot"),
         (
-            predictions.pred_bounding_box.center_heatmap_pred[0]
-            .detach()
-            .argmax(0)
-            .cpu()
-            .numpy(),
-            "Heatmap Prediction",
+            indexed_numpy_or_none(data.get("bev_semantic"), 0),
+            "BEV Semantic Label",
             "hot",
         ),
+        (pred_heatmap, "Heatmap Prediction", "hot"),
+        (pred_bev_semantic, "BEV Semantic Prediction", "hot"),
         (
-            predictions.pred_bev_semantic[0].detach().argmax(0).cpu().numpy(),
-            "BEV Semantic Prediction",
-            "hot",
-        ),
-        (
-            predictions.pred_future_waypoints[0].detach().cpu().numpy()
-            if predictions.pred_future_waypoints is not None
-            else None,
+            indexed_numpy_or_none(
+                getattr(predictions, "pred_future_waypoints", None), 0
+            ),
             "Waypoints",
             "hot",
         ),
         (
-            predictions.pred_route[0].detach().cpu().numpy()
-            if predictions.pred_route is not None
-            else None,
+            indexed_numpy_or_none(getattr(predictions, "pred_route", None), 0),
             "Route",
             "hot",
         ),
-        (data.get("radar")[0].cpu().numpy(), "Radar Input", "hot"),
-        (data.get("radar_detections"), "Radar Detection Label", "hot"),
-        (predictions.pred_radar_predictions, "Radar Detection Prediction", "hot"),
+        (indexed_numpy_or_none(data.get("radar"), 0), "Radar Input", "hot"),
+        (
+            indexed_numpy_or_none(data.get("radar_detections"), 0),
+            "Radar Detection Label",
+            "hot",
+        ),
+        (
+            indexed_numpy_or_none(
+                getattr(predictions, "pred_radar_predictions", None), 0
+            ),
+            "Radar Detection Prediction",
+            "hot",
+        ),
     ]
 
     for i, (img, title, cmap) in enumerate(images):
@@ -1525,7 +1567,7 @@ def visualize_feature_maps(
             ax.set_ylim(config.min_y_meter, config.max_y_meter)
             ax.invert_yaxis()
         elif title == "Radar Detection Label":
-            radar_labels = img[0]
+            radar_labels = img
             x, y, v, valid = (
                 radar_labels[:, RadarLabels.X],
                 radar_labels[:, RadarLabels.Y],
@@ -1539,7 +1581,7 @@ def visualize_feature_maps(
             ax.set_ylim(config.min_y_meter, config.max_y_meter)
             ax.invert_yaxis()
         elif title == "Radar Detection Prediction":
-            radar_detection = img[0].detach().cpu().float().numpy()
+            radar_detection = img
             x, y, v, valid = (
                 radar_detection[:, RadarLabels.X],
                 radar_detection[:, RadarLabels.Y],

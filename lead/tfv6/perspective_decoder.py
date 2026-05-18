@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from beartype import beartype
 
 from lead.common.constants import SOURCE_DATASET_NAME_MAP, SourceDataset
+from lead.training import metrics
 from lead.training.config_training import TrainingConfig
 
 
@@ -116,6 +117,21 @@ class PerspectiveDecoder(nn.Module):
             label = data[self.modality].to(
                 prediction.device, dtype=torch.long, non_blocking=True
             )
+            if prediction.shape[-2:] != label.shape[-2:]:
+                if prediction.ndim == 3:
+                    prediction = F.interpolate(
+                        prediction.float().unsqueeze(1),
+                        size=label.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    ).squeeze(1)
+                else:
+                    prediction = F.interpolate(
+                        prediction.float(),
+                        size=label.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
 
             # Compute loss per sample
             with torch.amp.autocast(device_type="cuda", enabled=False):
@@ -136,6 +152,18 @@ class PerspectiveDecoder(nn.Module):
                 loss_value = (
                     loss_per_sample * source_mask
                 ).sum() / source_mask.sum().clamp(min=1)
+
+            if (
+                data.get("compute_additional_metrics", False)
+                and self.modality == "semantic"
+            ):
+                valid_prediction = prediction[source_mask.bool()]
+                valid_label = label[source_mask.bool()]
+                log["metric/semantic_miou"] = metrics.mean_iou_from_logits(
+                    logits=valid_prediction,
+                    label=valid_label,
+                    num_classes=self.config.num_semantic_classes,
+                )
 
             # Add dataset name prefix
             prefix = SOURCE_DATASET_NAME_MAP[self.source_data]

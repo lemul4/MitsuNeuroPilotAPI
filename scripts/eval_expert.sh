@@ -16,7 +16,7 @@ export TEAM_CONFIG=$ROUTES
 export DATAGEN=1
 
 # Expert config overrides:
-# TargetDataset.CARLA_LEADERBOARD2_ONLY3CAMERAS == 2
+# TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS == 3
 # One-line toggles:
 export SAVE_CAMERA_PC=False
 export ENABLE_PERTURBATED_SENSORS=False
@@ -31,7 +31,7 @@ export DISABLE_SPEED_REDUCTION_BAD_VISIBILITY=True
 export USE_MIN_SPEED_INFRACTIONS_IN_SCORE=False
 
 export PY123D_DATA_FORMAT=False
-export LEAD_EXPERT_CONFIG="target_dataset=2 py123d_data_format=${PY123D_DATA_FORMAT} save_legacy_outputs_with_py123d=${PY123D_DATA_FORMAT} use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false save_camera_pc=${SAVE_CAMERA_PC} perturbate_sensors=${ENABLE_PERTURBATED_SENSORS} camera_lidar_sensor_tick_from_data_save_freq=${CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ} sync_sensor_processing_with_data_save_freq=${SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ} compute_camera_pc=${COMPUTE_CAMERA_PC} compress_images=${COMPRESS_IMAGES} disable_speed_reduction_bad_visibility=${DISABLE_SPEED_REDUCTION_BAD_VISIBILITY}"
+export LEAD_EXPERT_CONFIG="target_dataset=3 py123d_data_format=${PY123D_DATA_FORMAT} save_legacy_outputs_with_py123d=${PY123D_DATA_FORMAT} use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false save_camera_pc=${SAVE_CAMERA_PC} perturbate_sensors=${ENABLE_PERTURBATED_SENSORS} camera_lidar_sensor_tick_from_data_save_freq=${CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ} sync_sensor_processing_with_data_save_freq=${SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ} compute_camera_pc=${COMPUTE_CAMERA_PC} compress_images=${COMPRESS_IMAGES} disable_speed_reduction_bad_visibility=${DISABLE_SPEED_REDUCTION_BAD_VISIBILITY}"
 
 if [[ "${PY123D_DATA_FORMAT,,}" == "true" ]]; then
     AGENT_MODULE="lead/expert/expert_py123d.py"
