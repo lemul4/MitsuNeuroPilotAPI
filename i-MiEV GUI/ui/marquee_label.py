@@ -167,37 +167,20 @@ class ScrollingLabel(QLabel, _SmoothMarqueeMixin):
 
 
 class MarqueeButton(QPushButton, _SmoothMarqueeMixin):
-    """QPushButton with smooth scrolling text when the caption is too long."""
+    """QPushButton with smooth scrolling text when the caption is too long.
+
+    It is intentionally safe to use as a drop-in QPushButton replacement across
+    the whole UI. It keeps the logical button text in ``text()`` but paints the
+    caption itself, so long captions scroll without forcing Qt to relayout the
+    parent widget.
+    """
 
     def __init__(self, text: str = "", parent=None):
         super().__init__("", parent)
         self._marquee_init(text)
         self.setText(text)
 
-    def setText(self, text):  # noqa: N802 - Qt API
-        self._marquee_text = str(text or "")
-        self.setToolTip(self._marquee_text)
-        self._marquee_reset()
-        self._marquee_sync_timer()
-        self.update()
-
-    def text(self):  # noqa: N802 - Qt API
-        return self._marquee_text
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._marquee_sync_timer()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._marquee_sync_timer()
-
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        self._marquee_sync_timer()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
+    def _button_option(self) -> QStyleOptionButton:
         option = QStyleOptionButton()
         option.initFrom(self)
         if self.isDown():
@@ -215,20 +198,74 @@ class MarqueeButton(QPushButton, _SmoothMarqueeMixin):
             except Exception:
                 pass
         option.text = ""
+        return option
+
+    def _button_text_rect(self) -> QRect:
+        try:
+            option = self._button_option()
+            rect = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
+        except Exception:
+            rect = self.contentsRect()
+        rect = rect.adjusted(8, 0, -8, 0)
+        if self.menu() is not None:
+            rect.adjust(0, 0, -14, 0)
+        return rect
+
+    def _marquee_available_width(self, rect: QRect | None = None) -> int:
+        if rect is None:
+            rect = self._button_text_rect()
+        return max(0, int(rect.width()) - 2)
+
+    def setText(self, text):  # noqa: N802 - Qt API
+        self._marquee_text = str(text or "")
+        self.setToolTip(self._marquee_text)
+        # Keep Qt's internal text empty: the style draws only the frame/icon and
+        # this class draws the caption. The public text() method remains correct.
+        try:
+            super().setText("")
+        except RuntimeError:
+            pass
+        self._marquee_reset()
+        self._marquee_sync_timer()
+        self.updateGeometry()
+        self.update()
+
+    def text(self):  # noqa: N802 - Qt API
+        return self._marquee_text
+
+    def setIcon(self, icon):  # noqa: N802 - Qt API
+        super().setIcon(icon)
+        self._marquee_sync_timer()
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._marquee_sync_timer()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._marquee_sync_timer()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._marquee_sync_timer()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        option = self._button_option()
         self.style().drawControl(QStyle.CE_PushButton, option, painter, self)
 
-        content = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
-        content = content.adjusted(8, 0, -8, 0)
-        if self.menu() is not None:
-            content.adjust(0, 0, -12, 0)
-
+        content = self._button_text_rect()
         group = QPalette.ColorGroup.Disabled if not self.isEnabled() else QPalette.ColorGroup.Active
         color = self.palette().color(group, QPalette.ColorRole.ButtonText)
         self._marquee_draw(painter, content, color, Qt.AlignCenter)
 
     def sizeHint(self):
         hint = super().sizeHint()
-        hint.setWidth(min(max(96, self.fontMetrics().horizontalAdvance(self._marquee_text) + 36), 190))
+        # Bounded width prevents long captions from stretching fixed panels.
+        # The exact text still remains available through smooth scrolling.
+        text_w = self.fontMetrics().horizontalAdvance(self._marquee_text)
+        hint.setWidth(min(max(96, text_w + 36), 190))
         return hint
 
     def minimumSizeHint(self):

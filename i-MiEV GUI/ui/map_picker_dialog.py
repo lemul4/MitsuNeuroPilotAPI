@@ -23,6 +23,14 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 
+
+try:
+    from ui.marquee_label import MarqueeButton
+except Exception:  # pragma: no cover
+    MarqueeButton = QPushButton
+
+QPushButton = MarqueeButton
+
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebEngineCore import QWebEnginePage
