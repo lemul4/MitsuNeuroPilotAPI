@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from .geo import GeoPoint, GeoReference, latlon_to_local_m
+from .geo import GeoPoint, GeoReference, latlon_to_local_m, local_m_to_latlon
 from .models import Mission, NavCommand, Waypoint
 from .navigation import distance_2d, heading_deg, wrap_deg
 
@@ -25,6 +25,9 @@ class RoadRouteRequest:
     provider: str = "osrm"
     osrm_base_url: str = "https://router.project-osrm.org"
     timeout_sec: float = 4.0
+    lane_policy: str = "right_side"
+    lane_offset_m: float = 1.7
+    traffic_side: str = "right"
 
     @classmethod
     def from_mission_dict(cls, data: dict) -> "RoadRouteRequest":
@@ -45,6 +48,9 @@ class RoadRouteRequest:
             provider=str(metadata.get("routing_provider") or d.get("routing_provider") or "osrm"),
             osrm_base_url=str(metadata.get("osrm_base_url") or d.get("osrm_base_url") or "https://router.project-osrm.org"),
             timeout_sec=float(metadata.get("routing_timeout_sec", d.get("routing_timeout_sec", 4.0))),
+            lane_policy=str(metadata.get("lane_policy", d.get("lane_policy", "right_side"))),
+            lane_offset_m=float(metadata.get("lane_offset_m", d.get("lane_offset_m", 1.7))),
+            traffic_side=str(metadata.get("traffic_side", d.get("traffic_side", "right"))),
         )
 
 
@@ -61,7 +67,8 @@ class OsrmRoadRouteProvider:
         coordinates = self._fetch_osrm_geojson(request)
         if len(coordinates) < 2:
             raise RuntimeError("OSRM returned an empty geometry")
-        local_points = self._to_local_points(request.start, coordinates)
+        centerline_points = self._to_local_points(request.start, coordinates)
+        local_points = self._apply_lane_policy(centerline_points, request)
         waypoints = self._densify_and_annotate(
             local_points,
             spacing_m=max(0.5, float(request.spacing_m)),
@@ -94,8 +101,78 @@ class OsrmRoadRouteProvider:
                 "start_geo": {"lat": request.start.lat, "lon": request.start.lon},
                 "goal_geo": {"lat": request.goal.lat, "lon": request.goal.lon},
                 "raw_route_points": len(coordinates),
+                "lane_policy": request.lane_policy,
+                "lane_offset_m": float(request.lane_offset_m),
+                "traffic_side": request.traffic_side,
+                "trajectory_geometry": "centerline" if self._is_centerline_policy(request) else "right_side_offset_approximation",
             },
         )
+
+
+    @staticmethod
+    def _is_centerline_policy(request: RoadRouteRequest) -> bool:
+        return str(request.lane_policy or "").lower() in {"center", "centerline", "osm_centerline", "none", "0"} or abs(float(request.lane_offset_m or 0.0)) < 1e-6
+
+    def _apply_lane_policy(self, points: Sequence[Tuple[float, float]], request: RoadRouteRequest) -> List[Tuple[float, float]]:
+        """Shift OSRM/OSM centerline to the drivable side for the travel direction.
+
+        OSRM returns a road centerline, not lane geometry. For low-speed proving
+        ground tests we can create a deterministic control trajectory offset to
+        the right-hand side of travel. This is an approximation, not an HD-map
+        lane boundary. Use lane_offset_m=0 or lane_policy=centerline to keep the
+        original OSRM geometry.
+        """
+        pts = [(float(x), float(y)) for x, y in (points or [])]
+        if len(pts) < 2 or self._is_centerline_policy(request):
+            return pts
+        offset_m = max(0.0, min(4.0, abs(float(request.lane_offset_m or 0.0))))
+        if offset_m <= 0.0:
+            return pts
+        traffic_side = str(request.traffic_side or "right").lower()
+        side_sign = 1.0 if traffic_side not in {"left", "lhs", "left_hand"} else -1.0
+        normals: List[Tuple[float, float]] = []
+        for idx, (x, y) in enumerate(pts):
+            candidates: List[Tuple[float, float]] = []
+            if idx > 0:
+                px, py = pts[idx - 1]
+                dx, dy = x - px, y - py
+                length = math.hypot(dx, dy)
+                if length > 1e-6:
+                    # Right-of-travel normal in local ENU: (dy, -dx).
+                    candidates.append((dy / length * side_sign, -dx / length * side_sign))
+            if idx < len(pts) - 1:
+                nx, ny = pts[idx + 1]
+                dx, dy = nx - x, ny - y
+                length = math.hypot(dx, dy)
+                if length > 1e-6:
+                    candidates.append((dy / length * side_sign, -dx / length * side_sign))
+            if not candidates:
+                normals.append((0.0, 0.0))
+                continue
+            sx = sum(n[0] for n in candidates)
+            sy = sum(n[1] for n in candidates)
+            length = math.hypot(sx, sy)
+            if length <= 1e-6:
+                normals.append(candidates[-1])
+            else:
+                normals.append((sx / length, sy / length))
+        return [(x + nx * offset_m, y + ny * offset_m) for (x, y), (nx, ny) in zip(pts, normals)]
+
+    def route_preview_latlon(self, request: RoadRouteRequest) -> dict:
+        """Return centerline and control-trajectory geometry for UI/debug tools."""
+        coordinates = self._fetch_osrm_geojson(request)
+        center_local = self._to_local_points(request.start, coordinates)
+        control_local = self._apply_lane_policy(center_local, request)
+        ref = GeoReference(request.start)
+        center_geo = [local_m_to_latlon(x, y, ref).to_dict() for x, y in center_local]
+        control_geo = [local_m_to_latlon(x, y, ref).to_dict() for x, y in control_local]
+        return {
+            "centerline": center_geo,
+            "control_trajectory": control_geo,
+            "lane_policy": request.lane_policy,
+            "lane_offset_m": float(request.lane_offset_m),
+            "traffic_side": request.traffic_side,
+        }
 
     def _fetch_osrm_geojson(self, request: RoadRouteRequest) -> List[Tuple[float, float]]:
         base = request.osrm_base_url.rstrip("/")
@@ -175,5 +252,5 @@ class OsrmRoadRouteProvider:
                 if abs(delta) >= 28.0:
                     command = NavCommand.TURN_LEFT.value if delta > 0 else NavCommand.TURN_RIGHT.value
                     speed = min(speed, float(turn_speed_kmh))
-            waypoints.append(Waypoint(x, y, yaw, speed, command, command, 0.0, {"route_source": "road"}))
+            waypoints.append(Waypoint(x, y, yaw, speed, command, command, 0.0, {"route_source": "road", "trajectory": "control_side"}))
         return waypoints

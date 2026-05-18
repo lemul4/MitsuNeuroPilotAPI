@@ -21,6 +21,13 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 
+
+try:
+    from ui.marquee_label import ScrollingLabel, MarqueeButton
+except Exception:  # pragma: no cover
+    ScrollingLabel = QLabel
+    MarqueeButton = QPushButton
+
 try:
     from ui.map_picker_dialog import MapPickerDialog
 except Exception:  # pragma: no cover
@@ -63,7 +70,7 @@ class RealMissionPanel(QGroupBox):
         root.setContentsMargins(8, 18, 8, 8)
         root.setSpacing(8)
 
-        root.addWidget(QLabel("Миссия"))
+        root.addWidget(QLabel("Маршрут"))
         self.combo_mission = QComboBox()
         self.combo_mission.addItem("A → B по координатам", {
             "mission_id": "ab_route_ui",
@@ -89,6 +96,10 @@ class RealMissionPanel(QGroupBox):
         self.combo_mission.currentIndexChanged.connect(self._sync_preview_from_controls)
         root.addWidget(self.combo_mission, stretch=2)
 
+        self.btn_map_picker_main = MarqueeButton("Карта и маршрут")
+        self.btn_map_picker_main.clicked.connect(self._open_map_picker)
+        root.addWidget(self.btn_map_picker_main)
+
         root.addWidget(QLabel("Скорость"))
         self.speed_cap_combo = QComboBox()
         for value in (1.0, 3.0, 5.0, 10.0):
@@ -96,19 +107,18 @@ class RealMissionPanel(QGroupBox):
         self.speed_cap_combo.currentIndexChanged.connect(self._on_speed_cap_changed)
         root.addWidget(self.speed_cap_combo)
 
-        self.btn_validate = QPushButton("Проверить")
+        self.btn_validate = MarqueeButton("Проверить маршрут")
         self.btn_validate.setObjectName("PrimaryButton")
         self.btn_validate.clicked.connect(self._emit_validated)
         root.addWidget(self.btn_validate)
 
-        self.readiness = QLabel("Маршрут --  Поза --  Камеры --  ИИ --  Авто --")
-        self.readiness.setObjectName("MutedText")
-        self.readiness.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        root.addWidget(self.readiness, stretch=2)
+        # Readiness used to occupy the space between "Проверить маршрут" and
+        # "Настройки". It is now kept as a hidden state holder/tooltip so the
+        # production row stays visually clean and fixed-width.
+        self.readiness = ScrollingLabel("Маршрут --  Поза --  Камеры --  ИИ --  Авто --", self)
+        self.readiness.setVisible(False)
 
-        self.btn_details = QToolButton()
-        self.btn_details.setText("Детали")
-        self.btn_details.setPopupMode(QToolButton.InstantPopup)
+        self.btn_details = MarqueeButton("Настройки")
         self.btn_details.setMenu(self._build_details_menu())
         root.addWidget(self.btn_details)
         self._sync_preview_from_controls()
@@ -124,7 +134,7 @@ class RealMissionPanel(QGroupBox):
         info = QGridLayout()
         info.setHorizontalSpacing(8)
         info.setVerticalSpacing(6)
-        self.lbl_goal = self._value_box("Goal", "Точка B")
+        self.lbl_goal = self._value_box("Цель", "Точка B")
         self.lbl_next = self._value_box("Далее", "не проверено")
         self.lbl_maneuver = self._value_box("Маневр", "ожидание")
         self.lbl_speed_cap = self._value_box("Лимит", "3.0 км/ч")
@@ -137,13 +147,15 @@ class RealMissionPanel(QGroupBox):
         coord_grid = QGridLayout()
         coord_grid.setHorizontalSpacing(8)
         coord_grid.setVerticalSpacing(6)
-        coord_grid.addWidget(QLabel("A x,y,yaw"), 0, 0)
+        coord_grid.addWidget(QLabel("Старт A x,y,yaw"), 0, 0)
         self.input_start = QLineEdit("0,0,0")
+        self.input_start.setPlaceholderText("0,0,0")
         coord_grid.addWidget(self.input_start, 0, 1)
-        coord_grid.addWidget(QLabel("B x,y,yaw"), 1, 0)
+        coord_grid.addWidget(QLabel("Финиш B x,y,yaw"), 1, 0)
         self.input_goal = QLineEdit("22,8,20")
+        self.input_goal.setPlaceholderText("22,8,20")
         coord_grid.addWidget(self.input_goal, 1, 1)
-        coord_grid.addWidget(QLabel("Шаг, м"), 2, 0)
+        coord_grid.addWidget(QLabel("Шаг waypoint, м"), 2, 0)
         self.input_spacing = QLineEdit("2.0")
         coord_grid.addWidget(self.input_spacing, 2, 1)
         coord_grid.addWidget(QLabel("Построение"), 3, 0)
@@ -151,15 +163,24 @@ class RealMissionPanel(QGroupBox):
         self.combo_routing_provider.addItem("Прямая A→B", "direct")
         self.combo_routing_provider.addItem("По дорогам OpenStreetMap/OSRM", "osrm")
         coord_grid.addWidget(self.combo_routing_provider, 3, 1)
+        coord_grid.addWidget(QLabel("Траектория"), 4, 0)
+        self.combo_lane_policy = QComboBox()
+        self.combo_lane_policy.addItem("По нужной стороне дороги", "right_side")
+        self.combo_lane_policy.addItem("По центру линии OSM", "centerline")
+        coord_grid.addWidget(self.combo_lane_policy, 4, 1)
+        coord_grid.addWidget(QLabel("Смещение от центра, м"), 5, 0)
+        self.input_lane_offset = QLineEdit("1.7")
+        self.input_lane_offset.setPlaceholderText("1.5–2.0")
+        coord_grid.addWidget(self.input_lane_offset, 5, 1)
         layout.addLayout(coord_grid)
 
         map_row = QHBoxLayout()
-        self.btn_map_picker = QPushButton("Открыть карту")
+        self.btn_map_picker = MarqueeButton("Выбрать на карте")
         self.btn_map_picker.clicked.connect(self._open_map_picker)
         map_row.addWidget(self.btn_map_picker)
-        self.lbl_map_points = QLabel("Точки A/B: не заданы")
+        self.lbl_map_points = ScrollingLabel("Точки A/B: не заданы")
         self.lbl_map_points.setObjectName("MutedText")
-        self.lbl_map_points.setWordWrap(True)
+        self.lbl_map_points.setWordWrap(False)
         map_row.addWidget(self.lbl_map_points, stretch=1)
         layout.addLayout(map_row)
 
@@ -169,13 +190,13 @@ class RealMissionPanel(QGroupBox):
         self.hints_json.setPlainText('[{"x_m": 8.0, "y_m": 0.0, "command": "straight"}, {"x_m": 12.0, "y_m": 2.5, "command": "turn_left"}]')
         layout.addWidget(self.hints_json)
 
-        self.lbl_runtime = QLabel("Состояние: ожидание")
+        self.lbl_runtime = ScrollingLabel("Состояние: ожидание")
         self.lbl_runtime.setObjectName("MutedText")
-        self.lbl_runtime.setWordWrap(True)
+        self.lbl_runtime.setWordWrap(False)
         layout.addWidget(self.lbl_runtime)
 
         buttons = QHBoxLayout()
-        self.btn_record = QPushButton("Записать")
+        self.btn_record = MarqueeButton("Записать")
         self.btn_record.clicked.connect(self.mission_record_requested.emit)
         buttons.addWidget(self.btn_record)
         buttons.addStretch(1)
@@ -193,7 +214,7 @@ class RealMissionPanel(QGroupBox):
         layout.setContentsMargins(10, 8, 10, 8)
         title_lbl = QLabel(str(title))
         title_lbl.setObjectName("MutedText")
-        value_lbl = QLabel(str(value))
+        value_lbl = ScrollingLabel(str(value))
         value_lbl.setObjectName("StatValue")
         layout.addWidget(title_lbl)
         layout.addWidget(value_lbl)
@@ -255,7 +276,16 @@ class RealMissionPanel(QGroupBox):
                 hints = []
             start_payload = {"x_m": sx, "y_m": sy, "yaw_deg": syaw}
             goal_payload = {"x_m": gx, "y_m": gy, "yaw_deg": gyaw}
-            metadata_payload = {}
+            lane_policy = self.combo_lane_policy.currentData() if hasattr(self, "combo_lane_policy") else "right_side"
+            try:
+                lane_offset_m = float(str(self.input_lane_offset.text() or "1.7").replace(",", "."))
+            except Exception:
+                lane_offset_m = 1.7
+            metadata_payload = {
+                "lane_policy": lane_policy,
+                "lane_offset_m": lane_offset_m,
+                "traffic_side": "right",
+            }
             goal_label = f"B=({gx:.1f}, {gy:.1f})"
 
             if self._map_start_geo and self._map_goal_geo and GeoPoint is not None and geo_points_to_local_ab is not None:
@@ -265,13 +295,13 @@ class RealMissionPanel(QGroupBox):
                 )
                 start_payload = local["start"]
                 goal_payload = local["goal"]
-                metadata_payload = {
+                metadata_payload.update({
                     "origin_geo": local["origin_geo"],
                     "start_geo": local["start_geo"],
                     "goal_geo": local["goal_geo"],
                     "coordinate_frame": "wgs84_local_tangent",
                     "routing_provider": self.combo_routing_provider.currentData() if hasattr(self, "combo_routing_provider") else "direct",
-                }
+                })
                 goal_label = f"B geo=({self._map_goal_geo['lat']:.6f}, {self._map_goal_geo['lon']:.6f})"
 
             data.update({
@@ -294,7 +324,7 @@ class RealMissionPanel(QGroupBox):
         if hasattr(self, "lbl_goal"):
             self.lbl_goal.value_label.setText(goal)
         if hasattr(self, "lbl_speed_cap"):
-            self.lbl_speed_cap.value_label.setText(f"{speed:.1f} km/h")
+            self.lbl_speed_cap.value_label.setText(f"{speed:.1f} км/ч")
 
     def _emit_validated(self):
         mission = self._current_mission()
@@ -306,28 +336,30 @@ class RealMissionPanel(QGroupBox):
         else:
             self.lbl_next.value_label.setText("WP 1 / test")
             self.lbl_maneuver.value_label.setText("ready")
-        self.lbl_speed_cap.value_label.setText(f"{float(mission.get('speed_cap_kmh', 3.0)):.1f} km/h")
+        self.lbl_speed_cap.value_label.setText(f"{float(mission.get('speed_cap_kmh', 3.0)):.1f} км/ч")
         self.set_readiness(route=True, pose=True, cameras=True, ai=False, vehicle=False)
         self.mission_validated.emit(mission)
 
     def _on_speed_cap_changed(self):
         value = float(self.speed_cap_combo.currentData() or 3.0)
-        self.lbl_speed_cap.value_label.setText(f"{value:.1f} km/h")
+        self.lbl_speed_cap.value_label.setText(f"{value:.1f} км/ч")
         self.speed_cap_changed.emit(value)
 
     def set_readiness(self, route=False, pose=False, cameras=False, ai=False, vehicle=False):
         def mark(ok):
             return "OK" if ok else "--"
-        self.readiness.setText(
-            f"Маршрут {mark(route)}  Поза {mark(pose)}  Камеры {mark(cameras)}  ИИ {mark(ai)}  Авто {mark(vehicle)}"
-        )
+        text = f"Маршрут {mark(route)}  Поза {mark(pose)}  Камеры {mark(cameras)}  ИИ {mark(ai)}  Авто {mark(vehicle)}"
+        self.readiness.setText(text)
+        self.setToolTip(text)
+        if hasattr(self, "btn_validate"):
+            self.btn_validate.setToolTip(text)
 
     def set_mission_summary(self, mission):
         try:
             count = len(getattr(mission, "waypoints", []) or [])
             goal = getattr(mission, "goal_label", "-") or "-"
             self.lbl_goal.value_label.setText(str(goal))
-            self.lbl_next.value_label.setText(f"{count} waypoints")
+            self.lbl_next.value_label.setText(f"{count} контрольных точек")
             if count:
                 last = mission.waypoints[-1]
                 self.lbl_maneuver.value_label.setText(str(getattr(last, "command", getattr(last, "action", "ready"))))
@@ -339,7 +371,7 @@ class RealMissionPanel(QGroupBox):
             self.lbl_next.value_label.setText(f"WP {goal.waypoint_index} · {goal.distance_to_target_m:.1f}m")
             self.lbl_maneuver.value_label.setText(str(goal.maneuver))
             self.lbl_runtime.setText(
-                f"State: {self._last_state}\n"
+                f"Состояние: {self._last_state}\n"
                 f"target=({goal.target_x_m:.1f}, {goal.target_y_m:.1f}) "
                 f"heading_err={goal.heading_error_deg:.1f}° "
                 f"xtrack={goal.cross_track_error_m:.2f}m"
@@ -352,17 +384,17 @@ class RealMissionPanel(QGroupBox):
         self._last_state = state
         self._last_message = str(message or "")
         if state == "AI_ACTIVE":
-            self.lbl_maneuver.value_label.setText("AI active")
+            self.lbl_maneuver.value_label.setText("ИИ активно")
         elif state == "ARMING":
-            self.lbl_maneuver.value_label.setText("arming")
+            self.lbl_maneuver.value_label.setText("подготовка")
         elif state == "DISENGAGING":
-            self.lbl_maneuver.value_label.setText("stopping")
+            self.lbl_maneuver.value_label.setText("остановка")
         elif state == "FAULT":
-            self.lbl_maneuver.value_label.setText("fault")
+            self.lbl_maneuver.value_label.setText("ошибка")
         elif state == "CONNECTED_MANUAL":
-            self.lbl_maneuver.value_label.setText("manual")
+            self.lbl_maneuver.value_label.setText("ручной режим")
         if message:
             self.lbl_next.value_label.setText(str(message)[:44])
-            self.lbl_runtime.setText(f"State: {state}\n{message}")
+            self.lbl_runtime.setText(f"Состояние: {state} · {message}")
         else:
-            self.lbl_runtime.setText(f"State: {state}")
+            self.lbl_runtime.setText(f"Состояние: {state}")

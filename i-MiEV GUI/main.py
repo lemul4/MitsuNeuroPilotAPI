@@ -671,9 +671,13 @@ class AppController(QObject):
                         m = OsrmRoadRouteProvider().build_mission(RoadRouteRequest.from_mission_dict(self.real_mission))
                         road_meta = dict(getattr(m, "metadata", {}) or {})
                         raw_points = road_meta.get("raw_route_points", "?")
+                        lane_policy = road_meta.get("lane_policy", "-")
+                        lane_offset = road_meta.get("lane_offset_m", "-")
                         print(
                             f"REAL CONTROL: road routing OK: raw_points={raw_points}, "
-                            f"waypoints={len(getattr(m, 'waypoints', []) or [])}, source=road"
+                            f"waypoints={len(getattr(m, 'waypoints', []) or [])}, "
+                            f"trajectory={road_meta.get('trajectory_geometry', 'road')}, "
+                            f"lane_policy={lane_policy}, offset={lane_offset}m"
                         )
                     except Exception as route_exc:
                         print(f"REAL CONTROL: road routing failed, fallback to direct A→B: {route_exc}")

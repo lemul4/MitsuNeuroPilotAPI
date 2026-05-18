@@ -36,6 +36,8 @@ def main() -> int:
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--spacing", type=float, default=2.0)
     parser.add_argument("--osrm", default="https://router.project-osrm.org")
+    parser.add_argument("--lane-offset", type=float, default=1.7)
+    parser.add_argument("--centerline", action="store_true", help="Do not shift the control trajectory off the OSM road centerline")
     parser.add_argument("--out", default="outputs/road_route_debug.json")
     args = parser.parse_args()
 
@@ -47,6 +49,9 @@ def main() -> int:
         speed_cap_kmh=args.speed,
         spacing_m=args.spacing,
         osrm_base_url=args.osrm,
+        lane_policy="centerline" if args.centerline else "right_side",
+        lane_offset_m=0.0 if args.centerline else args.lane_offset,
+        traffic_side="right",
     )
     mission = OsrmRoadRouteProvider().build_mission(request)
     turns = [wp for wp in mission.waypoints if "turn" in str(wp.command)]
@@ -69,6 +74,8 @@ def main() -> int:
     print(f"raw_route_points: {mission.metadata.get('raw_route_points')}")
     print(f"waypoints:        {len(mission.waypoints)}")
     print(f"turn waypoints:   {len(turns)}")
+    print(f"trajectory:       {mission.metadata.get('trajectory_geometry')}")
+    print(f"lane offset m:    {mission.metadata.get('lane_offset_m')}")
     print(f"debug file:       {out_path}")
     return 0
 
