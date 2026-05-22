@@ -1,0 +1,18 @@
+{
+  "default_center": {
+    "lat": 55.000000,
+    "lon": 37.000000,
+    "zoom": 17
+  },
+  "current_location": {
+    "lat": 55.000000,
+    "lon": 37.000000,
+    "yaw_deg": 0.0
+  },
+  "use_default_center_as_current": false,
+  "route_planning": {
+    "traffic_side": "right",
+    "lane_offset_m": 1.7,
+    "note": "OSRM/OpenStreetMap returns road centerlines. The navigator shifts the control trajectory to the right-hand side of travel by this offset for low-speed testing."
+  }
+}

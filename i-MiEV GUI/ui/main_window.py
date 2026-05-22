@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QGroupBox, QGridLayout,
     QProgressBar, QTableWidget, QTableWidgetItem,
     QHeaderView, QDoubleSpinBox, QCheckBox, QDialog,
-    QLineEdit, QScrollArea, QFrame, QSizePolicy, QTextEdit, QTreeView
+    QLineEdit, QScrollArea, QFrame, QSizePolicy, QTextEdit, QTreeView, QStackedWidget
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QEvent, QThread, QAbstractItemModel, QModelIndex, QObject, QSize, QRect
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QBrush, QFont, QLinearGradient
@@ -19,6 +19,23 @@ import xml.etree.ElementTree as ET
 import pyqtgraph as pg
 
 from ui.widgets import SteeringWidget
+
+try:
+    from ui.real_mission_panel import RealMissionPanel
+except Exception:
+    RealMissionPanel = None
+
+try:
+    from ui.marquee_label import ScrollingLabel, MarqueeButton
+except Exception:
+    ScrollingLabel = QLabel
+    MarqueeButton = QPushButton
+
+# В этом модуле все кнопки создаются через QPushButton. Переопределяем имя
+# на MarqueeButton, чтобы длинные подписи прокручивались плавно во всем UI,
+# а не только в панели навигатора. Qt stylesheet-селекторы QPushButton
+# продолжают применяться, потому что MarqueeButton наследуется от QPushButton.
+QPushButton = MarqueeButton
 
 try:
     from utils import discover_routes_fast
@@ -851,6 +868,8 @@ class MainWindow(QMainWindow):
     pid_update_requested = Signal(float, float, float)
     ai_toggled = Signal(bool)
     telemetry_toggled = Signal(bool)
+    real_mission_validated = Signal(dict)
+    real_speed_cap_changed = Signal(float)
 
     # Сигналы маршрутов оставлены как UI-обертка: контроллер может подключиться к нужному.
     # Если в main.py они не используются, ничего в backend-логике не меняется.
@@ -869,7 +888,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MitsuNeuroPilot GUI")
+        self.setWindowTitle("MitsuNeuroPilot — интерфейс управления")
         self.resize(1600, 820)
         self.setMinimumSize(1280, 720)
 
@@ -895,6 +914,7 @@ class MainWindow(QMainWindow):
         self._route_loader_thread = None
         self._stdout_redirect = None
         self._stderr_redirect = None
+        self.current_ui_mode = "carla"
 
         self.setup_ui()
 
@@ -933,9 +953,55 @@ class MainWindow(QMainWindow):
 
         self._install_console_redirect()
         self.statusBar().messageChanged.connect(self._on_status_message_changed)
+        self.set_ui_mode("carla")
 
         self.setFocusPolicy(Qt.StrongFocus)
         self.setFocus()
+
+    def _on_real_mission_validated(self, mission):
+        self._append_log(f"REAL MISSION: validated {mission.get('name', 'mission')}")
+        self.real_mission_validated.emit(dict(mission or {}))
+
+    def on_device_selection_changed(self, text):
+        text = str(text or "")
+        if text == "VIRTUAL_DEMO_MODE":
+            self.set_ui_mode("carla")
+        else:
+            self.set_ui_mode("real")
+
+    def set_ui_mode(self, mode):
+        mode = "real" if str(mode).lower() in {"real", "mock", "vehicle", "real_vehicle"} else "carla"
+        self.current_ui_mode = mode
+        if hasattr(self, "mode_launcher_stack"):
+            self.mode_launcher_stack.setCurrentIndex(1 if mode == "real" else 0)
+        if hasattr(self, "right_panel_title"):
+            self.right_panel_title.setText("Миссия" if mode == "real" else "Очередь")
+        if hasattr(self, "chk_ai"):
+            self.chk_ai.setText("Предпросмотр ИИ" if mode == "real" else "Управление ИИ")
+        if hasattr(self, "btn_control") and not self.btn_control.isChecked():
+            self.btn_control.setText("Активировать управление")
+        if hasattr(self, "btn_select_routes"):
+            self.btn_select_routes.setEnabled(mode != "real")
+        if hasattr(self, "btn_route_launch"):
+            self.btn_route_launch.setEnabled(mode != "real" and bool(getattr(self, "route_queue", [])))
+
+    def set_real_vehicle_state(self, state, message=""):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_runtime_status"):
+            self.real_mission_panel.set_runtime_status(str(state), str(message or ""))
+        if message:
+            self._append_log(f"REAL VEHICLE: {state}: {message}")
+
+    def set_real_readiness(self, route=False, pose=False, cameras=False, ai=False, vehicle=False):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_readiness"):
+            self.real_mission_panel.set_readiness(route=route, pose=pose, cameras=cameras, ai=ai, vehicle=vehicle)
+
+    def set_real_mission_summary(self, mission):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_mission_summary"):
+            self.real_mission_panel.set_mission_summary(mission)
+
+    def set_real_nav_goal(self, goal):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_nav_goal"):
+            self.real_mission_panel.set_nav_goal(goal)
 
     def _build_left_dashboard(self):
         panel = QFrame()
@@ -945,7 +1011,7 @@ class MainWindow(QMainWindow):
         left_col.setContentsMargins(12, 12, 12, 12)
         left_col.setSpacing(10)
 
-        app_title = QLabel("MitsuNeuroPilot GUI")
+        app_title = QLabel("MitsuNeuroPilot")
         app_title.setObjectName("MutedText")
         left_col.addWidget(app_title)
 
@@ -957,11 +1023,11 @@ class MainWindow(QMainWindow):
         self.lbl_speed.setStyleSheet("font-size: 28px; font-weight: 900; color: #ffc107;")
         left_col.addWidget(self.lbl_speed)
 
-        self.lbl_angle_text = QLabel("Angle: 0° · T.: 0°")
+        self.lbl_angle_text = QLabel("Угол: 0° · Цель: 0°")
         self.lbl_angle_text.setObjectName("MutedText")
         left_col.addWidget(self.lbl_angle_text)
 
-        lbl_pedals = QLabel("Pedals")
+        lbl_pedals = QLabel("Педали")
         lbl_pedals.setObjectName("MutedText")
         left_col.addWidget(lbl_pedals)
 
@@ -977,7 +1043,7 @@ class MainWindow(QMainWindow):
         self.pb_brake.setTextVisible(True)
         left_col.addWidget(self.pb_brake)
 
-        gb_gears = QGroupBox("Transmission")
+        gb_gears = QGroupBox("Передача")
         grid_gears = QGridLayout(gb_gears)
         grid_gears.setContentsMargins(8, 12, 8, 8)
         grid_gears.setSpacing(6)
@@ -991,7 +1057,7 @@ class MainWindow(QMainWindow):
             grid_gears.addWidget(lbl, 0, i)
         left_col.addWidget(gb_gears)
 
-        self.btn_control = QPushButton("Activate Control")
+        self.btn_control = QPushButton("Активировать управление")
         self.btn_control.setCheckable(True)
         self.btn_control.setObjectName("ControlButton")
         self.btn_control.setStyleSheet(
@@ -1014,17 +1080,21 @@ class MainWindow(QMainWindow):
         self.combo_ports = QComboBox()
         import serial.tools.list_ports
         self.combo_ports.addItem("VIRTUAL_DEMO_MODE")
+        self.combo_ports.addItem("TEST_MOCK_VEHICLE")
+        self.combo_ports.addItem("TEST_REPLAY_LOG")
+        self.combo_ports.addItem("TEST_SERIAL_LOOPBACK")
         for port in serial.tools.list_ports.comports():
             self.combo_ports.addItem(port.device)
+        self.combo_ports.currentTextChanged.connect(self.on_device_selection_changed)
         conn_layout.addWidget(self.combo_ports, stretch=1)
 
-        self.btn_connect = QPushButton("Connect")
+        self.btn_connect = QPushButton("Подключить")
         self.btn_connect.setMinimumWidth(190)
         self.btn_connect.clicked.connect(self.on_connect_clicked)
         conn_layout.addWidget(self.btn_connect)
         mid_col.addLayout(conn_layout)
 
-        gb_pid = QGroupBox("PID Controller Tuning")
+        gb_pid = QGroupBox("Настройка PID-контроллера")
         pid_layout = QHBoxLayout(gb_pid)
         pid_layout.setContentsMargins(8, 18, 8, 8)
         pid_layout.setSpacing(8)
@@ -1036,19 +1106,47 @@ class MainWindow(QMainWindow):
         pid_layout.addWidget(self.spin_ki)
         pid_layout.addWidget(self.spin_kd)
 
-        btn_send_pid = QPushButton("Update PID")
+        btn_send_pid = QPushButton("Обновить PID")
         btn_send_pid.clicked.connect(lambda: self.pid_update_requested.emit(
             self.spin_kp.value(), self.spin_ki.value(), self.spin_kd.value()
         ))
         pid_layout.addWidget(btn_send_pid)
         mid_col.addWidget(gb_pid)
 
-        mid_col.addWidget(self._build_route_launcher())
+        mid_col.addWidget(self._build_mode_specific_launcher())
         mid_col.addLayout(self._build_media_and_plots(), stretch=1)
         return panel
 
+    def _build_mode_specific_launcher(self):
+        # Fixed-height stack: changing VIRTUAL/REAL/MOCK must not reflow the
+        # whole center panel. Extra real-mode controls live in the Details
+        # drop-down inside RealMissionPanel.
+        launcher_height = 110
+        self.mode_launcher_stack = QStackedWidget()
+        self.mode_launcher_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mode_launcher_stack.setFixedHeight(launcher_height)
+
+        self.carla_route_launcher = self._build_route_launcher()
+        self.carla_route_launcher.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.carla_route_launcher.setFixedHeight(104)
+        self.mode_launcher_stack.addWidget(self.carla_route_launcher)
+
+        if RealMissionPanel is not None:
+            self.real_mission_panel = RealMissionPanel(self)
+            self.real_mission_panel.mission_validated.connect(self._on_real_mission_validated)
+            self.real_mission_panel.speed_cap_changed.connect(self.real_speed_cap_changed.emit)
+        else:
+            self.real_mission_panel = QGroupBox("Navigator / Mission")
+            self.real_mission_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.real_mission_panel.setFixedHeight(104)
+            fallback_layout = QHBoxLayout(self.real_mission_panel)
+            fallback_layout.addWidget(QLabel("RealMissionPanel is unavailable"))
+
+        self.mode_launcher_stack.addWidget(self.real_mission_panel)
+        return self.mode_launcher_stack
+
     def _build_route_launcher(self):
-        gb_route = QGroupBox("Route Launcher")
+        gb_route = QGroupBox("Запуск маршрута")
         layout = QHBoxLayout(gb_route)
         layout.setContentsMargins(8, 18, 8, 8)
         layout.setSpacing(8)
@@ -1058,7 +1156,7 @@ class MainWindow(QMainWindow):
         lbl_first = QLabel("Первый маршрут")
         lbl_first.setObjectName("MutedText")
         title_row.addWidget(lbl_first)
-        self.lbl_first_route = QLabel("Маршрут не выбран")
+        self.lbl_first_route = ScrollingLabel("Маршрут не выбран")
         self.lbl_first_route.setObjectName("StrongText")
         title_row.addWidget(self.lbl_first_route)
         title_row.addStretch(1)
@@ -1115,12 +1213,12 @@ class MainWindow(QMainWindow):
         charts_title.setObjectName("StrongText")
         charts_layout.addWidget(charts_title)
 
-        self.plot_widget = pg.PlotWidget(title="Speed History", axisItems={"left": DecimalAxis(orientation="left")})
+        self.plot_widget = pg.PlotWidget(title="История скорости", axisItems={"left": DecimalAxis(orientation="left")})
         self._style_plot(self.plot_widget)
         self.curve_speed = self.plot_widget.plot(pen=pg.mkPen("#ffc107", width=2), name="Speed")
         charts_layout.addWidget(self.plot_widget)
 
-        self.plot_accel_widget = pg.PlotWidget(title="Accel History", axisItems={"left": DecimalAxis(orientation="left")})
+        self.plot_accel_widget = pg.PlotWidget(title="История ускорения", axisItems={"left": DecimalAxis(orientation="left")})
         self._style_plot(self.plot_accel_widget)
         self.curve_accel = self.plot_accel_widget.plot(pen=pg.mkPen("#14c832", width=2), name="Accel")
         charts_layout.addWidget(self.plot_accel_widget)
@@ -1135,9 +1233,9 @@ class MainWindow(QMainWindow):
         right_col.setContentsMargins(12, 12, 12, 12)
         right_col.setSpacing(10)
 
-        title = QLabel("Очередь")
-        title.setObjectName("PanelTitle")
-        right_col.addWidget(title)
+        self.right_panel_title = QLabel("Очередь")
+        self.right_panel_title.setObjectName("PanelTitle")
+        right_col.addWidget(self.right_panel_title)
 
         status_card = QFrame()
         status_card.setObjectName("Card")
@@ -1152,7 +1250,7 @@ class MainWindow(QMainWindow):
         status_top.addStretch(1)
         status_layout.addLayout(status_top)
 
-        self.queue_empty_label = QLabel("Очередь пуста")
+        self.queue_empty_label = ScrollingLabel("Очередь пуста")
         self.queue_empty_label.setObjectName("MutedText")
         self.queue_empty_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.queue_empty_label)
@@ -1177,9 +1275,9 @@ class MainWindow(QMainWindow):
         modules_card.setObjectName("Card")
         modules_layout = QHBoxLayout(modules_card)
         modules_layout.setContentsMargins(10, 8, 10, 8)
-        self.chk_telemetry = QCheckBox("Telemetry CSV")
+        self.chk_telemetry = QCheckBox("Телеметрия CSV")
         self.chk_telemetry.stateChanged.connect(lambda: self.telemetry_toggled.emit(self.chk_telemetry.isChecked()))
-        self.chk_ai = QCheckBox("AI Control")
+        self.chk_ai = QCheckBox("Управление ИИ")
         self.chk_ai.stateChanged.connect(self._on_ai_checkbox_changed)
         modules_layout.addWidget(self.chk_telemetry)
         modules_layout.addWidget(self.chk_ai)
@@ -1207,7 +1305,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         title_lbl = QLabel(title)
         title_lbl.setObjectName("MutedText")
-        value_lbl = QLabel(value)
+        value_lbl = ScrollingLabel(value)
         value_lbl.setObjectName("StatValue")
         layout.addWidget(title_lbl)
         layout.addWidget(value_lbl)
@@ -1800,7 +1898,7 @@ class MainWindow(QMainWindow):
         self._append_log("UI ROUTES: остановка выполняется через выключение Activate Control или Disconnect.")
 
     def on_connect_clicked(self):
-        if self.btn_connect.text() == "Connect":
+        if self.btn_connect.text() in ("Connect", "Подключить"):
             port = self.combo_ports.currentText()
             if port:
                 self.connect_requested.emit(port)
@@ -1811,14 +1909,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
         if is_connected:
             self.combo_ports.setDisabled(True)
-            self.btn_connect.setText("Disconnect")
+            self.btn_connect.setText("Отключить")
         else:
             self.combo_ports.setDisabled(False)
-            self.btn_connect.setText("Connect")
+            self.btn_connect.setText("Подключить")
 
     def on_control_toggled(self, checked):
         self.control_active = checked
-        self.btn_control.setText("Control ACTIVE" if checked else "Activate Control")
+        if checked and getattr(self, "current_ui_mode", "carla") == "real":
+            self.btn_control.setText("Отключить ИИ / ручное")
+        else:
+            self.btn_control.setText("Управление активно" if checked else "Активировать управление")
         self.btn_control.setStyleSheet(
             "background-color: #11823a; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
             if checked else
@@ -1828,6 +1929,12 @@ class MainWindow(QMainWindow):
 
     def _on_ai_checkbox_changed(self, *_):
         is_active = self.chk_ai.isChecked()
+        if getattr(self, "current_ui_mode", "carla") == "real":
+            self._append_log("REAL AI: AI Preview включен." if is_active else "REAL AI: AI Preview выключен.")
+            if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_readiness"):
+                self.real_mission_panel.set_readiness(route=True, pose=True, cameras=True, ai=is_active, vehicle=False)
+            self.ai_toggled.emit(is_active)
+            return
         if self.route_queue:
             first = self.route_queue[0]
             if is_active:
@@ -1950,7 +2057,7 @@ class MainWindow(QMainWindow):
         """Совместимость с VideoReceiver: принимает QImage/QPixmap или numpy-frame и выводит его в видеопанель."""
         if frame is None:
             self.video_panel.clear()
-            self.video_panel.setText("VIDEO STREAM\n\nкадр отсутствует")
+            self.video_panel.setText("ВИДЕОПОТОК\n\nкадр отсутствует")
             self._last_camera_pixmap = None
             return
 
@@ -1995,7 +2102,7 @@ class MainWindow(QMainWindow):
                 pixmap = QPixmap.fromImage(image)
             except Exception as exc:
                 self.video_panel.clear()
-                self.video_panel.setText(f"VIDEO STREAM\n\nне удалось отобразить кадр: {exc}")
+                self.video_panel.setText(f"ВИДЕОПОТОК\n\nне удалось отобразить кадр: {exc}")
                 self._last_camera_pixmap = None
                 return
 
@@ -2036,7 +2143,7 @@ class MainWindow(QMainWindow):
         """Единственный метод, обновляющий UI данными из физической модели."""
         self.wheel_widget.set_angle(vehicle_state.angle)
         self.lbl_speed.setText(f"{vehicle_state.speed:.2f} km/h")
-        self.lbl_angle_text.setText(f"Angle: {vehicle_state.angle}° · T.: {vehicle_state.target_angle}°")
+        self.lbl_angle_text.setText(f"Угол: {vehicle_state.angle}° · Цель: {vehicle_state.target_angle}°")
 
         self.pb_accel.setValue(int(vehicle_state.accel))
         self.pb_brake.setValue(int(vehicle_state.brake))
@@ -2104,7 +2211,13 @@ class MainWindow(QMainWindow):
             self.pressed_keys.remove(event.key())
 
     def process_held_keys(self):
-        if not self.control_active:
+        manual_real_connected = (
+            getattr(self, "current_ui_mode", "carla") == "real"
+            and hasattr(self, "btn_connect")
+            and self.btn_connect.text() == "Disconnect"
+            and not self.control_active
+        )
+        if not self.control_active and not manual_real_connected:
             return
 
         MAX_ANGLE = 630  # Из config.py

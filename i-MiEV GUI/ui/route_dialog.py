@@ -6,6 +6,13 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
+try:
+    from ui.marquee_label import MarqueeButton
+except Exception:  # pragma: no cover
+    MarqueeButton = QPushButton
+
+QPushButton = MarqueeButton
+
 class RouteSelectionDialog(QDialog):
     route_selected = Signal(dict)  # Передает данные о выбранном маршруте
 
