@@ -33,6 +33,36 @@ from lead.training.config_training import TrainingConfig
 LOG = logging.getLogger(__name__)
 
 
+class DistributedEvalSampler(torch.utils.data.Sampler):
+    """Distributed sampler for evaluation without padding or duplicate samples."""
+
+    def __init__(
+        self,
+        dataset: torch.utils.data.Dataset,
+        num_replicas: int,
+        rank: int,
+    ):
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.indices = list(range(rank, len(dataset), num_replicas))
+
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self):
+        return len(self.indices)
+
+
+def _set_config_value(config: TrainingConfig, key: str, value):
+    try:
+        setattr(config, key, value)
+    except Exception:
+        pass
+    if hasattr(config, "_loaded_config"):
+        config._loaded_config[key] = value
+
+
 @beartype
 def increase_limit_file_descriptors(n: int = 4096):
     # On some systems it is necessary to increase the limit on open file descriptors.
@@ -139,6 +169,16 @@ def initialize_model(
     if config.channel_last:
         model = model.to(memory_format=torch.channels_last)
         LOG.info("Using channel last memory format")
+
+    if config.compile:
+        model = torch.compile(
+            model,
+            fullgraph=True,  # require entire model to be compiled, fail if not
+            dynamic=False,  # aggressively specialize to current input shapes
+            backend="inductor",
+            mode="max-autotune",  # highest autotune + CUDA graph
+        )
+        
     if torch.cuda.device_count() > 1:
         model_wrapper = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -149,14 +189,6 @@ def initialize_model(
         )
     else:
         model_wrapper = model
-    if config.compile:
-        model = torch.compile(
-            model,
-            fullgraph=True,  # require entire model to be compiled, fail if not
-            dynamic=False,  # aggressively specialize to current input shapes
-            backend="inductor",
-            mode="max-autotune",  # highest autotune + CUDA graph
-        )
     return model_wrapper, start_epoch
 
 
@@ -346,6 +378,102 @@ def initialize_dataloader(
         collate_fn=mixed_training_utils.mixed_data_collate_fn,
     )
     return dataloader_train, mixed_sampler
+
+
+@beartype
+def initialize_validation_dataloader(
+    config: TrainingConfig,
+    num_workers: int,
+) -> tuple[DataLoader | None, TrainingConfig | None]:
+    if not config.use_validation:
+        return None, None
+
+    validation_data_root = os.path.join(config.validation_carla_root, "data")
+    if not os.path.isdir(validation_data_root):
+        raise FileNotFoundError(
+            "Validation dataset is enabled, but the expected CARLA validation "
+            f"data directory does not exist: {validation_data_root}"
+        )
+
+    loaded_config = dict(getattr(config, "_loaded_config", {}))
+    for derived_key in (
+        "carla_data",
+        "bucket_collection_path",
+        "training_session_cache_path",
+    ):
+        loaded_config.pop(derived_key, None)
+    validation_overrides = {
+        "carla_root": config.validation_carla_root,
+        "use_color_aug": False,
+        "use_sensor_perburtation": False,
+        "use_sensor_perburtation_prob": 0.0,
+        "carla_dataset_fraction": -1.0,
+        "carla_num_samples": -1,
+        "use_training_session_cache": False,
+        "use_persistent_cache": True,
+        "force_rebuild_data_cache": False,
+        "visualize_dataset": False,
+    }
+    loaded_config.update(validation_overrides)
+    validation_config = TrainingConfig(
+        loaded_config=loaded_config,
+        raise_error_on_missing_key=False,
+    )
+    for derived_key in (
+        "carla_data",
+        "bucket_collection_path",
+        "training_session_cache_path",
+    ):
+        validation_config._loaded_config.pop(derived_key, None)
+    for key, value in validation_overrides.items():
+        _set_config_value(validation_config, key, value)
+
+    validation_dataset = CARLAData(
+        root=validation_config.carla_data,
+        config=validation_config,
+        training_session_cache=None,
+        random=False,
+    )
+    if len(validation_dataset) == 0:
+        raise ValueError(
+            f"Validation dataset contains no trainable samples: {validation_data_root}"
+        )
+
+    if torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+    else:
+        world_size = 1
+        rank = 0
+
+    sampler = DistributedEvalSampler(
+        validation_dataset,
+        num_replicas=world_size,
+        rank=rank,
+    )
+    batch_size = max(1, config.batch_size // max(1, world_size))
+    validation_num_workers = max(0, num_workers)
+    dataloader_kwargs = {
+        "dataset": validation_dataset,
+        "batch_size": batch_size,
+        "sampler": sampler,
+        "worker_init_fn": seed_worker,
+        "num_workers": validation_num_workers,
+        "pin_memory": True,
+        "collate_fn": mixed_training_utils.mixed_data_collate_fn,
+    }
+    if validation_num_workers > 0:
+        dataloader_kwargs["prefetch_factor"] = config.prefetch_factor
+        dataloader_kwargs["persistent_workers"] = True
+
+    dataloader_validation = DataLoader(**dataloader_kwargs)
+    LOG.info(
+        "Validation dataset size: %d samples, %d local samples on rank %d.",
+        len(validation_dataset),
+        len(sampler),
+        rank,
+    )
+    return dataloader_validation, validation_config
 
 
 @beartype

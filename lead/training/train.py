@@ -49,6 +49,12 @@ class Trainer:
         self.dataloader, self.sampler = training_utils.initialize_dataloader(
             self.config, self.ssd_cache, self.num_worker
         )
+        self.validation_dataloader, self.validation_config = (
+            training_utils.initialize_validation_dataloader(
+                self.config,
+                self.num_worker,
+            )
+        )
 
         # Predict how long the training will take
         self.gradient_steps_per_epoch = int(len(self.dataloader))
@@ -124,6 +130,14 @@ class Trainer:
 
             # Training
             rfm_score = self.train()
+
+            if self.should_validate_epoch(epoch):
+                validation_metrics = self.validate()
+                if self.config.rank == 0:
+                    self.logger.log_validation_epoch(
+                        epoch=epoch,
+                        metrics=validation_metrics,
+                    )
 
             # Save model
             if self.config.rank == 0:
@@ -223,6 +237,140 @@ class Trainer:
                 rfm_score = evaluate_waymo_e2e(self.model, self.config)
                 self.logger.logs({"rfm": rfm_score})
         return rfm_score
+
+    @beartype
+    def should_validate_epoch(self, epoch: int) -> bool:
+        return (
+            self.validation_dataloader is not None
+            and self.config.validation_frequency_epochs > 0
+            and (epoch + 1) % self.config.validation_frequency_epochs == 0
+        )
+
+    @staticmethod
+    def _scalar_value(value) -> float:
+        if isinstance(value, torch.Tensor):
+            return float(value.detach().float().cpu().mean().item())
+        return float(value)
+
+    @staticmethod
+    def _accumulate_metric(
+        stats: dict[str, list[float]],
+        name: str,
+        value,
+        weight: float,
+    ):
+        if weight <= 0:
+            return
+        scalar_value = Trainer._scalar_value(value)
+        if name not in stats:
+            stats[name] = [0.0, 0.0]
+        stats[name][0] += scalar_value * weight
+        stats[name][1] += weight
+
+    @beartype
+    def _aggregate_validation_stats(
+        self,
+        local_stats: dict[str, list[float]],
+    ) -> dict[str, float]:
+        if not torch.distributed.is_initialized():
+            return {
+                key: value_sum / max(value_count, 1.0)
+                for key, (value_sum, value_count) in local_stats.items()
+                if value_count > 0
+            }
+
+        gathered_keys = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(gathered_keys, sorted(local_stats))
+        metric_keys = sorted({key for keys in gathered_keys for key in keys})
+
+        aggregated_metrics = {}
+        for key in metric_keys:
+            value_sum, value_count = local_stats.get(key, [0.0, 0.0])
+            tensor = torch.tensor(
+                [value_sum, value_count],
+                dtype=torch.float64,
+                device=self.config.device,
+            )
+            torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
+            if self.config.rank == 0 and tensor[1].item() > 0:
+                aggregated_metrics[key] = float((tensor[0] / tensor[1]).item())
+        return aggregated_metrics
+
+    @beartype
+    def validate(self) -> dict[str, float]:
+        assert self.validation_dataloader is not None
+
+        self.model_wrapper.eval()
+        local_stats: dict[str, list[float]] = {}
+
+        with torch.no_grad():
+            for validation_iteration, data in enumerate(
+                tqdm(
+                    self.validation_dataloader,
+                    total=len(self.validation_dataloader),
+                    disable=self.config.rank != 0,
+                    desc="Validation",
+                )
+            ):
+                batch_size = float(data["source_dataset"].shape[0])
+                data["iteration"] = validation_iteration
+                data["training_step"] = self.step
+                data["compute_additional_metrics"] = (
+                    self.config.validation_compute_additional_metrics
+                )
+
+                with torch.amp.autocast(
+                    device_type="cuda",
+                    dtype=self.config.torch_float_type,
+                    enabled=self.config.use_mixed_precision_training,
+                ):
+                    predictions = self.model_wrapper(data=data)
+                    losses, log = self.model.compute_loss(
+                        predictions=predictions,
+                        data=data,
+                    )
+
+                    loss_total = torch.zeros(
+                        1,
+                        dtype=self.config.torch_float_type,
+                        device=self.config.device,
+                    )
+                    scaled_losses = {}
+                    for key, value in losses.items():
+                        scaled_value = self.detailed_loss_weights[key] * value
+                        loss_total += scaled_value.reshape(1)
+                        scaled_losses[key] = scaled_value
+
+                self._accumulate_metric(
+                    local_stats,
+                    "val/loss_total",
+                    loss_total,
+                    batch_size,
+                )
+                for loss_name, loss_value in losses.items():
+                    self._accumulate_metric(
+                        local_stats,
+                        f"val/unscaled_loss/{loss_name}",
+                        loss_value,
+                        batch_size,
+                    )
+                for loss_name, loss_value in scaled_losses.items():
+                    self._accumulate_metric(
+                        local_stats,
+                        f"val/scaled_loss/{loss_name}",
+                        loss_value,
+                        batch_size,
+                    )
+                for metric_name, metric_value in log.items():
+                    if metric_name.startswith("metric/"):
+                        self._accumulate_metric(
+                            local_stats,
+                            f"val/metric/{metric_name.removeprefix('metric/')}",
+                            metric_value,
+                            1.0,
+                        )
+
+        return self._aggregate_validation_stats(local_stats)
 
     @beartype
     def save(self, rfm_score: float | None = None):

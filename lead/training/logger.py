@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 
@@ -49,6 +50,14 @@ class Logger:
         self.total_gradient_steps = total_gradient_steps
         self.dataloader = dataloader
         self.scaler = scaler
+        self.validation_history = []
+        self.validation_metrics_path = None
+        if self.config.logdir is not None:
+            self.validation_metrics_path = os.path.join(
+                self.config.logdir,
+                "validation_metrics.jsonl",
+            )
+            self.validation_history = self._load_validation_history()
 
         # Initialize TensorBoard and WandB loggers
         self.tensorboard_writer = None
@@ -76,6 +85,9 @@ class Logger:
                 LOG.info(
                     f"WandB logger will log images every {self.config.log_images_frequency} steps"
                 )
+                if self.config.use_validation:
+                    wandb.define_metric("validation_epoch")
+                    wandb.define_metric("val/*", step_metric="validation_epoch")
                 if self.config.use_additional_metrics:
                     LOG.info("Additional perception metrics logging is enabled.")
 
@@ -225,6 +237,127 @@ class Logger:
                             self.step,
                         )
             self.step += 1
+
+    def _load_validation_history(self) -> list[dict]:
+        if self.validation_metrics_path is None:
+            return []
+        if not os.path.isfile(self.validation_metrics_path):
+            return []
+        history = []
+        with open(self.validation_metrics_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    history.append(json.loads(line))
+                except json.JSONDecodeError:
+                    LOG.warning(
+                        "Skipping invalid validation metrics JSONL line: %s",
+                        line,
+                    )
+        return history
+
+    def _write_validation_history(self):
+        if self.validation_metrics_path is None:
+            return
+        os.makedirs(os.path.dirname(self.validation_metrics_path), exist_ok=True)
+        with open(self.validation_metrics_path, "w") as f:
+            for record in self.validation_history:
+                f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _clean_validation_metrics(metrics: dict[str, float]) -> dict[str, float]:
+        clean_metrics = {}
+        for key, value in metrics.items():
+            try:
+                scalar_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(scalar_value):
+                clean_metrics[key] = scalar_value
+        return clean_metrics
+
+    @staticmethod
+    def _validation_plot_name(metric_name: str) -> str:
+        return (
+            metric_name.replace("/", "__")
+            .replace(" ", "_")
+            .replace(":", "_")
+            .replace("\\", "_")
+        )
+
+    def _save_validation_plots(self):
+        if not self.config.validation_save_plots or self.config.logdir is None:
+            return
+        import matplotlib.pyplot as plt
+
+        plot_dir = os.path.join(self.config.logdir, "validation_curves")
+        os.makedirs(plot_dir, exist_ok=True)
+        metric_names = sorted(
+            {
+                key
+                for record in self.validation_history
+                for key in record
+                if key != "epoch"
+            }
+        )
+        for metric_name in metric_names:
+            points = [
+                (record["epoch"], record[metric_name])
+                for record in self.validation_history
+                if metric_name in record and np.isfinite(record[metric_name])
+            ]
+            if len(points) == 0:
+                continue
+            epochs, values = zip(*points, strict=False)
+            plt.figure(figsize=(8, 4.5))
+            plt.plot(epochs, values, marker="o", linewidth=1.8)
+            plt.xlabel("epoch")
+            plt.ylabel(metric_name)
+            plt.title(metric_name)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(
+                    plot_dir,
+                    f"{self._validation_plot_name(metric_name)}.png",
+                )
+            )
+            plt.close()
+
+    @beartype
+    def log_validation_epoch(self, epoch: int, metrics: dict[str, float]):
+        if self.config.rank != 0:
+            return
+        clean_metrics = self._clean_validation_metrics(metrics)
+        if len(clean_metrics) == 0:
+            return
+
+        validation_epoch = epoch + 1
+        message = {"validation_epoch": validation_epoch, **clean_metrics}
+
+        if self.config.log_wandb:
+            wandb.log(message)
+
+        if self.tensorboard_writer is not None:
+            for key, value in clean_metrics.items():
+                self.tensorboard_writer.add_scalar(
+                    key,
+                    value,
+                    validation_epoch,
+                )
+
+        record = {"epoch": validation_epoch, **clean_metrics}
+        self.validation_history = [
+            item
+            for item in self.validation_history
+            if item.get("epoch") != validation_epoch
+        ]
+        self.validation_history.append(record)
+        self.validation_history.sort(key=lambda item: item["epoch"])
+        self._write_validation_history()
+        self._save_validation_plots()
 
     def logs(self, msg: dict):
         if self.config.rank == 0:

@@ -206,6 +206,18 @@ class TrainingConfig(BaseConfig):
     # If true force rebuild the cache for each training run.
     force_rebuild_data_cache = False
 
+    # --- Validation ---
+    # If true run CARLA validation after training epochs.
+    use_validation = True
+    # CARLA validation root. Expected to contain a data/ directory.
+    validation_carla_root = "data/carla_leaderboard2_dual_cameras_val"
+    # Run validation every N completed epochs.
+    validation_frequency_epochs = 1
+    # If true compute additional validation metrics on every validation batch.
+    validation_compute_additional_metrics = True
+    # If true save local PNG curves for validation metrics.
+    validation_save_plots = True
+
     @overridable_property
     def carla_cache_path(self):
         """Tuple of cache characteristics used to identify cached data compatibility."""
@@ -304,7 +316,7 @@ class TrainingConfig(BaseConfig):
     @overridable_property
     def torch_float_type(self):
         """PyTorch float precision type for training."""
-        if self.use_mixed_precision_training and self.gpu_name in ["a100", "l40s", "3060", "4090", "5090"]:
+        if self.use_mixed_precision_training and self.gpu_name in ["a100", "l40s", "rtx3060", "rtx4090", "rtx5090"]:
             return torch.bfloat16
         return torch.float32
 
