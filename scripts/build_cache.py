@@ -18,6 +18,13 @@ def _set_config_value(config: TrainingConfig, key: str, value):
         config._loaded_config[key] = value
 
 
+def _set_carla_root(config: TrainingConfig, carla_root: str):
+    if hasattr(config, "_loaded_config"):
+        config._loaded_config.pop("carla_data", None)
+        config._loaded_config.pop("bucket_collection_path", None)
+    _set_config_value(config, "carla_root", carla_root)
+
+
 def _dataset_has_modality(carla_data_root: str, modality: str) -> bool:
     if not os.path.isdir(carla_data_root):
         return False
@@ -66,14 +73,14 @@ args = parser.parse_args()
 
 config = _load_config(args.config)
 if args.carla_root:
-    _set_config_value(config, "carla_root", args.carla_root)
+    _set_carla_root(config, args.carla_root)
 elif not os.path.isdir(config.carla_data):
     dual_camera_root = "data/carla_leaderboard2_dual_cameras"
     if (
         "carla_leaderboard2_dual_cameras" in str(config.carla_root)
         and os.path.isdir(os.path.join(dual_camera_root, "data"))
     ):
-        _set_config_value(config, "carla_root", dual_camera_root)
+        _set_carla_root(config, dual_camera_root)
 
 _set_config_value(config, "use_persistent_cache", True)
 _set_config_value(config, "use_training_session_cache", False)
