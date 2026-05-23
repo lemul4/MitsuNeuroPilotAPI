@@ -427,7 +427,7 @@ def initialize_validation_dataloader(
         "use_color_aug": False,
         "use_sensor_perburtation": False,
         "use_sensor_perburtation_prob": 0.0,
-        "carla_dataset_fraction": -1.0,
+        "carla_dataset_fraction": config.val_dataset_fraction,
         "carla_num_samples": -1,
         "use_training_session_cache": False,
         "use_persistent_cache": True,
@@ -452,7 +452,7 @@ def initialize_validation_dataloader(
         root=validation_config.carla_data,
         config=validation_config,
         training_session_cache=None,
-        random=False,
+        random=True,
     )
     if len(validation_dataset) == 0:
         raise ValueError(

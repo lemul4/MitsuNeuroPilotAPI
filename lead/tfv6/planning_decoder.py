@@ -136,7 +136,8 @@ class PlanningDecoder(nn.Module):
 
         bs = context_tokens.shape[0]
 
-        queries = self.transformer_decoder(self.query.repeat(bs, 1, 1), context_tokens)
+        query = self.query.to(dtype=context_tokens.dtype).repeat(bs, 1, 1)
+        queries = self.transformer_decoder(query, context_tokens)
 
         # Split the queries flexibly based on what we're predicting
         query_idx = 0
@@ -597,8 +598,8 @@ class PlanningContextEncoder(nn.Module):
             ).reshape(
                 radar_token.shape
             )  # (bs, num_radar_queries, transfuser_token_dim)
-            radar_token = (
-                radar_token + radar_pos_embed
+            radar_token = radar_token + radar_pos_embed.to(
+                dtype=radar_token.dtype
             )  # (bs, num_radar_queries, transfuser_token_dim)
             status_tokens.append(radar_token)
 
@@ -617,8 +618,11 @@ class PlanningContextEncoder(nn.Module):
 
         # Concatenate and add positional embeddings
         if has_statuses:
-            context_tokens = context_tokens + self.cosine_pos_embeding(
-                context_tokens
+            context_pos_embedding = self.cosine_pos_embeding(context_tokens).to(
+                dtype=context_tokens.dtype
+            )
+            context_tokens = (
+                context_tokens + context_pos_embedding
             )  # (bs, transfuser_token_dim, height, width)
             context_tokens = torch.flatten(
                 context_tokens, start_dim=2
@@ -627,8 +631,8 @@ class PlanningContextEncoder(nn.Module):
                 context_tokens, (0, 2, 1)
             )  # (bs, height * width, transfuser_token_dim)
 
-            status_tokens = (
-                status_tokens + self.status_pos_embedding
+            status_tokens = status_tokens + self.status_pos_embedding.to(
+                dtype=status_tokens.dtype
             )  # (bs, num_status_tokens, transfuser_token_dim)
             context_tokens = torch.cat(
                 [context_tokens, status_tokens], dim=1

@@ -708,7 +708,7 @@ class GPT(nn.Module):
             lidar_tensor.permute(0, 2, 3, 1).contiguous().view(bz, -1, self.n_embd)
         )
         token_embeddings = torch.cat((image_tensor, lidar_tensor), dim=1)
-        x = self.drop(self.pos_emb + token_embeddings)
+        x = self.drop(self.pos_emb.to(dtype=token_embeddings.dtype) + token_embeddings)
         x = self.blocks(x)
         x = self.ln_f(x)
 
@@ -812,7 +812,7 @@ class DualCameraGPT(nn.Module):
             )
 
         x = torch.cat((left_tokens, right_tokens), dim=1)
-        x = self.drop(self.pos_emb + x)
+        x = self.drop(self.pos_emb.to(dtype=x.dtype) + x)
         x = self.blocks(x)
         x = self.ln_f(x)
 

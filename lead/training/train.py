@@ -176,8 +176,7 @@ class Trainer:
                 == 0
             )
             data["compute_additional_metrics"] = (
-                self.config.use_additional_metrics
-                and should_compute_additional_metrics
+                self.config.use_additional_metrics and should_compute_additional_metrics
             )
             with torch.amp.autocast(
                 device_type="cuda",
@@ -257,36 +256,42 @@ class Trainer:
         )
 
     @staticmethod
-    def _scalar_value(value) -> float:
+    def _scalar_tensor(value, device: torch.device) -> torch.Tensor:
         if isinstance(value, torch.Tensor):
-            return float(value.detach().float().cpu().mean().item())
-        return float(value)
+            return value.detach().float().mean()
+        return torch.tensor(float(value), dtype=torch.float32, device=device)
 
-    @staticmethod
     def _accumulate_metric(
-        stats: dict[str, list[float]],
+        self,
+        stats: dict[str, list[torch.Tensor]],
         name: str,
         value,
         weight: float,
     ):
         if weight <= 0:
             return
-        scalar_value = Trainer._scalar_value(value)
+        scalar_value = Trainer._scalar_tensor(value, self.config.device)
+        weight_tensor = torch.tensor(
+            float(weight), dtype=torch.float32, device=scalar_value.device
+        )
         if name not in stats:
-            stats[name] = [0.0, 0.0]
-        stats[name][0] += scalar_value * weight
-        stats[name][1] += weight
+            stats[name] = [
+                torch.zeros((), dtype=torch.float32, device=scalar_value.device),
+                torch.zeros((), dtype=torch.float32, device=scalar_value.device),
+            ]
+        stats[name][0] = stats[name][0] + scalar_value * weight_tensor
+        stats[name][1] = stats[name][1] + weight_tensor
 
     @beartype
     def _aggregate_validation_stats(
         self,
-        local_stats: dict[str, list[float]],
+        local_stats: dict[str, list[torch.Tensor]],
     ) -> dict[str, float]:
         if not torch.distributed.is_initialized():
             return {
-                key: value_sum / max(value_count, 1.0)
+                key: float((value_sum / value_count.clamp(min=1.0)).cpu().item())
                 for key, (value_sum, value_count) in local_stats.items()
-                if value_count > 0
+                if value_count.item() > 0
             }
 
         gathered_keys = [None for _ in range(torch.distributed.get_world_size())]
@@ -295,11 +300,13 @@ class Trainer:
 
         aggregated_metrics = {}
         for key in metric_keys:
-            value_sum, value_count = local_stats.get(key, [0.0, 0.0])
-            tensor = torch.tensor(
-                [value_sum, value_count],
-                dtype=torch.float64,
-                device=self.config.device,
+            default = torch.zeros((), dtype=torch.float64, device=self.config.device)
+            value_sum, value_count = local_stats.get(key, [default, default])
+            tensor = torch.stack(
+                [
+                    value_sum.to(device=self.config.device, dtype=torch.float64),
+                    value_count.to(device=self.config.device, dtype=torch.float64),
+                ]
             )
             torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
             if self.config.rank == 0 and tensor[1].item() > 0:
@@ -311,7 +318,7 @@ class Trainer:
         assert self.validation_dataloader is not None
 
         self.model_wrapper.eval()
-        local_stats: dict[str, list[float]] = {}
+        local_stats: dict[str, list[torch.Tensor]] = {}
 
         with torch.no_grad():
             for validation_iteration, data in enumerate(
@@ -325,8 +332,15 @@ class Trainer:
                 batch_size = float(data["source_dataset"].shape[0])
                 data["iteration"] = validation_iteration
                 data["training_step"] = self.step
+                should_compute_additional_metrics = (
+                    self.config.val_additional_metrics_frequency > 0
+                    and (validation_iteration + 1)
+                    % self.config.val_additional_metrics_frequency
+                    == 0
+                )
                 data["compute_additional_metrics"] = (
                     self.config.validation_compute_additional_metrics
+                    and should_compute_additional_metrics
                 )
 
                 with torch.amp.autocast(

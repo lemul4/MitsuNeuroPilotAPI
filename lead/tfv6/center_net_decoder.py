@@ -312,23 +312,28 @@ class CenterNetDecoder(nn.Module):
             ).sum() / source_mask.sum().clamp(min=1)
 
         if data.get("compute_additional_metrics", False):
-            source_mask_np = source_mask.detach().bool().cpu().numpy()
-            pred_boxes = bounding_box_features.pred_bounding_box_image_system[
-                source_mask_np
+            source_mask_bool = source_mask.detach().bool()
+            pred_boxes = bounding_box_features.pred_bounding_box_image_system_tensor[
+                source_mask_bool
             ]
-            gt_boxes = (
-                data[f"{prefix}center_net_bounding_boxes"]
-                .detach()
-                .float()
-                .cpu()
-                .numpy()[source_mask_np]
+            gt_boxes_all = data[f"{prefix}center_net_bounding_boxes"]
+            gt_source_mask_bool = source_mask_bool.to(device=gt_boxes_all.device)
+            gt_boxes = gt_boxes_all[gt_source_mask_bool].to(
+                pred_boxes.device,
+                dtype=torch.float32,
+                non_blocking=True,
             )
-            log[f"metric/{prefix}center_net_map"] = metrics.mean_average_precision_bev(
-                pred_boxes=pred_boxes,
-                gt_boxes=gt_boxes,
-                num_classes=self.num_classes,
-                iou_threshold=self.config.additional_metrics_map_iou_threshold,
-                score_threshold=self.config.additional_metrics_map_score_threshold,
+            log[f"metric/{prefix}center_net_map"] = (
+                metrics.mean_average_precision_bev_torch(
+                    pred_boxes=pred_boxes,
+                    gt_boxes=gt_boxes,
+                    num_classes=self.num_classes,
+                    iou_threshold=self.config.additional_metrics_map_iou_threshold,
+                    score_threshold=self.config.additional_metrics_map_score_threshold,
+                    iou_mode=self.config.additional_metrics_map_iou_mode,
+                    metric_dtype=self.config.additional_metrics_dtype,
+                    matching_mode=self.config.additional_metrics_map_matching,
+                )
             )
 
         # Add dataset name prefix
@@ -360,8 +365,8 @@ class CenterNetBoundingBoxPrediction:
 
     @cached_property
     @beartype
-    def pred_bounding_box_image_system(self) -> jt.Float[npt.NDArray, "B K 9"]:
-        """Numpy array of shape (bs, k, 9) with features (x, y, w, h, yaw, velocity, brake, class, score) in image system"""
+    def pred_bounding_box_image_system_tensor(self) -> jt.Float[torch.Tensor, "B K 9"]:
+        """Tensor of shape (bs, k, 9) with features (x, y, w, h, yaw, velocity, brake, class, score) in image system."""
         k = self.config.top_k_center_keypoints
         kernel = self.config.center_net_max_pooling_kernel
 
@@ -399,8 +404,8 @@ class CenterNetBoundingBoxPrediction:
         batch_bboxes = torch.cat(
             (
                 batch_bboxes,
-                batch_topk_classes[..., np.newaxis],
-                batch_scores[..., np.newaxis],
+                batch_topk_classes.unsqueeze(-1),
+                batch_scores.unsqueeze(-1),
             ),
             dim=-1,
         )
@@ -408,6 +413,13 @@ class CenterNetBoundingBoxPrediction:
             self.config.pixels_per_meter
         )
 
+        return batch_bboxes
+
+    @cached_property
+    @beartype
+    def pred_bounding_box_image_system(self) -> jt.Float[npt.NDArray, "B K 9"]:
+        """Numpy array of shape (bs, k, 9) with features (x, y, w, h, yaw, velocity, brake, class, score) in image system."""
+        batch_bboxes = self.pred_bounding_box_image_system_tensor
         return batch_bboxes.detach().cpu().float().numpy()
 
     @cached_property

@@ -2,11 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from beartype import beartype
-from torchvision.ops import sigmoid_focal_loss
 
 from lead.common.constants import SOURCE_DATASET_NAME_MAP, SourceDataset
 from lead.training import metrics
 from lead.training.config_training import TrainingConfig
+from lead.tfv6.losses import (
+    maybe_compile_focal_loss,
+    sigmoid_focal_loss_one_hot_label,
+)
 
 
 class PerspectiveDecoder(nn.Module):
@@ -40,6 +43,11 @@ class PerspectiveDecoder(nn.Module):
         self.expected_h = int(self.config.final_image_height)
         self.expected_w = int(self.config.final_image_width)
         self.is_depth = self.modality == "depth"
+        self._semantic_focal_loss = maybe_compile_focal_loss(
+            sigmoid_focal_loss_one_hot_label,
+            enabled=bool(self.config.compile),
+            mode=str(self.config.compile_mode).lower(),
+        )
         self.scale_factor_0 = (
             perspective_upsample_factor // self.config.deconv_scale_factor_0
         )
@@ -192,19 +200,9 @@ class PerspectiveDecoder(nn.Module):
         prediction: torch.Tensor,
         label: torch.Tensor,
     ) -> torch.Tensor:
-        target = F.one_hot(
-            label.clamp(min=0),
-            num_classes=self.config.num_semantic_classes,
-        )
-        target = target.permute(0, 3, 1, 2).to(dtype=prediction.dtype)
-        focal_loss = sigmoid_focal_loss(
-            prediction,
-            target,
-            alpha=float(self.config.semantic_focal_loss_alpha),
-            gamma=float(self.config.semantic_focal_loss_gamma),
-            reduction="none",
-        )
-        return focal_loss.sum(dim=1)
+        alpha = float(self.config.semantic_focal_loss_alpha)
+        gamma = float(self.config.semantic_focal_loss_gamma)
+        return self._semantic_focal_loss(prediction, label, alpha, gamma)
 
     def forward(self, data: dict, image_feature_grid: torch.Tensor, log: dict):
         """Forward pass for the decoder.

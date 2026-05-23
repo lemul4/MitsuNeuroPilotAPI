@@ -2,12 +2,15 @@ import torch
 import torch.nn as nn
 from beartype import beartype
 from torch.nn import functional as F
-from torchvision.ops import sigmoid_focal_loss
 
 import lead.common.common_utils as common_utils
 from lead.common.constants import SOURCE_DATASET_NAME_MAP, SourceDataset
 from lead.training import metrics
 from lead.training.config_training import TrainingConfig
+from lead.tfv6.losses import (
+    maybe_compile_focal_loss,
+    sigmoid_focal_loss_one_hot_label_ignore,
+)
 
 
 class BEVDecoder(nn.Module):
@@ -32,6 +35,11 @@ class BEVDecoder(nn.Module):
         self.num_classes = num_classes
         self.device = device
         self.source_data = source_data
+        self._bev_semantic_focal_loss = maybe_compile_focal_loss(
+            sigmoid_focal_loss_one_hot_label_ignore,
+            enabled=bool(self.config.compile),
+            mode=str(self.config.compile_mode).lower(),
+        )
 
         self.net = nn.Sequential(
             nn.Conv2d(
@@ -158,21 +166,9 @@ class BEVDecoder(nn.Module):
         pred: torch.Tensor,
         label: torch.Tensor,
     ) -> torch.Tensor:
-        valid_mask = label != -1
-        target = F.one_hot(
-            label.clamp(min=0),
-            num_classes=self.num_classes,
-        )
-        target = target.permute(0, 3, 1, 2).to(dtype=pred.dtype)
-        focal_loss = sigmoid_focal_loss(
-            pred,
-            target,
-            alpha=float(self.config.bev_semantic_focal_loss_alpha),
-            gamma=float(self.config.bev_semantic_focal_loss_gamma),
-            reduction="none",
-        )
-        focal_loss = focal_loss.sum(dim=1)
-        return focal_loss * valid_mask.to(dtype=focal_loss.dtype)
+        alpha = float(self.config.bev_semantic_focal_loss_alpha)
+        gamma = float(self.config.bev_semantic_focal_loss_gamma)
+        return self._bev_semantic_focal_loss(pred, label, alpha, gamma, -1)
 
     def forward(self, bev_feature_grid: torch.Tensor, log: dict):
         """Forward pass for the BEV decoder.

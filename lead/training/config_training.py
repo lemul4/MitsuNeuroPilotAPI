@@ -215,8 +215,12 @@ class TrainingConfig(BaseConfig):
     validation_frequency_epochs = 1
     # If true compute additional validation metrics on every validation batch.
     validation_compute_additional_metrics = True
+
     # If true save local PNG curves for validation metrics.
     validation_save_plots = True
+    # Compute expensive additional validation metrics every N validation batches.
+    # Losses are still evaluated on every batch.
+    val_additional_metrics_frequency = 4
 
     @overridable_property
     def carla_cache_path(self):
@@ -316,14 +320,20 @@ class TrainingConfig(BaseConfig):
     @overridable_property
     def torch_float_type(self):
         """PyTorch float precision type for training."""
-        if self.use_mixed_precision_training and self.gpu_name in ["a100", "l40s", "rtx3060", "rtx4090", "rtx5090"]:
+        if self.use_mixed_precision_training and self.gpu_name in [
+            "a100",
+            "l40s",
+            "rtx3060",
+            "rtx4090",
+            "rtx5090",
+        ]:
             return torch.bfloat16
         return torch.float32
 
     @overridable_property
     def use_mixed_precision_training(self):
         """If true use mixed precision training."""
-        return self.gpu_name in ["a100", "l40s"]
+        return self.gpu_name in ["a100", "l40s", "rtx3060", "rtx4090", "rtx5090"]
 
     @overridable_property
     def need_grad_scaler(self):
@@ -797,7 +807,7 @@ class TrainingConfig(BaseConfig):
     @overridable_property
     def waypoints_spacing(self):
         """Spacing between predicted waypoints. For example: spacing 5 = 4Hz prediction."""
-        
+
         if self.target_dataset == TargetDataset.CARLA_LEADERBOARD2_ONLY2CAMERAS:
             return 3  # 4Hz
         elif self.carla_leaderboard_mode:
@@ -888,12 +898,8 @@ class TrainingConfig(BaseConfig):
     left_camera_fov_deg = 90.0
     right_camera_fov_deg = 50.03
     camera_baseline_m = 0.135
-    left_camera_translation_m = [ 0.9,
-        -0.0675,
-        1.550]
-    right_camera_translation_m = [ 0.9,
-        0.0675,
-        1.550]
+    left_camera_translation_m = [0.9, -0.0675, 1.550]
+    right_camera_translation_m = [0.9, 0.0675, 1.550]
     left_camera_yaw_deg = 0.0
     right_camera_yaw_deg = 0.0
     left_camera_pitch_deg = 0.0
@@ -903,12 +909,8 @@ class TrainingConfig(BaseConfig):
     dual_camera_left_fov_deg = 90.0
     dual_camera_right_fov_deg = 50.0
     dual_camera_baseline_m = 0.135
-    dual_camera_left_translation_m = [ 0.9,
-        -0.0675,
-        1.550]
-    dual_camera_right_translation_m =  [0.9,
-        0.0675,
-        1.550]
+    dual_camera_left_translation_m = [0.9, -0.0675, 1.550]
+    dual_camera_right_translation_m = [0.9, 0.0675, 1.550]
     dual_camera_left_yaw_deg = 0.0
     dual_camera_right_yaw_deg = 0.0
     dual_camera_left_pitch_deg = 0.0
@@ -1046,6 +1048,8 @@ class TrainingConfig(BaseConfig):
     # Fraction of CARLA samples to use. -1 or 1.0 = use all data.
     # Ignored when carla_num_samples is set to a positive value.
     carla_dataset_fraction = -1.0
+    # Fraction of CARLA samples to use for validation. -1 or 1.0 = use all data.
+    val_dataset_fraction = -1.0
     # If true use NavSim data for training.
     use_navsim_data = False
     # NavSim data root directory.
@@ -1228,6 +1232,15 @@ class TrainingConfig(BaseConfig):
     additional_metrics_map_iou_threshold = 0.5
     # Minimum CenterNet score used by the BEV mAP metric.
     additional_metrics_map_score_threshold = 0.05
+    # IoU mode for CenterNet BEV mAP: "aabb" is a fast rotated-envelope
+    # approximation, "rotated" is exact but slower.
+    additional_metrics_map_iou_mode = "aabb"
+    # Numeric precision for extra metrics. "float16" is fastest on CUDA and is
+    # acceptable for diagnostics; exact rotated IoU still uses float32.
+    additional_metrics_dtype = "float16"
+    # Matching mode for CenterNet BEV mAP. "max_iou" is a fast diagnostic
+    # approximation; "greedy" is closer to standard AP but slower.
+    additional_metrics_map_matching = "max_iou"
 
     # --- Hardware configuration ---
     @overridable_property
