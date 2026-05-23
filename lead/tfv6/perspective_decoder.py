@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from beartype import beartype
+from torchvision.ops import sigmoid_focal_loss
 
 from lead.common.constants import SOURCE_DATASET_NAME_MAP, SourceDataset
 from lead.training import metrics
@@ -139,11 +140,23 @@ class PerspectiveDecoder(nn.Module):
             # Compute loss per sample
             with torch.amp.autocast(device_type="cuda", enabled=False):
                 if self.modality == "semantic":
-                    loss_per_sample = F.cross_entropy(
-                        prediction.float(),
-                        label,
-                        reduction="none",
-                    )  # (B, H, W)
+                    prediction = prediction.float()
+                    loss_type = str(self.config.semantic_loss_type).lower()
+                    if loss_type == "focal":
+                        loss_per_sample = self._semantic_focal_loss_per_pixel(
+                            prediction,
+                            label,
+                        )
+                    elif loss_type == "cross_entropy":
+                        loss_per_sample = F.cross_entropy(
+                            prediction,
+                            label,
+                            reduction="none",
+                        )  # (B, H, W)
+                    else:
+                        raise ValueError(
+                            f"Unknown semantic_loss_type: {self.config.semantic_loss_type!r}"
+                        )
                     loss_per_sample = loss_per_sample.mean(dim=(1, 2))  # (B,)
                 else:
                     loss_per_sample = F.l1_loss(
@@ -173,6 +186,25 @@ class PerspectiveDecoder(nn.Module):
             if self.source_data == SourceDataset.CARLA:
                 prefix = ""
             loss.update({f"{prefix}loss_{self.modality}": loss_value})
+
+    def _semantic_focal_loss_per_pixel(
+        self,
+        prediction: torch.Tensor,
+        label: torch.Tensor,
+    ) -> torch.Tensor:
+        target = F.one_hot(
+            label.clamp(min=0),
+            num_classes=self.config.num_semantic_classes,
+        )
+        target = target.permute(0, 3, 1, 2).to(dtype=prediction.dtype)
+        focal_loss = sigmoid_focal_loss(
+            prediction,
+            target,
+            alpha=float(self.config.semantic_focal_loss_alpha),
+            gamma=float(self.config.semantic_focal_loss_gamma),
+            reduction="none",
+        )
+        return focal_loss.sum(dim=1)
 
     def forward(self, data: dict, image_feature_grid: torch.Tensor, log: dict):
         """Forward pass for the decoder.

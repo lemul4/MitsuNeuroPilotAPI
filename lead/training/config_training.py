@@ -969,6 +969,11 @@ class TrainingConfig(BaseConfig):
     # --- Semantic segmentation ---
     # If true use semantic segmentation as auxiliary loss.
     use_semantic = True
+    # Loss for perspective semantic segmentation: "cross_entropy" or "focal".
+    semantic_loss_type = "cross_entropy"
+    # Parameters for torchvision.ops.sigmoid_focal_loss.
+    semantic_focal_loss_alpha = 0.25
+    semantic_focal_loss_gamma = 2.0
     # Total number of semantic segmentation classes.
     num_semantic_classes = len(TransfuserSemanticSegmentationClass)
     # Resolution at which the perspective auxiliary tasks are predicted
@@ -987,6 +992,11 @@ class TrainingConfig(BaseConfig):
     # --- BEV Semantic ---
     # If true use bev semantic segmentation as auxiliary loss for training.
     use_bev_semantic = True
+    # Loss for BEV semantic segmentation: "cross_entropy" or "focal".
+    bev_semantic_loss_type = "cross_entropy"
+    # Parameters for torchvision.ops.sigmoid_focal_loss.
+    bev_semantic_focal_loss_alpha = 0.25
+    bev_semantic_focal_loss_gamma = 2.0
 
     @property
     def use_bev_broken_lane_markers(self):
