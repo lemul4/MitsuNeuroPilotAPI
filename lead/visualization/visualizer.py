@@ -1442,7 +1442,10 @@ def visualize_feature_maps(
         if torch.is_tensor(value):
             if value.numel() == 0:
                 return None
-            return value.detach().cpu().numpy()
+            value = value.detach()
+            if value.dtype in (torch.bfloat16, torch.float16):
+                value = value.float()
+            return value.cpu().numpy()
         if isinstance(value, np.ndarray):
             if value.size == 0:
                 return None

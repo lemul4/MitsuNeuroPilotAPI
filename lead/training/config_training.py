@@ -351,8 +351,26 @@ class TrainingConfig(BaseConfig):
     # bucket_cap_mb
     bucket_cap_mb = 256
 
+    # Keep train data loader workers alive between epochs.
+    persistent_workers_train = True
+    # Keep validation data loader workers alive between validation runs.
+    persistent_workers_val = True
+
     # Number of data loader workers to prefetch batches.
     prefetch_factor = 16
+
+    # Validation data loader workers. Negative value means reuse the train worker count.
+    validation_num_workers = -1
+
+    @overridable_property
+    def validation_prefetch_factor(self):
+        """Number of batches each validation worker prefetches."""
+        return self.prefetch_factor
+
+    @overridable_property
+    def validation_batch_size(self):
+        """Validation batch size before distributed per-rank splitting."""
+        return self.batch_size
 
     @overridable_property
     def compile(self):
@@ -363,6 +381,11 @@ class TrainingConfig(BaseConfig):
     def compile_strategy(self):
         """Compilation strategy: none, core, or module."""
         return "core"
+
+    @overridable_property
+    def compile_mode(self):
+        """Torch compile mode. Avoid CUDA graphs by default for local stability."""
+        return "max-autotune-no-cudagraphs"
 
     @overridable_property
     def channel_last(self):
@@ -879,7 +902,7 @@ class TrainingConfig(BaseConfig):
     right_camera_roll_deg = 0.0
     dual_camera_left_fov_deg = 90.0
     dual_camera_right_fov_deg = 50.0
-    dual_camera_baseline_m = 0.15
+    dual_camera_baseline_m = 0.135
     dual_camera_left_translation_m = [ 0.9,
         -0.0675,
         1.550]

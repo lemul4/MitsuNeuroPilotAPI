@@ -127,7 +127,7 @@ class TFv6(nn.Module):
         fullgraph: bool = True,
         dynamic: bool = False,
         backend: str = "inductor",
-        mode: str = "max-autotune",
+        mode: str = "max-autotune-no-cudagraphs",
     ) -> None:
         self._compiled_forward_core = torch.compile(
             self._forward_core,
@@ -140,6 +140,7 @@ class TFv6(nn.Module):
     def forward(self, data: dict[str, typing.Any]) -> Prediction:
         self.log = {}
         forward_core = self._compiled_forward_core or self._forward_core
+        core_data = self._prepare_forward_data(data)
         (
             pred_route,
             pred_future_waypoints,
@@ -154,7 +155,7 @@ class TFv6(nn.Module):
             radar_predictions,
             pred_bounding_box_navsim_tensors,
             pred_bev_semantic_navsim,
-        ) = forward_core(data)
+        ) = forward_core(core_data)
         pred_bounding_box = self._make_center_net_prediction(
             pred_bounding_box_tensors, self.config
         )
@@ -260,6 +261,67 @@ class TFv6(nn.Module):
             pred_bounding_box_navsim,
             pred_bev_semantic_navsim,
         )
+
+    def _prepare_forward_data(self, data: dict[str, typing.Any]) -> dict[str, typing.Any]:
+        core_data: dict[str, typing.Any] = {}
+
+        def add_tensor(
+            key: str,
+            dtype: torch.dtype | None = None,
+            required: bool = False,
+        ) -> None:
+            if key not in data:
+                if required:
+                    raise KeyError(f"Missing required forward data key: {key!r}")
+                return
+            value = data[key]
+            if torch.is_tensor(value):
+                if dtype is None:
+                    core_data[key] = value.to(self.device, non_blocking=True)
+                else:
+                    core_data[key] = value.to(
+                        self.device,
+                        dtype=dtype,
+                        non_blocking=True,
+                    )
+            else:
+                core_data[key] = value
+
+        if self.backbone.backbone_sensor_mode == "dual_front_camera":
+            add_tensor(self.backbone.left_camera_key, self.backbone.input_dtype, True)
+            add_tensor(self.backbone.right_camera_key, self.backbone.input_dtype, True)
+            for camera_name in ("left", "right"):
+                for key in (
+                    f"{camera_name}_camera_intrinsics",
+                    f"{camera_name}_intrinsics",
+                    f"rgb_{camera_name}_intrinsics",
+                    f"{camera_name}_camera_T_cam_ego",
+                    f"{camera_name}_T_cam_ego",
+                    f"rgb_{camera_name}_T_cam_ego",
+                ):
+                    add_tensor(key, torch.float32)
+        else:
+            add_tensor("rgb", self.backbone.input_dtype, True)
+            if not self.backbone.use_ltf:
+                add_tensor("rasterized_lidar", self.backbone.input_dtype, True)
+
+        if self.radar_detection:
+            add_tensor("radar", self.radar_detector.input_dtype, True)
+            add_tensor("speed", self.radar_detector.input_dtype, True)
+
+        if self.use_planning_decoder:
+            planning_dtype = getattr(self.planning_decoder, "input_dtype", None)
+            for key in (
+                "speed",
+                "acceleration",
+                "command",
+                "target_point",
+                "target_point_previous",
+                "target_point_next",
+            ):
+                add_tensor(key, planning_dtype)
+
+        return core_data
 
     def _make_center_net_prediction(
         self,

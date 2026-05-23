@@ -1113,7 +1113,7 @@ class DualCameraBEVProjector(nn.Module):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         baseline = float(
-            _config_get(self.config, ("camera_baseline_m", "dual_camera_baseline_m"), 0.15)
+            _config_get(self.config, ("camera_baseline_m", "dual_camera_baseline_m"), 0.135)
         )
         height = float(
             _config_get(

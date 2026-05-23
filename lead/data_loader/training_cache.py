@@ -4,6 +4,7 @@ import io
 import lzma
 import os
 import pickle
+import tempfile
 from dataclasses import dataclass
 
 import cv2
@@ -276,16 +277,36 @@ class PersistentCache:
 
     def __setitem__(self, key: CacheKey, value):
         path = key.persistent_cache_full_path
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with lzma.open(path, "wb") as f:
-            pickle.dump(value, f)
-        self.existence_cache[key] = True
+        cache_dir = os.path.dirname(path)
+        os.makedirs(cache_dir, exist_ok=True)
+
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=cache_dir
+        )
+        os.close(fd)
+
+        try:
+            with lzma.open(tmp_path, "wb") as f:
+                pickle.dump(value, f)
+            os.replace(tmp_path, path)
+            self.existence_cache[key] = True
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def __getitem__(self, key: CacheKey):
         if key not in self:
             raise KeyError(f"CacheKey {key} does not exist.")
         with lzma.open(key.persistent_cache_full_path, "rb") as f:
             return pickle.load(f)
+
+    def invalidate(self, key: CacheKey):
+        path = key.persistent_cache_full_path
+        self.existence_cache[key] = False
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 @beartype

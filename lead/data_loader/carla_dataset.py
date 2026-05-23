@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import lzma
 import os
 import random
 import time
@@ -931,10 +932,13 @@ class CARLAData(Dataset):
                     self.persistent_cache[used_cache_key] = cached_compressed_data
 
                 return cached_compressed_data.decompress()
-            except EOFError:
+            except (EOFError, lzma.LZMAError) as exc:
                 LOG.warning(
-                    f"EOFError when reading cache for key {used_cache_key}. Rebuilding cache for this key."
+                    f"{type(exc).__name__} when reading cache for key {used_cache_key}. "
+                    "Rebuilding cache for this key."
                 )
+                if isinstance(cache, PersistentCache):
+                    cache.invalidate(used_cache_key)
 
         # Data not in cache, load from disk. Do this for all 3 views, since we might need them later.
         sensor_data_normal = self._load_sensor_data_and_build_cache(

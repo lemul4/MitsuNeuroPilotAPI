@@ -173,23 +173,26 @@ def initialize_model(
     compile_strategy = "none"
     if config.compile:
         compile_strategy = str(getattr(config, "compile_strategy", "core")).lower()
+    compile_mode = str(
+        getattr(config, "compile_mode", "max-autotune-no-cudagraphs")
+    ).lower()
     if compile_strategy == "core":
         model.prepare_compile(
             fullgraph=True,
             dynamic=False,
             backend="inductor",
-            mode="max-autotune",
+            mode=compile_mode,
         )
-        LOG.info("Using torch.compile on TFv6 forward core")
+        LOG.info(f"Using torch.compile on TFv6 forward core, mode={compile_mode}")
     elif compile_strategy == "module":
         model = torch.compile(
             model,
             fullgraph=False,
             dynamic=False,  # aggressively specialize to current input shapes
             backend="inductor",
-            mode="max-autotune",  # highest autotune + CUDA graph
+            mode=compile_mode,
         )
-        LOG.info("Using torch.compile on full TFv6 module")
+        LOG.info(f"Using torch.compile on full TFv6 module, mode={compile_mode}")
     elif compile_strategy != "none":
         raise ValueError(
             f"Unknown compile_strategy={compile_strategy!r}. "
@@ -391,7 +394,7 @@ def initialize_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         prefetch_factor=config.prefetch_factor,
-        persistent_workers=True,
+        persistent_workers=config.persistent_workers_train,
         collate_fn=mixed_training_utils.mixed_data_collate_fn,
     )
     return dataloader_train, mixed_sampler
@@ -468,8 +471,13 @@ def initialize_validation_dataloader(
         num_replicas=world_size,
         rank=rank,
     )
-    batch_size = max(1, config.batch_size // max(1, world_size))
-    validation_num_workers = max(0, num_workers)
+    batch_size = max(1, config.validation_batch_size // max(1, world_size))
+    validation_num_workers = (
+        num_workers
+        if config.validation_num_workers < 0
+        else config.validation_num_workers
+    )
+    validation_num_workers = max(0, validation_num_workers)
     dataloader_kwargs = {
         "dataset": validation_dataset,
         "batch_size": batch_size,
@@ -480,8 +488,8 @@ def initialize_validation_dataloader(
         "collate_fn": mixed_training_utils.mixed_data_collate_fn,
     }
     if validation_num_workers > 0:
-        dataloader_kwargs["prefetch_factor"] = config.prefetch_factor
-        dataloader_kwargs["persistent_workers"] = True
+        dataloader_kwargs["prefetch_factor"] = config.validation_prefetch_factor
+        dataloader_kwargs["persistent_workers"] = config.persistent_workers_val
 
     dataloader_validation = DataLoader(**dataloader_kwargs)
     LOG.info(

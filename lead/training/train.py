@@ -24,6 +24,11 @@ LOG = logging.getLogger(__name__)
 
 warnings.filterwarnings("error")
 warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    message="The CUDA Graph is empty.*",
+)
+warnings.filterwarnings(
     "ignore", message="Grad strides do not match bucket view strides"
 )
 warnings.filterwarnings("ignore", category=UserWarning, message=".*epoch parameter.*")
@@ -210,7 +215,12 @@ class Trainer:
                     self.gradient_steps_per_epoch * self.cur_epoch + epoch_iteration
                 )
             if self.scaler.get_scale() > self.config.grad_scaler_max_grad_scale:
-                self.scaler.update(new_scale=self.config.grad_scaler_max_grad_scale)
+                new_scale = torch.tensor(
+                    self.config.grad_scaler_max_grad_scale,
+                    device=self.config.device,
+                    dtype=self.scaler.get_scale().dtype,
+                )
+                self.scaler.update(new_scale=new_scale)
 
             self.logger.log_train(
                 epoch_iteration=epoch_iteration,
