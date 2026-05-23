@@ -3,11 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from beartype import beartype
 
-from lead.common.constants import SOURCE_DATASET_NAME_MAP, SourceDataset
+from lead.common.constants import (
+    SOURCE_DATASET_NAME_MAP,
+    SourceDataset,
+    TransfuserSemanticSegmentationClass,
+)
 from lead.training import metrics
 from lead.training.config_training import TrainingConfig
 from lead.tfv6.losses import (
     maybe_compile_focal_loss,
+    maybe_compile_loss,
+    semantic_cross_entropy_loss_scalar,
+    semantic_focal_loss_scalar,
     sigmoid_focal_loss_one_hot_label,
 )
 
@@ -47,6 +54,34 @@ class PerspectiveDecoder(nn.Module):
             sigmoid_focal_loss_one_hot_label,
             enabled=bool(self.config.compile),
             mode=str(self.config.compile_mode).lower(),
+        )
+        self._semantic_focal_scalar_loss = maybe_compile_loss(
+            semantic_focal_loss_scalar,
+            enabled=bool(self.config.compile),
+            mode=str(self.config.compile_mode).lower(),
+        )
+        self._semantic_ce_scalar_loss = maybe_compile_loss(
+            semantic_cross_entropy_loss_scalar,
+            enabled=bool(self.config.compile),
+            mode=str(self.config.compile_mode).lower(),
+        )
+        semantic_class_weights = torch.ones(
+            self.config.num_semantic_classes,
+            dtype=torch.float32,
+        )
+        semantic_class_weights[
+            int(TransfuserSemanticSegmentationClass.PEDESTRIAN)
+        ] = float(self.config.semantic_pedestrian_loss_weight)
+        semantic_class_weights[int(TransfuserSemanticSegmentationClass.BIKER)] = float(
+            self.config.semantic_biker_loss_weight
+        )
+        semantic_class_weights[
+            int(TransfuserSemanticSegmentationClass.TRAFFIC_LIGHT)
+        ] = float(self.config.semantic_traffic_light_loss_weight)
+        self.register_buffer(
+            "semantic_class_weights",
+            semantic_class_weights,
+            persistent=False,
         )
         self.scale_factor_0 = (
             perspective_upsample_factor // self.config.deconv_scale_factor_0
@@ -151,31 +186,33 @@ class PerspectiveDecoder(nn.Module):
                     prediction = prediction.float()
                     loss_type = str(self.config.semantic_loss_type).lower()
                     if loss_type == "focal":
-                        loss_per_sample = self._semantic_focal_loss_per_pixel(
+                        loss_value = self._semantic_focal_scalar_loss(
                             prediction,
                             label,
+                            source_mask,
+                            self.semantic_class_weights,
+                            float(self.config.semantic_focal_loss_alpha),
+                            float(self.config.semantic_focal_loss_gamma),
                         )
                     elif loss_type == "cross_entropy":
-                        loss_per_sample = F.cross_entropy(
+                        loss_value = self._semantic_ce_scalar_loss(
                             prediction,
                             label,
-                            reduction="none",
-                        )  # (B, H, W)
+                            source_mask,
+                            self.semantic_class_weights,
+                        )
                     else:
                         raise ValueError(
                             f"Unknown semantic_loss_type: {self.config.semantic_loss_type!r}"
                         )
-                    loss_per_sample = loss_per_sample.mean(dim=(1, 2))  # (B,)
                 else:
                     loss_per_sample = F.l1_loss(
                         prediction.float(), label.float(), reduction="none"
                     )  # (B, H, W)
                     loss_per_sample = loss_per_sample.mean(dim=(1, 2))  # (B,)
-
-                # Mask out losses from other data sources
-                loss_value = (
-                    loss_per_sample * source_mask
-                ).sum() / source_mask.sum().clamp(min=1)
+                    loss_value = (
+                        loss_per_sample * source_mask
+                    ).sum() / source_mask.sum().clamp(min=1)
 
             if (
                 data.get("compute_additional_metrics", False)
@@ -202,7 +239,8 @@ class PerspectiveDecoder(nn.Module):
     ) -> torch.Tensor:
         alpha = float(self.config.semantic_focal_loss_alpha)
         gamma = float(self.config.semantic_focal_loss_gamma)
-        return self._semantic_focal_loss(prediction, label, alpha, gamma)
+        per_pixel = self._semantic_focal_loss(prediction, label, alpha, gamma)
+        return per_pixel * self.semantic_class_weights.to(dtype=per_pixel.dtype)[label]
 
     def forward(self, data: dict, image_feature_grid: torch.Tensor, log: dict):
         """Forward pass for the decoder.

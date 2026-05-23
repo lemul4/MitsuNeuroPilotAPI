@@ -19,22 +19,27 @@ def mean_iou_from_logits(
         )
 
     pred = logits.argmax(dim=1)
-    valid_mask = torch.ones_like(label, dtype=torch.bool)
+    valid_mask = (label >= 0) & (label < num_classes)
     if ignore_index is not None:
-        valid_mask = label != ignore_index
-
-    ious = []
-    for class_idx in range(num_classes):
-        pred_mask = (pred == class_idx) & valid_mask
-        label_mask = (label == class_idx) & valid_mask
-        union = pred_mask | label_mask
-        if union.any():
-            intersection = pred_mask & label_mask
-            ious.append(intersection.sum().float() / union.sum().float().clamp(min=1))
-
-    if len(ious) == 0:
+        valid_mask = valid_mask & (label != ignore_index)
+    if not valid_mask.any():
         return logits.new_tensor(0.0, dtype=torch.float32)
-    return torch.stack(ious).mean()
+
+    label_valid = label[valid_mask].long()
+    pred_valid = pred[valid_mask].long().clamp(min=0, max=num_classes - 1)
+    indices = label_valid * num_classes + pred_valid
+    confusion = torch.bincount(
+        indices,
+        minlength=num_classes * num_classes,
+    ).reshape(num_classes, num_classes)
+    intersection = confusion.diag().float()
+    label_count = confusion.sum(dim=1).float()
+    pred_count = confusion.sum(dim=0).float()
+    union = label_count + pred_count - intersection
+    valid_classes = union > 0
+    if not valid_classes.any():
+        return logits.new_tensor(0.0, dtype=torch.float32)
+    return (intersection[valid_classes] / union[valid_classes].clamp(min=1)).mean()
 
 
 def mean_average_precision_bev(
@@ -221,7 +226,6 @@ def mean_average_precision_bev_torch(
         )
         pred_sample_idx = pred_sample_idx[order]
         class_pred = class_pred[order]
-        pred_sample_idx_list = pred_sample_idx.cpu().tolist()
 
         matched = [
             torch.zeros(sample_gt.shape[0], dtype=torch.bool, device=pred_boxes.device)
@@ -249,6 +253,7 @@ def mean_average_precision_bev_torch(
             aps.append(_average_precision_torch(true_positive, false_positive, num_gt))
             continue
 
+        pred_sample_idx_list = pred_sample_idx.cpu().tolist()
         iou_rows_by_pred_idx: dict[int, torch.Tensor] = {}
         for sample_idx, sample_gt in enumerate(class_gt_by_sample):
             if sample_gt.shape[0] == 0:

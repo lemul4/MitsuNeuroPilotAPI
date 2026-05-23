@@ -18,10 +18,16 @@ import lead.common.common_utils as common_utils
 from lead.common.constants import (
     SOURCE_DATASET_NAME_MAP,
     SourceDataset,
+    TransfuserBoundingBoxClass,
     TransfuserBoundingBoxIndex,
 )
 from lead.data_loader import carla_dataset_utils
 from lead.tfv6 import transfuser_utils as fn
+from lead.tfv6.losses import (
+    center_net_loss_no_velocity,
+    center_net_loss_with_velocity,
+    maybe_compile_loss,
+)
 from lead.training import metrics
 from lead.training.config_training import TrainingConfig
 
@@ -62,6 +68,36 @@ class CenterNetDecoder(nn.Module):
             self.velocity_head: nn.Sequential = self._build_head(
                 config.bb_input_channel, 1
             )
+        self._center_net_loss_with_velocity = maybe_compile_loss(
+            center_net_loss_with_velocity,
+            enabled=bool(self.config.compile and self.training_used_lidar_steps > 1),
+            mode=str(self.config.compile_mode).lower(),
+        )
+        self._center_net_loss_no_velocity = maybe_compile_loss(
+            center_net_loss_no_velocity,
+            enabled=bool(self.config.compile and self.training_used_lidar_steps <= 1),
+            mode=str(self.config.compile_mode).lower(),
+        )
+        detection_class_weights = torch.ones(self.num_classes, dtype=torch.float32)
+        detection_weight_by_class = {
+            int(TransfuserBoundingBoxClass.WALKER): float(
+                self.config.center_net_walker_loss_weight
+            ),
+            int(TransfuserBoundingBoxClass.BIKER): float(
+                self.config.center_net_biker_loss_weight
+            ),
+            int(TransfuserBoundingBoxClass.TRAFFIC_LIGHT): float(
+                self.config.center_net_traffic_light_loss_weight
+            ),
+        }
+        for class_idx, class_weight in detection_weight_by_class.items():
+            if class_idx < self.num_classes:
+                detection_class_weights[class_idx] = class_weight
+        self.register_buffer(
+            "detection_class_weights",
+            detection_class_weights,
+            persistent=False,
+        )
 
     @beartype
     def _build_head(self, in_channel: int, out_channel: int) -> nn.Sequential:
@@ -199,117 +235,56 @@ class CenterNetDecoder(nn.Module):
         )  # (B,)
 
         with torch.amp.autocast(device_type="cuda", enabled=False):
-            # Compute per-sample losses for heatmap
-            loss_center_heatmap_per_sample = gaussian_focal_loss(
-                pred=bounding_box_features.center_heatmap_pred,
-                gaussian_target=center_heatmap_target,
-                reduction="none",
-            )  # (B, C, H, W)
-            loss_center_heatmap_per_sample = loss_center_heatmap_per_sample.sum(
-                dim=(1, 2, 3)
-            )  # (B,)
-            # Mask out samples from other sources and normalize
-            avg_factor_clamped = (
-                avg_factor + torch.finfo(self.config.torch_float_type).eps
-            )
-            loss_center_heatmap_per_sample = (
-                loss_center_heatmap_per_sample / avg_factor_clamped
-            )  # (B,)
-            loss_center_heatmap = (
-                loss_center_heatmap_per_sample * source_mask
-            ).sum() / source_mask.sum().clamp(min=1)
-
-            # Compute per-sample losses for wh
-            loss_wh_per_sample = (
-                F.l1_loss(
-                    bounding_box_features.wh_pred.float(),
-                    wh_target.float(),
-                    reduction="none",
-                )
-                * pixel_weight.float()
-            )  # (B, 2, H, W)
-            loss_wh_per_sample = loss_wh_per_sample.sum(dim=(1, 2, 3))  # (B,)
-            loss_wh_per_sample = loss_wh_per_sample / (
-                avg_factor_clamped * bounding_box_features.wh_pred.shape[1]
-            )  # (B,)
-            loss_wh = (
-                loss_wh_per_sample * source_mask
-            ).sum() / source_mask.sum().clamp(min=1)
-
-            # Compute per-sample losses for offset
-            loss_offset_per_sample = (
-                F.l1_loss(
-                    bounding_box_features.offset_pred.float(),
-                    offset_target.float(),
-                    reduction="none",
-                )
-                * pixel_weight.float()
-            )  # (B, 2, H, W)
-            loss_offset_per_sample = loss_offset_per_sample.sum(dim=(1, 2, 3))  # (B,)
-            loss_offset_per_sample = loss_offset_per_sample / (
-                avg_factor_clamped * bounding_box_features.wh_pred.shape[1]
-            )  # (B,)
-            loss_offset = (
-                loss_offset_per_sample * source_mask
-            ).sum() / source_mask.sum().clamp(min=1)
-
-            # Compute per-sample losses for yaw class
-            loss_yaw_class_per_sample = (
-                F.cross_entropy(
-                    bounding_box_features.yaw_class_pred.float(),
-                    yaw_class_target,
-                    reduction="none",
-                )
-                * pixel_weight[:, 0].float()
-            )  # (B, H, W)
-            loss_yaw_class_per_sample = loss_yaw_class_per_sample.sum(
-                dim=(1, 2)
-            )  # (B,)
-            loss_yaw_class_per_sample = (
-                loss_yaw_class_per_sample / avg_factor_clamped
-            )  # (B,)
-            loss_yaw_class = (
-                loss_yaw_class_per_sample * source_mask
-            ).sum() / source_mask.sum().clamp(min=1)
-
-            # Compute per-sample losses for yaw res
-            loss_yaw_res_per_sample = (
-                F.smooth_l1_loss(
-                    bounding_box_features.yaw_res_pred.float(),
-                    yaw_res_target.float(),
-                    reduction="none",
-                )
-                * pixel_weight[:, 0:1].float()
-            )  # (B, 1, H, W)
-            loss_yaw_res_per_sample = loss_yaw_res_per_sample.sum(dim=(1, 2, 3))  # (B,)
-            loss_yaw_res_per_sample = (
-                loss_yaw_res_per_sample / avg_factor_clamped
-            )  # (B,)
-            loss_yaw_res = (
-                loss_yaw_res_per_sample * source_mask
-            ).sum() / source_mask.sum().clamp(min=1)
-
-        loss_velocity = torch.zeros(
-            1, dtype=self.config.torch_float_type, device=self.device
-        )
-        if self.config.training_used_lidar_steps > 1:
-            loss_velocity_per_sample = (
-                F.l1_loss(
+            if self.config.training_used_lidar_steps > 1:
+                (
+                    loss_center_heatmap,
+                    loss_wh,
+                    loss_offset,
+                    loss_yaw_class,
+                    loss_yaw_res,
+                    loss_velocity,
+                ) = self._center_net_loss_with_velocity(
+                    bounding_box_features.center_heatmap_pred,
+                    bounding_box_features.wh_pred,
+                    bounding_box_features.offset_pred,
+                    bounding_box_features.yaw_class_pred,
+                    bounding_box_features.yaw_res_pred,
                     bounding_box_features.velocity_pred,
+                    center_heatmap_target,
+                    wh_target,
+                    offset_target,
+                    yaw_class_target,
+                    yaw_res_target,
                     velocity_target,
-                    reduction="none",
+                    pixel_weight,
+                    avg_factor,
+                    source_mask,
+                    self.detection_class_weights,
                 )
-                * pixel_weight[:, 0:1]
-            )  # (B, 1, H, W)
-            loss_velocity_per_sample = loss_velocity_per_sample.sum(
-                dim=(1, 2, 3)
-            )  # (B,)
-            loss_velocity_per_sample = (
-                loss_velocity_per_sample / avg_factor_clamped
-            )  # (B,)
-            loss_velocity = (
-                loss_velocity_per_sample * source_mask
-            ).sum() / source_mask.sum().clamp(min=1)
+            else:
+                (
+                    loss_center_heatmap,
+                    loss_wh,
+                    loss_offset,
+                    loss_yaw_class,
+                    loss_yaw_res,
+                    loss_velocity,
+                ) = self._center_net_loss_no_velocity(
+                    bounding_box_features.center_heatmap_pred,
+                    bounding_box_features.wh_pred,
+                    bounding_box_features.offset_pred,
+                    bounding_box_features.yaw_class_pred,
+                    bounding_box_features.yaw_res_pred,
+                    center_heatmap_target,
+                    wh_target,
+                    offset_target,
+                    yaw_class_target,
+                    yaw_res_target,
+                    pixel_weight,
+                    avg_factor,
+                    source_mask,
+                    self.detection_class_weights,
+                )
 
         if data.get("compute_additional_metrics", False):
             source_mask_bool = source_mask.detach().bool()

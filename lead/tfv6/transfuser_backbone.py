@@ -172,6 +172,22 @@ class TransfuserBackbone(nn.Module):
             self.image_encoder.feature_info.info[image_start_index + 3]["reduction"]
             // self.config.perspective_downsample_factor
         )
+        if self.use_ltf:
+            x = torch.linspace(
+                0,
+                1,
+                self.config.lidar_width_pixel,
+                dtype=torch.float32,
+            )
+            y = torch.linspace(
+                0,
+                1,
+                self.config.lidar_height_pixel,
+                dtype=torch.float32,
+            )
+            y_grid, x_grid = torch.meshgrid(y, x, indexing="ij")
+            ltf_lidar = torch.stack([y_grid, x_grid], dim=0).unsqueeze(0)
+            self.register_buffer("ltf_lidar_base", ltf_lidar, persistent=False)
 
     @beartype
     def _init_dual_front_camera_backbone(self) -> None:
@@ -245,19 +261,21 @@ class TransfuserBackbone(nn.Module):
 
         left_final_channels = left_stage_channels[3]
         right_final_channels = right_stage_channels[3]
+        left_final_reduction = self.left_camera_encoder.feature_info.info[
+            left_start_index + 3
+        ]["reduction"]
+        right_final_reduction = self.right_camera_encoder.feature_info.info[
+            right_start_index + 3
+        ]["reduction"]
         self.dual_camera_image_output = str(
             _config_get(self.config, "dual_camera_image_output", "left")
         ).lower()
         if self.dual_camera_image_output in {"left", "fused_left", "primary"}:
             self.num_image_features = left_final_channels
-            selected_reduction = self.left_camera_encoder.feature_info.info[
-                left_start_index + 3
-            ]["reduction"]
+            selected_reduction = left_final_reduction
         elif self.dual_camera_image_output in {"right", "fused_right"}:
             self.num_image_features = right_final_channels
-            selected_reduction = self.right_camera_encoder.feature_info.info[
-                right_start_index + 3
-            ]["reduction"]
+            selected_reduction = right_final_reduction
         else:
             raise ValueError(
                 "dual_camera_image_output must be 'left', 'fused_left', 'primary', "
@@ -358,6 +376,8 @@ class TransfuserBackbone(nn.Module):
             left_channels=left_final_channels,
             right_channels=right_final_channels,
             out_channels=self.num_lidar_features,
+            left_feature_reduction=int(left_final_reduction),
+            right_feature_reduction=int(right_final_reduction),
         )
         self.perspective_upsample_factor = (
             selected_reduction // self.config.perspective_downsample_factor
@@ -420,33 +440,9 @@ class TransfuserBackbone(nn.Module):
             self.device, dtype=self.input_dtype, non_blocking=True
         )
         if self.use_ltf:
-            x = torch.linspace(
-                0,
-                1,
-                self.config.lidar_width_pixel,
-                device=rgb.device,
-                dtype=self.input_dtype,
-            )
-            y = torch.linspace(
-                0,
-                1,
-                self.config.lidar_height_pixel,
-                device=rgb.device,
-                dtype=self.input_dtype,
-            )
-            y_grid, x_grid = torch.meshgrid(y, x, indexing="ij")
-            lidar = torch.zeros(
-                (
-                    rgb.shape[0],
-                    2,
-                    self.config.lidar_height_pixel,
-                    self.config.lidar_width_pixel,
-                ),
-                device=rgb.device,
-                dtype=self.input_dtype,
-            )
-            lidar[:, 0] = y_grid.unsqueeze(0)
-            lidar[:, 1] = x_grid.unsqueeze(0)
+            lidar = self.ltf_lidar_base.to(
+                device=rgb.device, dtype=self.input_dtype
+            ).expand(rgb.shape[0], -1, -1, -1)
         else:
             lidar = data["rasterized_lidar"].to(
                 self.device, dtype=self.input_dtype, non_blocking=True
@@ -521,7 +517,7 @@ class TransfuserBackbone(nn.Module):
         self,
         left_image: torch.Tensor,
         right_image: torch.Tensor,
-        data: dict[str, torch.Tensor],
+        data: dict[str, torch.Tensor] | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Two independent camera encoders + multi-stage GPT fusion + BEV projection."""
         left_features = fn.normalize_imagenet(
@@ -841,6 +837,8 @@ class DualCameraBEVProjector(nn.Module):
         left_channels: int,
         right_channels: int,
         out_channels: int,
+        left_feature_reduction: int,
+        right_feature_reduction: int,
     ) -> None:
         super().__init__()
         self.config = config
@@ -862,6 +860,19 @@ class DualCameraBEVProjector(nn.Module):
         )
         self.reverse_x = _as_bool(_config_get(self.config, "dual_camera_bev_reverse_x", False))
         self.reverse_y = _as_bool(_config_get(self.config, "dual_camera_bev_reverse_y", False))
+        self.static_left_image_hw = (
+            int(self.config.final_image_height),
+            int(self.config.final_image_width),
+        )
+        self.static_right_image_hw = self.static_left_image_hw
+        self.static_left_feature_hw = (
+            max(1, self.static_left_image_hw[0] // int(left_feature_reduction)),
+            max(1, self.static_left_image_hw[1] // int(left_feature_reduction)),
+        )
+        self.static_right_feature_hw = (
+            max(1, self.static_right_image_hw[0] // int(right_feature_reduction)),
+            max(1, self.static_right_image_hw[1] // int(right_feature_reduction)),
+        )
         hidden_channels = int(
             _config_get(config, "dual_camera_bev_hidden_channels", out_channels)
         )
@@ -882,6 +893,16 @@ class DualCameraBEVProjector(nn.Module):
         bev_points, xy_channels = self._build_static_bev_geometry(torch.float32)
         self.register_buffer("bev_points_base", bev_points, persistent=False)
         self.register_buffer("xy_channels_base", xy_channels, persistent=False)
+        left_grid, left_valid = self._build_static_projection(
+            "left", self.static_left_feature_hw, self.static_left_image_hw
+        )
+        right_grid, right_valid = self._build_static_projection(
+            "right", self.static_right_feature_hw, self.static_right_image_hw
+        )
+        self.register_buffer("left_static_grid", left_grid, persistent=False)
+        self.register_buffer("left_static_valid", left_valid, persistent=False)
+        self.register_buffer("right_static_grid", right_grid, persistent=False)
+        self.register_buffer("right_static_valid", right_valid, persistent=False)
 
     def _build_static_bev_geometry(
         self, dtype: torch.dtype
@@ -924,26 +945,46 @@ class DualCameraBEVProjector(nn.Module):
         batch_size = left_features.shape[0]
         device = left_features.device
         calc_dtype = torch.float32
-        bev_points = self._build_bev_points(batch_size, device, calc_dtype)
-
-        left_grid, left_valid = self._project_bev_points_to_feature_grid(
-            bev_points,
-            "left",
+        if self._can_use_static_projection(
+            data,
             left_features.shape[2:4],
-            left_image_hw,
-            data,
-            device,
-            calc_dtype,
-        )
-        right_grid, right_valid = self._project_bev_points_to_feature_grid(
-            bev_points,
-            "right",
             right_features.shape[2:4],
+            left_image_hw,
             right_image_hw,
-            data,
-            device,
-            calc_dtype,
-        )
+        ):
+            left_grid = self.left_static_grid.to(device=device, dtype=calc_dtype).expand(
+                batch_size, -1, -1, -1
+            )
+            left_valid = self.left_static_valid.to(
+                device=device, dtype=calc_dtype
+            ).expand(batch_size, -1, -1, -1)
+            right_grid = self.right_static_grid.to(
+                device=device, dtype=calc_dtype
+            ).expand(batch_size, -1, -1, -1)
+            right_valid = self.right_static_valid.to(
+                device=device, dtype=calc_dtype
+            ).expand(batch_size, -1, -1, -1)
+        else:
+            bev_points = self._build_bev_points(batch_size, device, calc_dtype)
+
+            left_grid, left_valid = self._project_bev_points_to_feature_grid(
+                bev_points,
+                "left",
+                left_features.shape[2:4],
+                left_image_hw,
+                data,
+                device,
+                calc_dtype,
+            )
+            right_grid, right_valid = self._project_bev_points_to_feature_grid(
+                bev_points,
+                "right",
+                right_features.shape[2:4],
+                right_image_hw,
+                data,
+                device,
+                calc_dtype,
+            )
 
         left_bev = F.grid_sample(
             left_features,
@@ -972,17 +1013,69 @@ class DualCameraBEVProjector(nn.Module):
         )
         return self.fuser(bev_input)
 
+    def _build_static_projection(
+        self,
+        camera_name: str,
+        feature_hw: tuple[int, int],
+        image_hw: tuple[int, int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        bev_points = self.bev_points_base.unsqueeze(0)
+        return self._project_bev_points_to_feature_grid(
+            bev_points,
+            camera_name,
+            feature_hw,
+            image_hw,
+            data=None,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+    @staticmethod
+    def _shape_tuple(value: tuple[int, int] | torch.Size) -> tuple[int, int]:
+        return int(value[0]), int(value[1])
+
+    def _can_use_static_projection(
+        self,
+        data: dict[str, torch.Tensor] | None,
+        left_feature_hw: tuple[int, int] | torch.Size,
+        right_feature_hw: tuple[int, int] | torch.Size,
+        left_image_hw: tuple[int, int] | torch.Size,
+        right_image_hw: tuple[int, int] | torch.Size,
+    ) -> bool:
+        if self._shape_tuple(left_feature_hw) != self.static_left_feature_hw:
+            return False
+        if self._shape_tuple(right_feature_hw) != self.static_right_feature_hw:
+            return False
+        if self._shape_tuple(left_image_hw) != self.static_left_image_hw:
+            return False
+        if self._shape_tuple(right_image_hw) != self.static_right_image_hw:
+            return False
+        if data is None:
+            return True
+        for camera_name in ("left", "right"):
+            for key in (
+                f"{camera_name}_camera_intrinsics",
+                f"{camera_name}_intrinsics",
+                f"rgb_{camera_name}_intrinsics",
+                f"{camera_name}_camera_T_cam_ego",
+                f"{camera_name}_T_cam_ego",
+                f"rgb_{camera_name}_T_cam_ego",
+            ):
+                if key in data:
+                    return False
+        return True
+
     def _build_bev_points(
         self, batch_size: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
         points = self.bev_points_base.to(device=device, dtype=dtype)
-        return points.unsqueeze(0).repeat(batch_size, 1, 1)
+        return points.unsqueeze(0).expand(batch_size, -1, -1)
 
     def _build_normalized_xy_channels(
         self, batch_size: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
         xy = self.xy_channels_base.to(device=device, dtype=dtype)
-        return xy.unsqueeze(0).repeat(batch_size, 1, 1, 1)
+        return xy.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
     def _project_bev_points_to_feature_grid(
         self,

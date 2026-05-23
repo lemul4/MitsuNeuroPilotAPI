@@ -976,6 +976,10 @@ class TrainingConfig(BaseConfig):
     # Parameters for torchvision.ops.sigmoid_focal_loss.
     semantic_focal_loss_alpha = 0.25
     semantic_focal_loss_gamma = 2.0
+    # Extra class loss weights for small vulnerable road users.
+    semantic_pedestrian_loss_weight = 2.0
+    semantic_biker_loss_weight = 2.0
+    semantic_traffic_light_loss_weight = 2.0
     # Total number of semantic segmentation classes.
     num_semantic_classes = len(TransfuserSemanticSegmentationClass)
     # Resolution at which the perspective auxiliary tasks are predicted
@@ -999,6 +1003,15 @@ class TrainingConfig(BaseConfig):
     # Parameters for torchvision.ops.sigmoid_focal_loss.
     bev_semantic_focal_loss_alpha = 0.25
     bev_semantic_focal_loss_gamma = 2.0
+    # Extra class loss weights for small vulnerable road users.
+    bev_semantic_walker_loss_weight = 2.0
+    bev_semantic_biker_loss_weight = 2.0
+    bev_semantic_traffic_light_loss_weight = 2.0
+
+    # Extra CenterNet detection loss weights for vulnerable users and traffic lights.
+    center_net_walker_loss_weight = 2.0
+    center_net_biker_loss_weight = 2.0
+    center_net_traffic_light_loss_weight = 2.0
 
     @property
     def use_bev_broken_lane_markers(self):

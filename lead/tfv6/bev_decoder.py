@@ -1,14 +1,20 @@
 import torch
 import torch.nn as nn
 from beartype import beartype
-from torch.nn import functional as F
 
 import lead.common.common_utils as common_utils
-from lead.common.constants import SOURCE_DATASET_NAME_MAP, SourceDataset
+from lead.common.constants import (
+    SOURCE_DATASET_NAME_MAP,
+    SourceDataset,
+    TransfuserBEVSemanticClass,
+)
 from lead.training import metrics
 from lead.training.config_training import TrainingConfig
 from lead.tfv6.losses import (
+    bev_cross_entropy_loss_scalar,
+    bev_focal_loss_scalar,
     maybe_compile_focal_loss,
+    maybe_compile_loss,
     sigmoid_focal_loss_one_hot_label_ignore,
 )
 
@@ -39,6 +45,42 @@ class BEVDecoder(nn.Module):
             sigmoid_focal_loss_one_hot_label_ignore,
             enabled=bool(self.config.compile),
             mode=str(self.config.compile_mode).lower(),
+        )
+        self._bev_semantic_focal_scalar_loss = maybe_compile_loss(
+            bev_focal_loss_scalar,
+            enabled=bool(self.config.compile),
+            mode=str(self.config.compile_mode).lower(),
+        )
+        self._bev_semantic_ce_scalar_loss = maybe_compile_loss(
+            bev_cross_entropy_loss_scalar,
+            enabled=bool(self.config.compile),
+            mode=str(self.config.compile_mode).lower(),
+        )
+        bev_class_weights = torch.ones(self.num_classes, dtype=torch.float32)
+        walker_idx = int(TransfuserBEVSemanticClass.WALKER)
+        biker_idx = int(TransfuserBEVSemanticClass.BIKER)
+        traffic_light_indices = (
+            int(TransfuserBEVSemanticClass.TRAFFIC_GREEN),
+            int(TransfuserBEVSemanticClass.TRAFFIC_RED_NORMAL),
+            int(TransfuserBEVSemanticClass.TRAFFIC_RED_NOT_NORMAL),
+        )
+        if walker_idx < self.num_classes:
+            bev_class_weights[walker_idx] = float(
+                self.config.bev_semantic_walker_loss_weight
+            )
+        if biker_idx < self.num_classes:
+            bev_class_weights[biker_idx] = float(
+                self.config.bev_semantic_biker_loss_weight
+            )
+        for traffic_light_idx in traffic_light_indices:
+            if traffic_light_idx < self.num_classes:
+                bev_class_weights[traffic_light_idx] = float(
+                    self.config.bev_semantic_traffic_light_loss_weight
+                )
+        self.register_buffer(
+            "bev_semantic_class_weights",
+            bev_class_weights,
+            persistent=False,
         )
 
         self.net = nn.Sequential(
@@ -126,27 +168,27 @@ class BEVDecoder(nn.Module):
             pred = pred.float()
             loss_type = str(self.config.bev_semantic_loss_type).lower()
             if loss_type == "focal":
-                loss_bev_per_sample = self._bev_semantic_focal_loss_per_pixel(
+                loss_bev = self._bev_semantic_focal_scalar_loss(
                     pred,
-                    visible_label,
+                    label,
+                    source_mask,
+                    self.valid_bev_pixels,
+                    self.bev_semantic_class_weights,
+                    float(self.config.bev_semantic_focal_loss_alpha),
+                    float(self.config.bev_semantic_focal_loss_gamma),
                 )
             elif loss_type == "cross_entropy":
-                loss_bev_per_sample = F.cross_entropy(
+                loss_bev = self._bev_semantic_ce_scalar_loss(
                     pred,
-                    visible_label,
-                    reduction="none",
-                    ignore_index=-1,  # Ignore the invisible pixels in the back
-                )  # (B, H, W)
+                    label,
+                    source_mask,
+                    self.valid_bev_pixels,
+                    self.bev_semantic_class_weights,
+                )
             else:
                 raise ValueError(
                     f"Unknown bev_semantic_loss_type: {self.config.bev_semantic_loss_type!r}"
                 )
-            loss_bev_per_sample = loss_bev_per_sample.mean(dim=(1, 2))  # (B,)
-
-            # Mask out losses from other data sources
-            loss_bev = (
-                loss_bev_per_sample * source_mask
-            ).sum() / source_mask.sum().clamp(min=1)
 
         if data.get("compute_additional_metrics", False):
             metric_prefix = f"{prefix}" if prefix else ""
@@ -168,7 +210,10 @@ class BEVDecoder(nn.Module):
     ) -> torch.Tensor:
         alpha = float(self.config.bev_semantic_focal_loss_alpha)
         gamma = float(self.config.bev_semantic_focal_loss_gamma)
-        return self._bev_semantic_focal_loss(pred, label, alpha, gamma, -1)
+        per_pixel = self._bev_semantic_focal_loss(pred, label, alpha, gamma, -1)
+        return per_pixel * self.bev_semantic_class_weights.to(dtype=per_pixel.dtype)[
+            label.clamp(min=0)
+        ]
 
     def forward(self, bev_feature_grid: torch.Tensor, log: dict):
         """Forward pass for the BEV decoder.

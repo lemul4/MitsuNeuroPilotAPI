@@ -34,6 +34,7 @@ class TFv6(nn.Module):
         self.config = config
         self.log = {}
         self._compiled_forward_core = None
+        self._compiled_forward_core_is_dual_static = False
         self.use_carla_data = bool(self.config.use_carla_data)
         self.use_navsim_data = bool(self.config.use_navsim_data)
         self.use_semantic = bool(self.config.use_semantic)
@@ -129,8 +130,13 @@ class TFv6(nn.Module):
         backend: str = "inductor",
         mode: str = "max-autotune-no-cudagraphs",
     ) -> None:
+        forward_core = self._forward_core
+        self._compiled_forward_core_is_dual_static = False
+        if self._can_use_dual_front_static_core():
+            forward_core = self._forward_dual_front_static_core
+            self._compiled_forward_core_is_dual_static = True
         self._compiled_forward_core = torch.compile(
-            self._forward_core,
+            forward_core,
             fullgraph=fullgraph,
             dynamic=dynamic,
             backend=backend,
@@ -139,8 +145,29 @@ class TFv6(nn.Module):
 
     def forward(self, data: dict[str, typing.Any]) -> Prediction:
         self.log = {}
-        forward_core = self._compiled_forward_core or self._forward_core
-        core_data = self._prepare_forward_data(data)
+        if self._can_use_dual_front_static_core() and not self._has_dynamic_camera_data(
+            data
+        ):
+            left = data[self.backbone.left_camera_key].to(
+                self.device, dtype=self.backbone.input_dtype, non_blocking=True
+            )
+            right = data[self.backbone.right_camera_key].to(
+                self.device, dtype=self.backbone.input_dtype, non_blocking=True
+            )
+            forward_core = (
+                self._compiled_forward_core
+                if self._compiled_forward_core_is_dual_static
+                else self._forward_dual_front_static_core
+            )
+            core_outputs = forward_core(left, right)
+        else:
+            forward_core = (
+                self._compiled_forward_core
+                if not self._compiled_forward_core_is_dual_static
+                else self._forward_core
+            )
+            core_data = self._prepare_forward_data(data)
+            core_outputs = forward_core(core_data)
         (
             pred_route,
             pred_future_waypoints,
@@ -155,7 +182,7 @@ class TFv6(nn.Module):
             radar_predictions,
             pred_bounding_box_navsim_tensors,
             pred_bev_semantic_navsim,
-        ) = forward_core(core_data)
+        ) = core_outputs
         pred_bounding_box = self._make_center_net_prediction(
             pred_bounding_box_tensors, self.config
         )
@@ -180,6 +207,71 @@ class TFv6(nn.Module):
             pred_bounding_box_navsim=pred_bounding_box_navsim,
             pred_bev_semantic_navsim=pred_bev_semantic_navsim,
             pred_headings=pred_headings,
+        )
+
+    def _can_use_dual_front_static_core(self) -> bool:
+        return (
+            self.backbone.backbone_sensor_mode == "dual_front_camera"
+            and self.use_carla_data
+            and not self.use_navsim_data
+            and not self.radar_detection
+            and not self.use_planning_decoder
+        )
+
+    @staticmethod
+    def _has_dynamic_camera_data(data: dict[str, typing.Any]) -> bool:
+        for camera_name in ("left", "right"):
+            for key in (
+                f"{camera_name}_camera_intrinsics",
+                f"{camera_name}_intrinsics",
+                f"rgb_{camera_name}_intrinsics",
+                f"{camera_name}_camera_T_cam_ego",
+                f"{camera_name}_T_cam_ego",
+                f"rgb_{camera_name}_T_cam_ego",
+            ):
+                if key in data:
+                    return True
+        return False
+
+    def _forward_dual_front_static_core(
+        self,
+        left: torch.Tensor,
+        right: torch.Tensor,
+    ) -> tuple:
+        pred_semantic = pred_depth = pred_bounding_box = pred_bev_semantic = None
+        bev_features, image_features = self.backbone._forward_dual_camera(
+            left,
+            right,
+            data=None,
+        )
+
+        if self.use_semantic:
+            pred_semantic = self.semantic_decoder(None, image_features, None)
+        if self.use_depth:
+            pred_depth = self.depth_decoder(None, image_features, None)
+
+        bev_feature_grid = self.backbone.top_down(bev_features)
+        if self.detect_boxes:
+            pred_bounding_box = self.center_net_decoder.forward_tensors(
+                bev_feature_grid
+            )
+        if self.use_bev_semantic:
+            pred_bev_semantic = self.bev_semantic_decoder(bev_feature_grid, None)
+
+        return (
+            None,
+            None,
+            None,
+            None,
+            None,
+            pred_semantic,
+            pred_depth,
+            pred_bounding_box,
+            pred_bev_semantic,
+            None,
+            None,
+            None,
+            None,
         )
 
     def _forward_core(self, data: dict[str, typing.Any]) -> tuple:
