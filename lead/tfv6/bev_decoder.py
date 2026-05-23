@@ -140,7 +140,6 @@ class BEVDecoder(nn.Module):
         # Add dataset name prefix
         loss[f"{prefix}loss_bev_semantic"] = loss_bev
 
-    @beartype
     def forward(self, bev_feature_grid: torch.Tensor, log: dict):
         """Forward pass for the BEV decoder.
 

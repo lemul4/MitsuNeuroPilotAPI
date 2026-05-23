@@ -36,6 +36,9 @@ class PerspectiveDecoder(nn.Module):
         self.config = config
         self.device = device
         self.source_data = source_data
+        self.expected_h = int(self.config.final_image_height)
+        self.expected_w = int(self.config.final_image_width)
+        self.is_depth = self.modality == "depth"
         self.scale_factor_0 = (
             perspective_upsample_factor // self.config.deconv_scale_factor_0
         )
@@ -193,8 +196,8 @@ class PerspectiveDecoder(nn.Module):
         x = self.deconv3(x)
 
         # Ensure output size matches expected size
-        expected_h = self.config.final_image_height
-        expected_w = self.config.final_image_width
+        expected_h = self.expected_h
+        expected_w = self.expected_w
         if x.shape[2] != expected_h or x.shape[3] != expected_w:
             height_error = abs(x.shape[2] - expected_h) / expected_h * 100
             width_error = abs(x.shape[3] - expected_w) / expected_w * 100
@@ -206,6 +209,6 @@ class PerspectiveDecoder(nn.Module):
                 x, size=(expected_h, expected_w), mode="bilinear", align_corners=False
             )
 
-        if self.modality == "depth":
+        if self.is_depth:
             x = x.squeeze(1)
         return x

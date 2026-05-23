@@ -33,6 +33,16 @@ class TFv6(nn.Module):
         self.device = device
         self.config = config
         self.log = {}
+        self._compiled_forward_core = None
+        self.use_carla_data = bool(self.config.use_carla_data)
+        self.use_navsim_data = bool(self.config.use_navsim_data)
+        self.use_semantic = bool(self.config.use_semantic)
+        self.use_depth = bool(self.config.use_depth)
+        self.use_bev_semantic = bool(self.config.use_bev_semantic)
+        self.detect_boxes = bool(self.config.detect_boxes)
+        self.radar_detection = bool(self.config.radar_detection)
+        self.use_radar_detection = bool(self.config.use_radar_detection)
+        self.use_planning_decoder = bool(self.config.use_planning_decoder)
 
         self.backbone = TransfuserBackbone(self.device, self.config)
 
@@ -112,75 +122,46 @@ class TFv6(nn.Module):
                     device=self.device,
                 ).to(self.device)
 
-    @beartype
+    def prepare_compile(
+        self,
+        fullgraph: bool = True,
+        dynamic: bool = False,
+        backend: str = "inductor",
+        mode: str = "max-autotune",
+    ) -> None:
+        self._compiled_forward_core = torch.compile(
+            self._forward_core,
+            fullgraph=fullgraph,
+            dynamic=dynamic,
+            backend=backend,
+            mode=mode,
+        )
+
     def forward(self, data: dict[str, typing.Any]) -> Prediction:
         self.log = {}
-        pred_route = pred_future_waypoints = pred_target_speed_distribution = (
-            pred_target_speed_scalar
-        ) = pred_headings = None
-        pred_semantic = pred_depth = pred_bounding_box = pred_bev_semantic = None
-        pred_bounding_box_navsim = pred_bev_semantic_navsim = None
+        forward_core = self._compiled_forward_core or self._forward_core
+        (
+            pred_route,
+            pred_future_waypoints,
+            pred_target_speed_distribution,
+            pred_target_speed_scalar,
+            pred_headings,
+            pred_semantic,
+            pred_depth,
+            pred_bounding_box_tensors,
+            pred_bev_semantic,
+            radar_features,
+            radar_predictions,
+            pred_bounding_box_navsim_tensors,
+            pred_bev_semantic_navsim,
+        ) = forward_core(data)
+        pred_bounding_box = self._make_center_net_prediction(
+            pred_bounding_box_tensors, self.config
+        )
+        pred_bounding_box_navsim = self._make_center_net_prediction(
+            pred_bounding_box_navsim_tensors, self.config
+        )
 
-        # Backbone
-        bev_features, image_features = self.backbone(data)
-
-        # Radar detection
-        radar_features = radar_predictions = None
-        if self.config.use_carla_data and self.config.radar_detection:
-            radar_features, radar_predictions = self.radar_detector(bev_features, data)
-
-        # Planning heads
-        if self.config.use_planning_decoder:
-            planner_radar_features = radar_features
-            planner_radar_predictions = radar_predictions
-            if not self.config.use_radar_detection or not self.config.use_carla_data:
-                planner_radar_features = planner_radar_predictions = None
-            (
-                pred_route,
-                pred_future_waypoints,
-                pred_target_speed_distribution,
-                pred_target_speed_scalar,
-                pred_headings,
-            ) = self.planning_decoder(
-                bev_features,
-                planner_radar_features,
-                planner_radar_predictions,
-                data,
-                log=self.log,
-            )
-
-        # Semantic segmentation forward pass
-        if self.config.use_carla_data and self.config.use_semantic:
-            pred_semantic = self.semantic_decoder(data, image_features, self.log)
-
-        # Depth estimation forward pass
-        if self.config.use_carla_data and self.config.use_depth:
-            pred_depth = self.depth_decoder(data, image_features, self.log)
-
-        # Bounding box detection forward pass
-        bev_feature_grid = self.backbone.top_down(bev_features)
-        if self.config.detect_boxes:
-            if self.config.use_carla_data:
-                pred_bounding_box = self.center_net_decoder(
-                    data, bev_feature_grid, self.log
-                )
-            if self.config.use_navsim_data:
-                pred_bounding_box_navsim = self.center_net_decoder_navsim(
-                    data, bev_feature_grid, self.log
-                )
-
-        # BEV semantic segmentation forward pass
-        if self.config.use_bev_semantic:
-            if self.config.use_carla_data:
-                pred_bev_semantic = self.bev_semantic_decoder(
-                    bev_feature_grid, self.log
-                )
-            if self.config.use_navsim_data:
-                pred_bev_semantic_navsim = self.bev_semantic_decoder_navsim(
-                    bev_feature_grid, self.log
-                )
-
-        # Collect predictions
         return Prediction(
             # Planning prediction
             pred_future_waypoints=pred_future_waypoints,
@@ -199,6 +180,95 @@ class TFv6(nn.Module):
             pred_bev_semantic_navsim=pred_bev_semantic_navsim,
             pred_headings=pred_headings,
         )
+
+    def _forward_core(self, data: dict[str, typing.Any]) -> tuple:
+        pred_route = pred_future_waypoints = pred_target_speed_distribution = (
+            pred_target_speed_scalar
+        ) = pred_headings = None
+        pred_semantic = pred_depth = pred_bounding_box = pred_bev_semantic = None
+        pred_bounding_box_navsim = pred_bev_semantic_navsim = None
+
+        # Backbone
+        bev_features, image_features = self.backbone(data)
+
+        # Radar detection
+        radar_features = radar_predictions = None
+        if self.use_carla_data and self.radar_detection:
+            radar_features, radar_predictions = self.radar_detector(bev_features, data)
+
+        # Planning heads
+        if self.use_planning_decoder:
+            planner_radar_features = radar_features
+            planner_radar_predictions = radar_predictions
+            if not self.use_radar_detection or not self.use_carla_data:
+                planner_radar_features = planner_radar_predictions = None
+            (
+                pred_route,
+                pred_future_waypoints,
+                pred_target_speed_distribution,
+                pred_target_speed_scalar,
+                pred_headings,
+            ) = self.planning_decoder(
+                bev_features,
+                planner_radar_features,
+                planner_radar_predictions,
+                data,
+                log=None,
+            )
+
+        # Semantic segmentation forward pass
+        if self.use_carla_data and self.use_semantic:
+            pred_semantic = self.semantic_decoder(data, image_features, None)
+
+        # Depth estimation forward pass
+        if self.use_carla_data and self.use_depth:
+            pred_depth = self.depth_decoder(data, image_features, None)
+
+        # Bounding box detection forward pass
+        bev_feature_grid = self.backbone.top_down(bev_features)
+        if self.detect_boxes:
+            if self.use_carla_data:
+                pred_bounding_box = self.center_net_decoder.forward_tensors(
+                    bev_feature_grid
+                )
+            if self.use_navsim_data:
+                pred_bounding_box_navsim = self.center_net_decoder_navsim.forward_tensors(
+                    bev_feature_grid
+                )
+
+        # BEV semantic segmentation forward pass
+        if self.use_bev_semantic:
+            if self.use_carla_data:
+                pred_bev_semantic = self.bev_semantic_decoder(bev_feature_grid, None)
+            if self.use_navsim_data:
+                pred_bev_semantic_navsim = self.bev_semantic_decoder_navsim(
+                    bev_feature_grid, None
+                )
+
+        return (
+            pred_route,
+            pred_future_waypoints,
+            pred_target_speed_distribution,
+            pred_target_speed_scalar,
+            pred_headings,
+            pred_semantic,
+            pred_depth,
+            pred_bounding_box,
+            pred_bev_semantic,
+            radar_features,
+            radar_predictions,
+            pred_bounding_box_navsim,
+            pred_bev_semantic_navsim,
+        )
+
+    def _make_center_net_prediction(
+        self,
+        tensors: tuple[torch.Tensor | None, ...] | None,
+        config: TrainingConfig,
+    ) -> CenterNetBoundingBoxPrediction | None:
+        if tensors is None:
+            return None
+        return CenterNetBoundingBoxPrediction(*tensors, config=config)
 
     @beartype
     def compute_loss(

@@ -360,6 +360,11 @@ class TrainingConfig(BaseConfig):
         return True
 
     @overridable_property
+    def compile_strategy(self):
+        """Compilation strategy: none, core, or module."""
+        return "core"
+
+    @overridable_property
     def channel_last(self):
         """If true use channel last memory format for input tensors."""
         return True

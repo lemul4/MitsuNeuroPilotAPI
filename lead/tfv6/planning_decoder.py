@@ -23,6 +23,7 @@ class PlanningDecoder(nn.Module):
         super().__init__()
         self.device = device
         self.config = config
+        self.input_dtype = config.torch_float_type
         self.planning_context_encoder = PlanningContextEncoder(
             config=self.config,
             input_bev_channels=input_bev_channels,
@@ -80,7 +81,16 @@ class PlanningDecoder(nn.Module):
         self.tp_normalization_constants = torch.tensor(
             self.config.target_points_normalization_constants,
             device=self.device,
-            dtype=self.config.torch_float_type,
+            dtype=self.input_dtype,
+        )
+        self.register_buffer(
+            "target_speed_class_values",
+            torch.tensor(
+                self.config.target_speed_classes,
+                device=self.device,
+                dtype=self.input_dtype,
+            ),
+            persistent=False,
         )
 
         self.reset_parameters()
@@ -88,7 +98,6 @@ class PlanningDecoder(nn.Module):
     def reset_parameters(self):
         nn.init.uniform_(self.query)
 
-    @beartype
     def forward(
         self,
         bev_features: jt.Float[torch.Tensor, "bs bev_dim height_bev width_bev"],
@@ -159,9 +168,9 @@ class PlanningDecoder(nn.Module):
 
             with torch.amp.autocast(device_type="cuda", enabled=False):
                 target_speed_softmax = torch.softmax(target_speed_dist.float(), dim=-1)
-                target_speed_scalar = decode_two_hot(
-                    target_speed_softmax, self.config.target_speed_classes, self.device
-                )
+                target_speed_scalar = (
+                    target_speed_softmax * self.target_speed_class_values.float()
+                ).sum(axis=-1)
 
         return (
             route,
@@ -311,7 +320,6 @@ class PlanningDecoder(nn.Module):
                     )
 
 
-@beartype
 def decode_two_hot(
     two_hot_label: jt.Float[torch.Tensor, "B C"],
     class_values: list[float],
@@ -394,6 +402,7 @@ class PlanningContextEncoder(nn.Module):
         super().__init__()
         self.device = device
         self.config: TrainingConfig = config
+        self.input_dtype = config.torch_float_type
 
         self.num_status_tokens = 0
 
@@ -471,13 +480,12 @@ class PlanningContextEncoder(nn.Module):
         self.target_points_normalization_constants = torch.tensor(
             self.config.target_points_normalization_constants,
             device=self.device,
-            dtype=self.config.torch_float_type,
+            dtype=self.input_dtype,
         )
 
     def reset_parameters(self):
         nn.init.uniform_(self.status_pos_embedding)
 
-    @beartype
     def forward(
         self,
         bev_features: jt.Float[torch.Tensor, "B C H W"],
@@ -501,11 +509,11 @@ class PlanningContextEncoder(nn.Module):
             velocity = (
                 data["speed"]
                 .reshape(-1, 1)
-                .to(self.device, dtype=self.config.torch_float_type)
+                .to(self.device, dtype=self.input_dtype)
             )
         if self.config.use_discrete_command:
             command = data["command"].to(
-                self.device, dtype=self.config.torch_float_type
+                self.device, dtype=self.input_dtype
             )
 
         status_tokens = []
@@ -522,9 +530,7 @@ class PlanningContextEncoder(nn.Module):
         # Encode acceleration
         if self.config.use_acceleration:
             acceleration = (
-                data["acceleration"]
-                .reshape(-1, 1)
-                .to(self.device, dtype=self.config.torch_float_type)
+                data["acceleration"].reshape(-1, 1).to(self.device, dtype=self.input_dtype)
             )
             acceleration_token = self.acceleration_encoder(
                 acceleration / self.config.max_acceleration
@@ -543,7 +549,7 @@ class PlanningContextEncoder(nn.Module):
         # Encode target point
         if self.config.use_tp:
             target_point = data["target_point"].to(
-                self.device, dtype=self.config.torch_float_type, non_blocking=True
+                self.device, dtype=self.input_dtype, non_blocking=True
             )
             target_point = target_point / self.target_points_normalization_constants
             tp_token = self.tp_encoder(target_point).reshape(
@@ -553,7 +559,7 @@ class PlanningContextEncoder(nn.Module):
 
         if self.config.use_previous_tp:
             previous_tp = data["target_point_previous"].to(
-                self.device, dtype=self.config.torch_float_type, non_blocking=True
+                self.device, dtype=self.input_dtype, non_blocking=True
             )
             previous_tp = previous_tp / self.target_points_normalization_constants
             previous_tp_token = self.tp_encoder(previous_tp).reshape(
@@ -563,7 +569,7 @@ class PlanningContextEncoder(nn.Module):
 
         if self.config.use_next_tp:
             next_tp = data["target_point_next"].to(
-                self.device, dtype=self.config.torch_float_type, non_blocking=True
+                self.device, dtype=self.input_dtype, non_blocking=True
             )
             next_tp = next_tp / self.target_points_normalization_constants
             next_tp_token = self.tp_encoder(next_tp).reshape(
@@ -642,6 +648,7 @@ class PositionEmbeddingSine(nn.Module):
     ):
         super().__init__()
         self.config = config
+        self.output_dtype = config.torch_float_type
         self.num_pos_feats = num_pos_feats
         self.temperature = temperature
         self.normalize = normalize
@@ -676,4 +683,4 @@ class PositionEmbeddingSine(nn.Module):
             (pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4
         ).flatten(3)
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
-        return pos.to(self.config.torch_float_type).contiguous()
+        return pos.to(self.output_dtype).contiguous()

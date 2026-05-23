@@ -47,6 +47,7 @@ class CenterNetDecoder(nn.Module):
         self.config = config
         self.num_classes = num_classes
         self.source_data = source_data
+        self.training_used_lidar_steps = int(config.training_used_lidar_steps)
 
         self.heatmap_head: nn.Sequential = self._build_head(
             config.bb_input_channel, num_classes
@@ -57,7 +58,7 @@ class CenterNetDecoder(nn.Module):
             config.bb_input_channel, config.num_dir_bins
         )
         self.yaw_res_head: nn.Sequential = self._build_head(config.bb_input_channel, 1)
-        if config.training_used_lidar_steps > 1:
+        if self.training_used_lidar_steps > 1:
             self.velocity_head: nn.Sequential = self._build_head(
                 config.bb_input_channel, 1
             )
@@ -78,7 +79,6 @@ class CenterNetDecoder(nn.Module):
         )
         return layer
 
-    @beartype
     def forward(
         self, data: dict, bev_feature_grid: torch.Tensor, log: dict
     ) -> CenterNetBoundingBoxPrediction:
@@ -92,26 +92,42 @@ class CenterNetDecoder(nn.Module):
         Returns:
             Object containing all predictions with proper shapes.
         """
+        return CenterNetBoundingBoxPrediction(
+            *self.forward_tensors(bev_feature_grid),
+            config=self.config,
+        )
+
+    def forward_tensors(
+        self, bev_feature_grid: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         center_heatmap_pred: torch.Tensor = self.heatmap_head(bev_feature_grid)
         wh_pred: torch.Tensor = self.wh_head(bev_feature_grid)
         offset_pred: torch.Tensor = self.offset_head(bev_feature_grid)
         yaw_class_pred: torch.Tensor = self.yaw_class_head(bev_feature_grid)
         yaw_res_pred: torch.Tensor = self.yaw_res_head(bev_feature_grid)
         velocity_pred: torch.Tensor = None
-        if self.config.training_used_lidar_steps > 1:
+        if self.training_used_lidar_steps > 1:
             velocity_pred = self.velocity_head(bev_feature_grid)
         brake_pred: torch.Tensor = None  # Not used in current implementation
 
-        return CenterNetBoundingBoxPrediction(
-            center_heatmap_logit_pred=center_heatmap_pred,
-            center_heatmap_pred=center_heatmap_pred.float().sigmoid(),
-            wh_pred=wh_pred,
-            offset_pred=offset_pred,
-            yaw_class_pred=yaw_class_pred,
-            yaw_res_pred=yaw_res_pred,
-            velocity_pred=velocity_pred,
-            brake_pred=brake_pred,
-            config=self.config,
+        return (
+            center_heatmap_pred,
+            center_heatmap_pred.float().sigmoid(),
+            wh_pred,
+            offset_pred,
+            yaw_class_pred,
+            yaw_res_pred,
+            velocity_pred,
+            brake_pred,
         )
 
     @beartype

@@ -19,6 +19,7 @@ class RadarDetector(nn.Module):
         super().__init__()
         self.config = config
         self.device = device
+        self.input_dtype = config.torch_float_type
         self.num_radar_sensors = self.config.num_radar_sensors  # 4 radar sensors
 
         # Encoder
@@ -81,9 +82,8 @@ class RadarDetector(nn.Module):
                 self.config.max_y_meter - self.config.min_y_meter,
                 self.config.max_speed,
             ]
-        ).to(device=self.device, dtype=self.config.torch_float_type)
+        ).to(device=self.device, dtype=self.input_dtype)
 
-    @beartype
     def forward(
         self, bev_tokens: jt.Float[torch.Tensor, "B D H W"], data: dict
     ) -> tuple[
@@ -100,7 +100,7 @@ class RadarDetector(nn.Module):
         """
         # Load data
         radars = data["radar"].to(
-            self.device, dtype=self.config.torch_float_type
+            self.device, dtype=self.input_dtype
         )  # (B, 300, 5)
 
         # Prepare context
@@ -108,7 +108,7 @@ class RadarDetector(nn.Module):
         ego_vel_token = self.ego_vel_proj(
             data["speed"]
             .reshape(-1, 1)
-            .to(self.device, dtype=self.config.torch_float_type)
+            .to(self.device, dtype=self.input_dtype)
             / self.config.max_speed
         ).unsqueeze(1)  # (B, 1, D)
         radar_tokens = self._tokenize_radar(bev_tokens, radars)  # (B, 300, D)
@@ -155,7 +155,6 @@ class RadarDetector(nn.Module):
         radar_predictions = torch.cat([radar_predictions, logits], dim=-1)  # (B, Q, 4)
         return radar_Features, radar_predictions
 
-    @beartype
     def _tokenize_radar(
         self,
         bev_tokens: jt.Float[torch.Tensor, "B D H W"],
@@ -178,7 +177,7 @@ class RadarDetector(nn.Module):
         # Building features for each radar point
         sensor_features = torch.nn.functional.one_hot(
             sensor_id.to(torch.int64).squeeze(-1), num_classes=self.num_radar_sensors
-        ).to(self.device, dtype=self.config.torch_float_type)  # (B, 300, 4)
+        ).to(self.device, dtype=self.input_dtype)  # (B, 300, 4)
         radar_features = fn.bev_grid_sample(bev_tokens, pos, self.config)  # (B, 300, D)
         rel_vel_features = rel_vel / self.config.max_speed
         features = torch.cat(

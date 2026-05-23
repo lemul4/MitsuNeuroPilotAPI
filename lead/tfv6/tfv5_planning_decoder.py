@@ -18,6 +18,7 @@ class TFv5PlanningDecoder(nn.Module):
         super().__init__()
         self.device = device
         self.config = config
+        self.input_dtype = config.torch_float_type
         self.planning_context_encoder = PlanningContextEncoder(
             config=self.config,
             input_bev_channels=input_bev_channels,
@@ -75,7 +76,6 @@ class TFv5PlanningDecoder(nn.Module):
     def reset_parameters(self):
         nn.init.uniform_(self.query)
 
-    @beartype
     def forward(
         self,
         bev_features: torch.Tensor,
@@ -113,7 +113,7 @@ class TFv5PlanningDecoder(nn.Module):
             values[:, -1],
         )
         target_point = data["target_point"].to(
-            device=self.device, dtype=self.config.torch_float_type, non_blocking=True
+            device=self.device, dtype=self.input_dtype, non_blocking=True
         )
         hidden_state = self.tp_encoder(target_point).unsqueeze(0)
 
@@ -200,7 +200,6 @@ class TFv5PlanningDecoder(nn.Module):
             log["metric/tf_fde"] = log["metric/waypoints_fde"]
 
 
-@beartype
 def decode_two_hot(
     two_hot_label: jt.Float[torch.Tensor, "B C"], config: TrainingConfig
 ) -> jt.Float[torch.Tensor, " B"]:
@@ -282,6 +281,7 @@ class PlanningContextEncoder(nn.Module):
         super().__init__()
         self.device = device
         self.config = config
+        self.input_dtype = config.torch_float_type
 
         self.num_status_tokens = 0
 
@@ -314,7 +314,6 @@ class PlanningContextEncoder(nn.Module):
     def reset_parameters(self):
         nn.init.uniform_(self.status_pos_embedding)
 
-    @beartype
     def forward(
         self, bev_features: jt.Float[torch.Tensor, "B C H W"], data: dict, log: dict
     ) -> jt.Float[torch.Tensor, "B N D"]:
@@ -331,11 +330,11 @@ class PlanningContextEncoder(nn.Module):
             velocity = (
                 data["speed"]
                 .reshape(-1, 1)
-                .to(self.device, dtype=self.config.torch_float_type)
+                .to(self.device, dtype=self.input_dtype)
             )
         if self.config.use_discrete_command:
             command = data["command"].to(
-                self.device, dtype=self.config.torch_float_type
+                self.device, dtype=self.input_dtype
             )
 
         status_tokens = []
@@ -402,6 +401,7 @@ class PositionEmbeddingSine(nn.Module):
     ):
         super().__init__()
         self.config = config
+        self.output_dtype = config.torch_float_type
         self.num_pos_feats = num_pos_feats
         self.temperature = temperature
         self.normalize = normalize
@@ -436,4 +436,4 @@ class PositionEmbeddingSine(nn.Module):
             (pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4
         ).flatten(3)
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
-        return pos.to(self.config.torch_float_type).contiguous()
+        return pos.to(self.output_dtype).contiguous()

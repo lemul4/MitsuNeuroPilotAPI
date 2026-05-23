@@ -1,5 +1,5 @@
-from typing import Any
 import math
+from typing import Any
 
 import jaxtyping as jt
 import timm
@@ -57,9 +57,22 @@ class TransfuserBackbone(nn.Module):
         super().__init__()
         self.device = device
         self.config = config
+        self.input_dtype = config.torch_float_type
+        self.channel_last = bool(config.channel_last)
+        self.use_ltf = bool(config.LTF)
         self.backbone_sensor_mode = str(
             _config_get(config, "backbone_sensor_mode", "lidar_rgb")
         ).lower()
+        self.register_buffer(
+            "imagenet_mean",
+            torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "imagenet_std",
+            torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
 
         if self.backbone_sensor_mode in {"lidar_rgb", "rgb_lidar", "default"}:
             self.backbone_sensor_mode = "lidar_rgb"
@@ -382,7 +395,6 @@ class TransfuserBackbone(nn.Module):
             self.num_lidar_features, self.config.bev_features_chanels, (1, 1)
         )
 
-    @jt.jaxtyped(typechecker=beartype)
     def top_down(
         self, x: jt.Float[torch.Tensor, "B C H W"]
     ) -> jt.Float[torch.Tensor, "B C2 H2 W2"]:
@@ -405,22 +417,22 @@ class TransfuserBackbone(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Original RGB panorama + LiDAR data loading path."""
         rgb = data["rgb"].to(
-            self.device, dtype=self.config.torch_float_type, non_blocking=True
+            self.device, dtype=self.input_dtype, non_blocking=True
         )
-        if self.config.LTF:
+        if self.use_ltf:
             x = torch.linspace(
                 0,
                 1,
                 self.config.lidar_width_pixel,
                 device=rgb.device,
-                dtype=self.config.torch_float_type,
+                dtype=self.input_dtype,
             )
             y = torch.linspace(
                 0,
                 1,
                 self.config.lidar_height_pixel,
                 device=rgb.device,
-                dtype=self.config.torch_float_type,
+                dtype=self.input_dtype,
             )
             y_grid, x_grid = torch.meshgrid(y, x, indexing="ij")
             lidar = torch.zeros(
@@ -431,13 +443,13 @@ class TransfuserBackbone(nn.Module):
                     self.config.lidar_width_pixel,
                 ),
                 device=rgb.device,
-                dtype=self.config.torch_float_type,
+                dtype=self.input_dtype,
             )
             lidar[:, 0] = y_grid.unsqueeze(0)
             lidar[:, 1] = x_grid.unsqueeze(0)
         else:
             lidar = data["rasterized_lidar"].to(
-                self.device, dtype=self.config.torch_float_type, non_blocking=True
+                self.device, dtype=self.input_dtype, non_blocking=True
             )
         return self._forward(rgb, lidar)
 
@@ -454,14 +466,13 @@ class TransfuserBackbone(nn.Module):
                 f"Dual-camera backbone expected data[{self.right_camera_key!r}]."
             )
         left = data[self.left_camera_key].to(
-            self.device, dtype=self.config.torch_float_type, non_blocking=True
+            self.device, dtype=self.input_dtype, non_blocking=True
         )
         right = data[self.right_camera_key].to(
-            self.device, dtype=self.config.torch_float_type, non_blocking=True
+            self.device, dtype=self.input_dtype, non_blocking=True
         )
         return self._forward_dual_camera(left, right, data)
 
-    @jt.jaxtyped(typechecker=beartype)
     def _forward(
         self,
         image: jt.Float[torch.Tensor, "B 3 img_h img_w"],
@@ -472,10 +483,12 @@ class TransfuserBackbone(nn.Module):
         jt.Float[torch.Tensor, "B D1 H1 W1"], jt.Float[torch.Tensor, "B D2 H2 W2"]
     ]:
         """Original image + LiDAR feature fusion using transformers."""
-        image_features = fn.normalize_imagenet(image)
+        image_features = fn.normalize_imagenet(
+            image, self.imagenet_mean, self.imagenet_std
+        )
         lidar_features = lidar
 
-        if self.config.channel_last:
+        if self.channel_last:
             image = image.to(memory_format=torch.channels_last)
             if lidar is not None:
                 lidar = lidar.to(memory_format=torch.channels_last)
@@ -511,10 +524,14 @@ class TransfuserBackbone(nn.Module):
         data: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Two independent camera encoders + multi-stage GPT fusion + BEV projection."""
-        left_features = fn.normalize_imagenet(left_image)
-        right_features = fn.normalize_imagenet(right_image)
+        left_features = fn.normalize_imagenet(
+            left_image, self.imagenet_mean, self.imagenet_std
+        )
+        right_features = fn.normalize_imagenet(
+            right_image, self.imagenet_mean, self.imagenet_std
+        )
 
-        if self.config.channel_last:
+        if self.channel_last:
             left_features = left_features.to(memory_format=torch.channels_last)
             right_features = right_features.to(memory_format=torch.channels_last)
 
@@ -555,7 +572,6 @@ class TransfuserBackbone(nn.Module):
         )
         return bev_features, image_features
 
-    @beartype
     def forward_layer_block(
         self, layers: Any, return_layers: dict[str, str], features: torch.Tensor
     ) -> torch.Tensor:
@@ -566,7 +582,6 @@ class TransfuserBackbone(nn.Module):
                 break
         return features
 
-    @jt.jaxtyped(typechecker=beartype)
     def fuse_features(
         self,
         image_features: jt.Float[torch.Tensor, "B C H W"],
@@ -674,7 +689,6 @@ class GPT(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(self.config.gpt_layer_norm_init_weight)
 
-    @jt.jaxtyped(typechecker=beartype)
     def forward(
         self,
         image_tensor: jt.Float[torch.Tensor, "B C img_h img_w"],
@@ -764,7 +778,6 @@ class DualCameraGPT(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(self.config.gpt_layer_norm_init_weight)
 
-    @jt.jaxtyped(typechecker=beartype)
     def forward(
         self,
         left_tensor: jt.Float[torch.Tensor, "B C left_h left_w"],
@@ -833,9 +846,22 @@ class DualCameraBEVProjector(nn.Module):
         self.config = config
         self.bev_h = int(config.lidar_vert_anchors)
         self.bev_w = int(config.lidar_horz_anchors)
+        self.x_min = float(self.config.min_x_meter)
+        self.x_max = float(self.config.max_x_meter)
+        self.y_min = float(self.config.min_y_meter)
+        self.y_max = float(self.config.max_y_meter)
         self.projection_eps = float(
             _config_get(config, "dual_camera_projection_eps", 1.0e-4)
         )
+        self.ground_z = float(
+            _config_get(
+                self.config,
+                ("dual_camera_bev_ground_z_m", "dual_camera_ground_z_m"),
+                0.0,
+            )
+        )
+        self.reverse_x = _as_bool(_config_get(self.config, "dual_camera_bev_reverse_x", False))
+        self.reverse_y = _as_bool(_config_get(self.config, "dual_camera_bev_reverse_y", False))
         hidden_channels = int(
             _config_get(config, "dual_camera_bev_hidden_channels", out_channels)
         )
@@ -853,6 +879,39 @@ class DualCameraBEVProjector(nn.Module):
         layers.append(nn.ReLU(inplace=True))
         layers.append(nn.Conv2d(hidden_channels, out_channels, kernel_size=1))
         self.fuser = nn.Sequential(*layers)
+        bev_points, xy_channels = self._build_static_bev_geometry(torch.float32)
+        self.register_buffer("bev_points_base", bev_points, persistent=False)
+        self.register_buffer("xy_channels_base", xy_channels, persistent=False)
+
+    def _build_static_bev_geometry(
+        self, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x_step = (self.x_max - self.x_min) / self.bev_w
+        y_step = (self.y_max - self.y_min) / self.bev_h
+        x_centers = torch.linspace(
+            self.x_min + 0.5 * x_step,
+            self.x_max - 0.5 * x_step,
+            self.bev_w,
+            dtype=dtype,
+        )
+        y_centers = torch.linspace(
+            self.y_min + 0.5 * y_step,
+            self.y_max - 0.5 * y_step,
+            self.bev_h,
+            dtype=dtype,
+        )
+        if self.reverse_x:
+            x_centers = torch.flip(x_centers, dims=[0])
+        if self.reverse_y:
+            y_centers = torch.flip(y_centers, dims=[0])
+        yy, xx = torch.meshgrid(y_centers, x_centers, indexing="ij")
+        zz = torch.full_like(xx, self.ground_z)
+        ones = torch.ones_like(xx)
+        points = torch.stack([xx, yy, zz, ones], dim=-1).view(-1, 4)
+        x_norm = 2.0 * (xx - self.x_min) / max(self.x_max - self.x_min, 1.0e-6) - 1.0
+        y_norm = 2.0 * (yy - self.y_min) / max(self.y_max - self.y_min, 1.0e-6) - 1.0
+        xy = torch.stack([x_norm, y_norm], dim=0)
+        return points, xy
 
     def forward(
         self,
@@ -900,9 +959,7 @@ class DualCameraBEVProjector(nn.Module):
             padding_mode="zeros",
             align_corners=False,
         )
-        xy = self._build_normalized_xy_channels(
-            batch_size, device, left_features.dtype
-        )
+        xy = self._build_normalized_xy_channels(batch_size, device, left_features.dtype)
         bev_input = torch.cat(
             [
                 left_bev,
@@ -918,74 +975,14 @@ class DualCameraBEVProjector(nn.Module):
     def _build_bev_points(
         self, batch_size: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
-        x_min = float(self.config.min_x_meter)
-        x_max = float(self.config.max_x_meter)
-        y_min = float(self.config.min_y_meter)
-        y_max = float(self.config.max_y_meter)
-        z_ground = float(
-            _config_get(
-                self.config,
-                ("dual_camera_bev_ground_z_m", "dual_camera_ground_z_m"),
-                0.0,
-            )
-        )
-        x_step = (x_max - x_min) / self.bev_w
-        y_step = (y_max - y_min) / self.bev_h
-        x_centers = torch.linspace(
-            x_min + 0.5 * x_step,
-            x_max - 0.5 * x_step,
-            self.bev_w,
-            device=device,
-            dtype=dtype,
-        )
-        y_centers = torch.linspace(
-            y_min + 0.5 * y_step,
-            y_max - 0.5 * y_step,
-            self.bev_h,
-            device=device,
-            dtype=dtype,
-        )
-        if _as_bool(_config_get(self.config, "dual_camera_bev_reverse_x", False)):
-            x_centers = torch.flip(x_centers, dims=[0])
-        if _as_bool(_config_get(self.config, "dual_camera_bev_reverse_y", False)):
-            y_centers = torch.flip(y_centers, dims=[0])
-        yy, xx = torch.meshgrid(y_centers, x_centers, indexing="ij")
-        zz = torch.full_like(xx, z_ground)
-        ones = torch.ones_like(xx)
-        points = torch.stack([xx, yy, zz, ones], dim=-1).view(-1, 4)
+        points = self.bev_points_base.to(device=device, dtype=dtype)
         return points.unsqueeze(0).repeat(batch_size, 1, 1)
 
     def _build_normalized_xy_channels(
         self, batch_size: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
-        x_min = float(self.config.min_x_meter)
-        x_max = float(self.config.max_x_meter)
-        y_min = float(self.config.min_y_meter)
-        y_max = float(self.config.max_y_meter)
-        x_step = (x_max - x_min) / self.bev_w
-        y_step = (y_max - y_min) / self.bev_h
-        x_centers = torch.linspace(
-            x_min + 0.5 * x_step,
-            x_max - 0.5 * x_step,
-            self.bev_w,
-            device=device,
-            dtype=dtype,
-        )
-        y_centers = torch.linspace(
-            y_min + 0.5 * y_step,
-            y_max - 0.5 * y_step,
-            self.bev_h,
-            device=device,
-            dtype=dtype,
-        )
-        if _as_bool(_config_get(self.config, "dual_camera_bev_reverse_x", False)):
-            x_centers = torch.flip(x_centers, dims=[0])
-        if _as_bool(_config_get(self.config, "dual_camera_bev_reverse_y", False)):
-            y_centers = torch.flip(y_centers, dims=[0])
-        yy, xx = torch.meshgrid(y_centers, x_centers, indexing="ij")
-        x_norm = 2.0 * (xx - x_min) / max(x_max - x_min, 1.0e-6) - 1.0
-        y_norm = 2.0 * (yy - y_min) / max(y_max - y_min, 1.0e-6) - 1.0
-        return torch.stack([x_norm, y_norm], dim=0).unsqueeze(0).repeat(batch_size, 1, 1, 1)
+        xy = self.xy_channels_base.to(device=device, dtype=dtype)
+        return xy.unsqueeze(0).repeat(batch_size, 1, 1, 1)
 
     def _project_bev_points_to_feature_grid(
         self,
@@ -1253,7 +1250,6 @@ class Block(nn.Module):
             nn.Dropout(resid_pdrop),
         )
 
-    @jt.jaxtyped(typechecker=beartype)
     def forward(
         self, x: jt.Float[torch.Tensor, "B T C"]
     ) -> jt.Float[torch.Tensor, "B T C"]:
@@ -1279,7 +1275,6 @@ class SelfAttention(nn.Module):
         self.proj = nn.Linear(n_embd, n_embd)
         self.n_head = n_head
 
-    @jt.jaxtyped(typechecker=beartype)
     def forward(
         self, x: jt.Float[torch.Tensor, "B T C"]
     ) -> jt.Float[torch.Tensor, "B T C"]:

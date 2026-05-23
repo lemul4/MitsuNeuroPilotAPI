@@ -170,15 +170,32 @@ def initialize_model(
         model = model.to(memory_format=torch.channels_last)
         LOG.info("Using channel last memory format")
 
+    compile_strategy = "none"
     if config.compile:
+        compile_strategy = str(getattr(config, "compile_strategy", "core")).lower()
+    if compile_strategy == "core":
+        model.prepare_compile(
+            fullgraph=True,
+            dynamic=False,
+            backend="inductor",
+            mode="max-autotune",
+        )
+        LOG.info("Using torch.compile on TFv6 forward core")
+    elif compile_strategy == "module":
         model = torch.compile(
             model,
-            fullgraph=True,  # require entire model to be compiled, fail if not
+            fullgraph=False,
             dynamic=False,  # aggressively specialize to current input shapes
             backend="inductor",
             mode="max-autotune",  # highest autotune + CUDA graph
         )
-        
+        LOG.info("Using torch.compile on full TFv6 module")
+    elif compile_strategy != "none":
+        raise ValueError(
+            f"Unknown compile_strategy={compile_strategy!r}. "
+            "Expected 'none', 'core', or 'module'."
+        )
+
     if torch.cuda.device_count() > 1:
         model_wrapper = torch.nn.parallel.DistributedDataParallel(
             model,

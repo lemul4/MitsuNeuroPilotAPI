@@ -8,14 +8,14 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from beartype import beartype
 
 from lead.training.config_training import TrainingConfig
 
 
-@beartype
 def normalize_imagenet(
     x: jt.Float[torch.Tensor, "B 3 H W"],
+    mean: torch.Tensor | None = None,
+    std: torch.Tensor | None = None,
 ) -> jt.Float[torch.Tensor, "B 3 H W"]:
     """Normalize input images according to ImageNet standards.
     Args:
@@ -24,11 +24,13 @@ def normalize_imagenet(
     Returns:
         Normalized images batch.
     """
-    x = x.clone()
-    x[:, 0] = ((x[:, 0] / 255.0) - 0.485) / 0.229
-    x[:, 1] = ((x[:, 1] / 255.0) - 0.456) / 0.224
-    x[:, 2] = ((x[:, 2] / 255.0) - 0.406) / 0.225
-    return x
+    if mean is None:
+        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype)
+    if std is None:
+        std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype)
+    mean = mean.to(device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+    std = std.to(device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+    return (x / 255.0 - mean) / std
 
 
 def _fp32_forward_wrapper(original_forward):
@@ -129,7 +131,6 @@ def force_fp32(apply_to: tuple[str, ...] | None = None):
     return decorator
 
 
-@beartype
 def gen_sineembed_for_position(
     pos_tensor: jt.Float[torch.Tensor, "B 2"], hidden_dim: int = 64
 ):
@@ -161,7 +162,6 @@ def gen_sineembed_for_position(
     return pos
 
 
-@beartype
 def unit_normalize_bev_points(
     points: jt.Float[npt.NDArray | torch.Tensor, "... 2"], config: TrainingConfig
 ) -> jt.Float[npt.NDArray | torch.Tensor, "... 2"]:
@@ -188,7 +188,6 @@ def unit_normalize_bev_points(
     return points
 
 
-@beartype
 def bev_grid_sample(
     bev: jt.Float[torch.Tensor, "B D H W"],
     ref_points: jt.Float[torch.Tensor, "B N 2"],  # absolute coords (x, y)
