@@ -77,6 +77,11 @@ class CARLAData(Dataset):
         )
         self.hdmap_converter = np.uint8(list(hdmap_converter.values()))
         self.image_augmenter_func = image_augmenter(config, config.use_color_aug_prob)
+        self.num_augmented_versions_per_sample = (
+            max(1, int(config.num_augmented_versions_per_sample))
+            if config.use_color_aug and not build_cache and not build_buckets
+            else 1
+        )
         self.random = random
         self.build_cache = build_cache
         self.build_buckets = build_buckets
@@ -192,6 +197,14 @@ class CARLAData(Dataset):
         raise FileNotFoundError(f"RGB image not found: {image_path}")
 
     def __getitem__(self, index):
+        dataset_index = index
+        augmentation_version_index = 0
+        if self.num_augmented_versions_per_sample > 1:
+            index = dataset_index // self.num_augmented_versions_per_sample
+            augmentation_version_index = (
+                dataset_index % self.num_augmented_versions_per_sample
+            )
+
         # ----------------------------------------------------------------------------------------
         # First part of the dataloader: lightweight meta data
         # ----------------------------------------------------------------------------------------
@@ -249,6 +262,8 @@ class CARLAData(Dataset):
                 "perturbation_translation": perturbation_translation,
                 "perturbation_rotation": perturbation_rotation,
                 "index": index,
+                "dataset_index": dataset_index,
+                "augmentation_version_index": augmentation_version_index,
                 "global_index": global_index,
                 "bucket_identity": self.bucket_identity[index],
                 "route_number": measurement_file.split("/")[-3],
@@ -465,31 +480,53 @@ class CARLAData(Dataset):
         if self.config.use_planning_decoder or self.config.visualize_dataset:
             future_positions = meta.get("future_positions")
             future_yaws = meta.get("future_yaws")
-            future_waypoints = np.array(
-                [
-                    future_positions[i][:2]
-                    for i in future_waypoint_indices
-                    if i < len(future_positions)
-                ]
-            ).reshape(-1, 2)
-            future_yaws = np.array(
-                [
-                    future_yaws[i]
-                    for i in future_waypoint_indices
-                    if i < len(future_yaws)
-                ]
-            ).reshape(-1)
+            selected_future_waypoints = [
+                future_positions[i][:2]
+                for i in future_waypoint_indices
+                if future_positions is not None and i < len(future_positions)
+            ]
+            selected_future_yaws = [
+                future_yaws[i]
+                for i in future_waypoint_indices
+                if future_yaws is not None and i < len(future_yaws)
+            ]
 
-            if future_waypoints.shape[0] > 0:
-                data["future_waypoints"] = carla_dataset_utils.perturbate_waypoints(
-                    future_waypoints,
-                    y_perturbation=perturbation_translation,
-                    yaw_perturbation=perturbation_rotation,
+            if selected_future_waypoints:
+                while (
+                    len(selected_future_waypoints)
+                    < self.config.num_way_points_prediction
+                ):
+                    selected_future_waypoints.append(selected_future_waypoints[-1])
+                future_waypoints = np.array(
+                    selected_future_waypoints[: self.config.num_way_points_prediction]
+                ).reshape(-1, 2)
+            else:
+                future_waypoints = np.zeros(
+                    (self.config.num_way_points_prediction, 2), dtype=np.float32
                 )
-                data["future_yaws"] = carla_dataset_utils.perturbate_yaws(
-                    future_yaws,
-                    yaw_perturbation=perturbation_rotation,
+
+            if selected_future_yaws:
+                while (
+                    len(selected_future_yaws) < self.config.num_way_points_prediction
+                ):
+                    selected_future_yaws.append(selected_future_yaws[-1])
+                future_yaws = np.array(
+                    selected_future_yaws[: self.config.num_way_points_prediction]
+                ).reshape(-1)
+            else:
+                future_yaws = np.zeros(
+                    (self.config.num_way_points_prediction,), dtype=np.float32
                 )
+
+            data["future_waypoints"] = carla_dataset_utils.perturbate_waypoints(
+                future_waypoints,
+                y_perturbation=perturbation_translation,
+                yaw_perturbation=perturbation_rotation,
+            )
+            data["future_yaws"] = carla_dataset_utils.perturbate_yaws(
+                future_yaws,
+                yaw_perturbation=perturbation_rotation,
+            )
 
         # Route and target speed features
         if (
@@ -1332,4 +1369,4 @@ class CARLAData(Dataset):
             self.global_indices = self.global_indices[indices]
 
     def __len__(self):
-        return self.lidars.shape[0]
+        return self.lidars.shape[0] * self.num_augmented_versions_per_sample

@@ -136,6 +136,14 @@ class Trainer:
             # Training
             rfm_score = self.train()
 
+            # Save model immediately after the training epoch finishes, before
+            # validation starts.
+            if self.config.rank == 0:
+                self.save(rfm_score)
+
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
             if self.should_validate_epoch(epoch):
                 validation_metrics = self.validate()
                 if self.config.rank == 0:
@@ -143,10 +151,6 @@ class Trainer:
                         epoch=epoch,
                         metrics=validation_metrics,
                     )
-
-            # Save model
-            if self.config.rank == 0:
-                self.save(rfm_score)
 
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()  # Ensure all processes sync here before next epoch
@@ -163,6 +167,7 @@ class Trainer:
                 islice(self.dataloader, self.gradient_steps_per_epoch),
                 total=self.gradient_steps_per_epoch,
                 disable=self.config.rank != 0,
+                desc=f"Train epoch {self.cur_epoch}/{self.config.epochs}",
             )
         ):
             loss = torch.zeros(
@@ -326,7 +331,7 @@ class Trainer:
                     self.validation_dataloader,
                     total=len(self.validation_dataloader),
                     disable=self.config.rank != 0,
-                    desc="Validation",
+                    desc=f"Validation epoch {self.cur_epoch}/{self.config.epochs}",
                 )
             ):
                 batch_size = float(data["source_dataset"].shape[0])

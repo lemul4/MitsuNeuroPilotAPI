@@ -323,7 +323,7 @@ def initialize_dataloader(
                 shuffle=True,
                 num_replicas=config.world_size,
                 rank=config.rank,
-                drop_last=True,
+                drop_last=config.train_drop_last,
             )
         )
     if config.use_navsim_data:
@@ -340,7 +340,7 @@ def initialize_dataloader(
                 shuffle=True,
                 num_replicas=config.world_size,
                 rank=config.rank,
-                drop_last=True,
+                drop_last=config.train_drop_last,
             )
         )
     if config.use_waymo_e2e_data:
@@ -358,7 +358,7 @@ def initialize_dataloader(
                 shuffle=True,
                 num_replicas=config.world_size,
                 rank=config.rank,
-                drop_last=True,
+                drop_last=config.train_drop_last,
             )
         )
 
@@ -386,17 +386,23 @@ def initialize_dataloader(
         config=config,
     )
 
-    dataloader_train = DataLoader(
-        train_dataset,
-        batch_sampler=mixed_sampler,
-        worker_init_fn=seed_worker,
-        generator=g_cuda,
-        num_workers=num_workers,
-        pin_memory=True,
-        prefetch_factor=config.prefetch_factor,
-        persistent_workers=config.persistent_workers_train,
-        collate_fn=mixed_training_utils.mixed_data_collate_fn,
-    )
+    dataloader_kwargs = {
+        "dataset": train_dataset,
+        "batch_sampler": mixed_sampler,
+        "worker_init_fn": seed_worker,
+        "generator": g_cuda,
+        "num_workers": num_workers,
+        "pin_memory": True,
+        "collate_fn": mixed_training_utils.mixed_data_collate_fn,
+    }
+    if num_workers > 0:
+        dataloader_kwargs["prefetch_factor"] = config.prefetch_factor
+        dataloader_kwargs["persistent_workers"] = config.persistent_workers_train
+        dataloader_context = _dataloader_context(config)
+        if dataloader_context is not None:
+            dataloader_kwargs["multiprocessing_context"] = dataloader_context
+
+    dataloader_train = DataLoader(**dataloader_kwargs)
     return dataloader_train, mixed_sampler
 
 
@@ -425,6 +431,7 @@ def initialize_validation_dataloader(
     validation_overrides = {
         "carla_root": config.validation_carla_root,
         "use_color_aug": False,
+        "num_augmented_versions_per_sample": 1,
         "use_sensor_perburtation": False,
         "use_sensor_perburtation_prob": 0.0,
         "carla_dataset_fraction": config.val_dataset_fraction,
@@ -485,13 +492,26 @@ def initialize_validation_dataloader(
         "worker_init_fn": seed_worker,
         "num_workers": validation_num_workers,
         "pin_memory": True,
+        "drop_last": config.validation_drop_last,
         "collate_fn": mixed_training_utils.mixed_data_collate_fn,
     }
     if validation_num_workers > 0:
         dataloader_kwargs["prefetch_factor"] = config.validation_prefetch_factor
         dataloader_kwargs["persistent_workers"] = config.persistent_workers_val
+        dataloader_context = _dataloader_context(config)
+        if dataloader_context is not None:
+            dataloader_kwargs["multiprocessing_context"] = dataloader_context
 
     dataloader_validation = DataLoader(**dataloader_kwargs)
+    if config.validation_drop_last:
+        dropped_local_samples = len(sampler) % batch_size
+        if dropped_local_samples:
+            LOG.info(
+                "Validation drop_last=True drops %d local tail samples on rank %d "
+                "to keep a fixed compiled batch shape.",
+                dropped_local_samples,
+                rank,
+            )
     LOG.info(
         "Validation dataset size: %d samples, %d local samples on rank %d.",
         len(validation_dataset),
@@ -539,19 +559,32 @@ def seed_worker(_):
     torch.manual_seed(worker_seed)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
-    torch.cuda.manual_seed(worker_seed)
-    torch.cuda.manual_seed_all(worker_seed)
+
+
+def _dataloader_context(config: TrainingConfig):
+    start_method = str(getattr(config, "dataloader_start_method", "fork"))
+    if start_method == "":
+        return None
+    available_start_methods = mp.get_all_start_methods()
+    if start_method not in available_start_methods:
+        LOG.warning(
+            "DataLoader start method %r is unavailable. Available methods: %s. "
+            "Falling back to PyTorch default.",
+            start_method,
+            available_start_methods,
+        )
+        return None
+    return mp.get_context(start_method)
 
 
 def set_start_method():
     # Select how the threads in the data loader are spawned
-    # See this: https://stackoverflow.com/a/66113051
-    # To edit code while processes run, we generally prefer fork.
+    # fork is the lightest option for DataLoader workers in this training setup.
+    if mp.get_start_method(allow_none=True) is not None:
+        return
     available_start_methods = mp.get_all_start_methods()
-    if "fork" in available_start_methods:
-        mp.set_start_method("fork")
-    # Available on all OS.
-    elif "spawn" in available_start_methods:
-        mp.set_start_method("spawn")
-    elif "forkserver" in available_start_methods:
-        mp.set_start_method("forkserver")
+    for start_method in ("fork", "spawn", "forkserver"):
+        if start_method in available_start_methods:
+            mp.set_start_method(start_method)
+            LOG.info("Using multiprocessing start method: %s", start_method)
+            return

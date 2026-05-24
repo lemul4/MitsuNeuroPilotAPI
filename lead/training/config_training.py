@@ -369,6 +369,9 @@ class TrainingConfig(BaseConfig):
     # Number of data loader workers to prefetch batches.
     prefetch_factor = 16
 
+    # Drop the final incomplete training batch.
+    train_drop_last = True
+
     # Validation data loader workers. Negative value means reuse the train worker count.
     validation_num_workers = -1
 
@@ -381,6 +384,15 @@ class TrainingConfig(BaseConfig):
     def validation_batch_size(self):
         """Validation batch size before distributed per-rank splitting."""
         return self.batch_size
+
+    # Drop the final incomplete validation batch. This keeps torch.compile with
+    # static shapes from recompiling/autotuning for a one-off tail batch.
+    validation_drop_last = True
+
+    # DataLoader worker start method. fork is much lighter for this dataset
+    # pipeline; stability comes from persistent train workers and CPU-only
+    # worker initialization.
+    dataloader_start_method = "fork"
 
     @overridable_property
     def compile(self):
@@ -551,6 +563,11 @@ class TrainingConfig(BaseConfig):
         if self.carla_leaderboard_mode:
             return 0.2
         return 0.1
+
+    @overridable_property
+    def num_augmented_versions_per_sample(self):
+        """Number of on-the-fly color-augmented versions per training sample."""
+        return 1
 
     # Weight decay for regularization.
     weight_decay = 0.01

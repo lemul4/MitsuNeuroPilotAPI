@@ -159,7 +159,7 @@ class MixedSampler(torch.utils.data.BatchSampler):
             "All samplers must have the same length."
         )
         self.sample_scheduler = sample_scheduler
-        self.drop_last = True
+        self.drop_last = config.train_drop_last
         self.num_datasets = len(samplers)
         self.config = config
 
