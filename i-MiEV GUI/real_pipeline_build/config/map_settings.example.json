@@ -1,0 +1,8 @@
+{
+  "default_center": {
+    "lat": 0.0,
+    "lon": 0.0,
+    "zoom": 2
+  },
+  "notes": "Copy this file to config/map_settings.json and replace lat/lon with your real test-site coordinates. The map also tries browser geolocation via Locate me."
+}
