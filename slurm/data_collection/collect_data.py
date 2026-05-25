@@ -322,7 +322,7 @@ def build_route_jobs(
     data_save_directory: Path,
 ) -> list[RouteJob]:
     jobs: list[RouteJob] = []
-    seed_counter = 1000000 * repetition_start - 1
+    seed_counter = 1010010 * repetition_start - 1
 
     for repetition in range(repetition_start, repetitions):
         for route in routes:
@@ -633,8 +633,8 @@ def discover_routes(
         random.seed(42)
         random.shuffle(routes)
     # Include/exclude towns based on route XML metadata, not file path.
-    allowed_towns = {"town13"}
-    excluded_towns = {}
+    allowed_towns = {}
+    excluded_towns = {"town13"}
     excluded_by_town = 0
     filtered_by_town: list[str] = []
     for route in routes:
@@ -780,7 +780,7 @@ if __name__ == "__main__":
     repetitions = 1
     repetition_start = 0
     shuffle_routes = True
-    max_route_per_scenario_type = 400  # -1 means no limit
+    max_route_per_scenario_type = 1000  # -1 means no limit
 
     carla_root = (
         args.carla_root
@@ -798,11 +798,11 @@ if __name__ == "__main__":
         agent = f"{code_root}/lead/expert/expert_py123d.py"
     else:
         agent = f"{code_root}/lead/expert/expert.py"
-    dataset_name = "carla_leaderboard2"
+    dataset_name = "carla_leaderboard2_dual_cameras"
 
     # Keep existing scenario filtering behavior
     # scenario_white_lists ="RedLightWithoutLeadVehicle", "ParkingExit","VehicleTurningRoutePedestrian", "VehicleTurningRoute", "StaticCutIn", "PedestrianCrossing", 
-    scenario_white_lists = ["BlockedIntersection", "DynamicObjectCrossing", "ParkedObstacle", "Accident", "ConstructionObstacle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss",  "SignalizedJunctionLeftTurn", "InvadingTurn", "ParkingCutIn", "HardBreakRoute", "ConstructionObstacle", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios" ]
+    scenario_white_lists = ["RedLightWithoutLeadVehicle", "ParkingExit", "VehicleTurningRoutePedestrian", "VehicleTurningRoute", "StaticCutIn", "PedestrianCrossing", "BlockedIntersection", "DynamicObjectCrossing", "ParkedObstacle", "Accident", "ConstructionObstacle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss", "SignalizedJunctionLeftTurn", "InvadingTurn", "ParkingCutIn", "HardBreakRoute", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios"]
     # scenario_white_lists = ["DynamicObjectCrossing", "ParkingExit", "noScenarios", "ParkingCrossingPedestrian", "BlockedIntersection"]
     scenario_blacklist = ["YieldToEmergencyVehicle", ]
 

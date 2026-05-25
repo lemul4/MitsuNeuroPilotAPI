@@ -487,7 +487,8 @@ class Trainer:
 
             if (
                 os.path.isfile(last_model_file)
-                and self.cur_epoch not in self.config.epoch_checkpoints_keep
+                and not self.config.keep_all_model_checkpoints
+                and (self.cur_epoch - 1) not in self.config.epoch_checkpoints_keep
             ):
                 os.remove(last_model_file)
                 LOG.info(f"Removed model checkpoint for epoch {self.cur_epoch - 1}.")

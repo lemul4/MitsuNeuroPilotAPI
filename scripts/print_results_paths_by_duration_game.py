@@ -15,7 +15,7 @@ def parse_args():
     )
     parser.add_argument(
         "--root",
-        default=os.path.join("data", "carla_leaderboard2", "data"),
+        default=os.path.join("data", "carla_leaderboard2_dual_cameras", "data"),
         help="Root folder to scan recursively",
     )
     return parser.parse_args()

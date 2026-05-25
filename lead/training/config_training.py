@@ -352,6 +352,10 @@ class TrainingConfig(BaseConfig):
             return True
         return True
 
+    # If true keep model_XXXX.pth from every epoch instead of deleting the previous
+    # epoch's model checkpoint after saving the current one.
+    keep_all_model_checkpoints = False
+
     @overridable_property
     def is_pretraining(self):
         """If true indicates pretraining phase."""

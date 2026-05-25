@@ -162,6 +162,7 @@
     "need_grad_scaler": false,
     "use_zero_redundancy": false,
     "save_model_checkpoint": true,
+    "keep_all_model_checkpoints": true,
     "is_pretraining": false,
     "sync_batchnorm": false,
     "compile": true,
