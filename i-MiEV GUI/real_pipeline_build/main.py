@@ -312,7 +312,6 @@ class AppController(QObject):
         self.is_connected = False
         self.control_active = False
         self.ai_control_requested = False
-        self.manual_control_requested = False
         self.ai_agent_loading = False
         self.ai_agent_running = False
 
@@ -389,8 +388,6 @@ class AppController(QObject):
         self.view.manual_input_updated.connect(self.handle_manual_input)
         self.view.telemetry_toggled.connect(self.handle_telemetry_toggle)
         self.view.ai_toggled.connect(self.handle_ai_toggle)
-        if hasattr(self.view, "manual_toggled"):
-            self.view.manual_toggled.connect(self.handle_manual_toggle)
 
         # Новый UI отправляет один список: 1 маршрут => одиночный запуск, N маршрутов => очередь.
         # Старые сигналы single/queue оставлены как fallback, но основной путь — route_launch_requested.
@@ -484,16 +481,10 @@ class AppController(QObject):
         if label == "real_control_toggle":
             requested = bool(result.get("requested"))
             active = bool(result.get("active")) and not error
-            mode = str(result.get("mode") or "")
             self.control_active = active
-            if mode == "manual":
-                self.manual_control_requested = True
-                if hasattr(self.view, "set_manual_checkbox"):
-                    self.view.set_manual_checkbox(True)
-                self._set_control_button_checked_later(True)
-            elif requested and not active:
+            if requested and not active:
                 self._set_control_button_checked_later(False)
-            elif not requested and not active:
+            if not requested:
                 self._set_control_button_checked_later(False)
             message = result.get("message")
             if message:
@@ -929,49 +920,20 @@ class AppController(QObject):
                 "active": False,
                 "message": "Real vehicle control modules unavailable",
             }
-
-        # Activate in manual mode: the vehicle is armed into Drive with brake hold,
-        # but no autonomy loop is started. The route remains a navigation hint.
         if is_active:
-            if self.manual_control_requested:
-                ok = await self.vehicle_control.activate_manual_control()
-                return {
-                    "ok": bool(ok),
-                    "requested": True,
-                    "active": bool(ok),
-                    "mode": "manual",
-                    "message": "Ручное управление активно" if ok else "Ручное управление заблокировано",
-                }
             ok = await self.vehicle_control.activate_control()
             return {
                 "ok": bool(ok),
                 "requested": True,
                 "active": bool(ok),
-                "mode": "ai",
                 "message": "AI control active" if ok else "Activation blocked",
             }
-
-        # If the user presses Activate Control again while AI has authority,
-        # transfer to manual mode instead of parking. A subsequent click with the
-        # manual flag off will perform safe stop + Park.
-        state = self.vehicle_control.state_machine.state if getattr(self.vehicle_control, "state_machine", None) else None
-        if state is not None and getattr(state, "value", "") == "AI_ACTIVE":
-            ok = await self.vehicle_control.transfer_ai_to_manual(reason="user_takeover")
-            return {
-                "ok": bool(ok),
-                "requested": False,
-                "active": bool(ok),
-                "mode": "manual",
-                "message": "ИИ отключен, включено ручное управление" if ok else "Переход в ручной режим заблокирован",
-            }
-
-        await self.vehicle_control.deactivate_control(reason="user_requested", park=True)
+        await self.vehicle_control.deactivate_control(reason="user_requested")
         return {
             "ok": True,
             "requested": False,
             "active": False,
-            "mode": "parked",
-            "message": "Управление отключено, Park запрошен после остановки",
+            "message": "AI control disabled",
         }
 
     async def _disable_real_ai_preview_after_disengage(self):
@@ -1113,19 +1075,6 @@ class AppController(QObject):
         self.control_active = False
         self._send_cruise_state(False)
         self.abort_active_scenario("Control выключен: сценарий остановлен", keep_plan=True)
-
-    def handle_manual_toggle(self, is_active):
-        self.manual_control_requested = bool(is_active)
-        if self.runtime_mode != "real":
-            return
-        if is_active:
-            self.view.statusBar().showMessage("Ручное управление включено: маршрут будет подсказкой, управление — с клавиатуры")
-            return
-        self.view.statusBar().showMessage("Ручное управление выключено")
-        # If manual control currently owns the vehicle, turning the flag off means
-        # safe stop + Park. This keeps the AI Preview flag separate from manual mode.
-        if self.control_active and self.vehicle_control is not None:
-            self._schedule_async(self.vehicle_control.deactivate_control(reason="manual_disabled", park=True), "real_control_toggle")
 
     def handle_ai_toggle(self, is_active):
         self.ai_control_requested = bool(is_active)
@@ -1996,13 +1945,10 @@ class AppController(QObject):
         if self.runtime_mode == "real":
             if self.vehicle_control is None or not self.is_connected:
                 return
-            if not self.manual_control_requested:
-                return
-            # While AI has authority manual keys are ignored. When the user presses
-            # Activate Control again, _handle_real_control_toggle transfers the
-            # vehicle to MANUAL_ACTIVE and sets manual_control_requested=True.
-            state = self.vehicle_control.state_machine.state if getattr(self.vehicle_control, "state_machine", None) else None
-            if state is not None and getattr(state, "value", "") == "AI_ACTIVE":
+            # In real/mock mode manual commands are available after AI authority
+            # has been disengaged. While AI is active, keyboard input is ignored
+            # rather than mixed into the autonomy command stream.
+            if self.control_active:
                 return
             self._schedule_async(self.vehicle_control.submit_manual_command(angle, accel, brake), "real_manual_command")
             return
@@ -2020,18 +1966,11 @@ class AppController(QObject):
         if self.runtime_mode == "real":
             if self.vehicle_control is None or not self.is_connected:
                 return
-            if not self.manual_control_requested:
+            if self.control_active:
                 now = time.monotonic()
                 if now - self._last_real_gear_ignore_log_at > 1.0:
                     self._last_real_gear_ignore_log_at = now
-                    print("REAL CONTROL: ручная передача заблокирована: включите флаг Ручное управление")
-                return
-            state = self.vehicle_control.state_machine.state if getattr(self.vehicle_control, "state_machine", None) else None
-            if state is not None and getattr(state, "value", "") == "AI_ACTIVE":
-                now = time.monotonic()
-                if now - self._last_real_gear_ignore_log_at > 1.0:
-                    self._last_real_gear_ignore_log_at = now
-                    print("REAL CONTROL: ручная передача заблокирована: сначала перейдите из ИИ в ручной режим")
+                    print("REAL CONTROL: ручная передача заблокирована: сначала отключите Activate Control")
                 return
             self._schedule_async(self.vehicle_control.request_manual_gear(gear_idx), "real_gear_request")
             return

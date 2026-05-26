@@ -23,7 +23,7 @@ class DriveStateMachine:
         if enabled:
             self.state = DriveState.READY_TO_ARM if readiness.all_ok else DriveState.AI_PREVIEW
         else:
-            if self.state not in (DriveState.ARMING, DriveState.AI_ACTIVE, DriveState.MANUAL_ACTIVE, DriveState.DISENGAGING):
+            if self.state not in (DriveState.ARMING, DriveState.AI_ACTIVE, DriveState.DISENGAGING):
                 self.state = DriveState.CONNECTED_MANUAL
 
     def refresh_ready_state(self, readiness: ReadinessStatus) -> None:
@@ -33,7 +33,7 @@ class DriveStateMachine:
     def can_activate(self, readiness: ReadinessStatus) -> ActivationDecision:
         if self.state == DriveState.DISCONNECTED:
             return ActivationDecision.block("Vehicle is not connected")
-        if self.state in (DriveState.ARMING, DriveState.AI_ACTIVE, DriveState.MANUAL_ACTIVE, DriveState.DISENGAGING):
+        if self.state in (DriveState.ARMING, DriveState.AI_ACTIVE, DriveState.DISENGAGING):
             return ActivationDecision.block(f"Invalid state for activation: {self.state.value}")
         reasons = readiness.blocked_reasons()
         if reasons:
@@ -48,16 +48,12 @@ class DriveStateMachine:
             self.state = DriveState.AI_ACTIVE
 
     def on_deactivate_requested(self) -> None:
-        if self.state in (DriveState.AI_ACTIVE, DriveState.MANUAL_ACTIVE, DriveState.ARMING, DriveState.READY_TO_ARM, DriveState.AI_PREVIEW):
+        if self.state in (DriveState.AI_ACTIVE, DriveState.ARMING, DriveState.READY_TO_ARM, DriveState.AI_PREVIEW):
             self.state = DriveState.DISENGAGING
 
     def on_manual_ready(self) -> None:
         if self.state != DriveState.DISCONNECTED:
             self.state = DriveState.CONNECTED_MANUAL
-
-    def on_manual_active(self) -> None:
-        if self.state != DriveState.DISCONNECTED:
-            self.state = DriveState.MANUAL_ACTIVE
 
     def on_fault(self, reason: str) -> None:
         self.last_fault = str(reason or "fault")

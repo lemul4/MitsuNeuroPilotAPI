@@ -77,21 +77,3 @@ class ManualControlTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(10):
             await service.submit_manual_command(angle_deg=0, accel_pct=25, brake_pct=0)
         self.assertGreater(service.get_telemetry().speed_kmh, before)
-
-class ManualTakeoverTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ai_deactivate_transfers_to_manual_without_parking(self):
-        mock = MockVehicleAdapter()
-        factory = VehicleAdapterFactory(real_adapter=None, mock_adapter=mock)
-        service = VehicleControlService(factory, ControlArbiter())
-        await service.connect_device("TEST_MOCK_VEHICLE")
-        service.set_mission(Mission.default_test_mission())
-        service.set_ai_preview_enabled(True)
-        self.assertTrue(await service.activate_control())
-        self.assertEqual(service.get_telemetry().gear, Gear.D)
-        ok = await service.transfer_ai_to_manual(reason="unit_test_takeover")
-        self.assertTrue(ok)
-        self.assertEqual(service.get_telemetry().gear, Gear.D)
-        before = service.get_telemetry().speed_kmh
-        for _ in range(10):
-            await service.submit_manual_command(angle_deg=0, accel_pct=20, brake_pct=0)
-        self.assertGreaterEqual(service.get_telemetry().speed_kmh, before)

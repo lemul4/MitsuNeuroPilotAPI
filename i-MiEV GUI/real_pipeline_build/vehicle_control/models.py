@@ -50,7 +50,6 @@ class DriveState(str, Enum):
     READY_TO_ARM = "READY_TO_ARM"
     ARMING = "ARMING"
     AI_ACTIVE = "AI_ACTIVE"
-    MANUAL_ACTIVE = "MANUAL_ACTIVE"
     DISENGAGING = "DISENGAGING"
     FAULT = "FAULT"
 

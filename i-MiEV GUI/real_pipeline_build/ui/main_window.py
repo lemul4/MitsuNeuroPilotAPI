@@ -861,7 +861,6 @@ class MainWindow(QMainWindow):
     gear_requested = Signal(int)
     pid_update_requested = Signal(float, float, float)
     ai_toggled = Signal(bool)
-    manual_toggled = Signal(bool)
     telemetry_toggled = Signal(bool)
     real_mission_validated = Signal(dict)
     real_speed_cap_changed = Signal(float)
@@ -893,7 +892,6 @@ class MainWindow(QMainWindow):
         self.local_target_accel = 0
         self.local_target_brake = 0
         self.control_active = False
-        self.manual_control_enabled = False
 
         # Буферы для графиков
         self.y_speed = [0] * 100
@@ -941,12 +939,11 @@ class MainWindow(QMainWindow):
         focus_blockers = [
             self.combo_ports, self.btn_connect, self.btn_control,
             self.spin_kp, self.spin_ki, self.spin_kd,
-            self.chk_telemetry, self.chk_ai, getattr(self, "chk_manual", None), self.btn_select_routes,
+            self.chk_telemetry, self.chk_ai, self.btn_select_routes,
             self.btn_route_launch, self.table_can,
         ]
         for widget in focus_blockers:
-            if widget is not None:
-                widget.setFocusPolicy(Qt.NoFocus)
+            widget.setFocusPolicy(Qt.NoFocus)
 
         self._install_console_redirect()
         self.statusBar().messageChanged.connect(self._on_status_message_changed)
@@ -975,9 +972,6 @@ class MainWindow(QMainWindow):
             self.right_panel_title.setText("Миссия" if mode == "real" else "Очередь")
         if hasattr(self, "chk_ai"):
             self.chk_ai.setText("Предпросмотр ИИ" if mode == "real" else "Управление ИИ")
-        if hasattr(self, "chk_manual"):
-            self.chk_manual.setVisible(mode == "real")
-            self.chk_manual.setEnabled(mode == "real")
         if hasattr(self, "btn_control") and not self.btn_control.isChecked():
             self.btn_control.setText("Активировать управление")
         if hasattr(self, "btn_select_routes"):
@@ -1327,12 +1321,8 @@ class MainWindow(QMainWindow):
         self.chk_telemetry.stateChanged.connect(lambda: self.telemetry_toggled.emit(self.chk_telemetry.isChecked()))
         self.chk_ai = QCheckBox("Управление ИИ")
         self.chk_ai.stateChanged.connect(self._on_ai_checkbox_changed)
-        self.chk_manual = QCheckBox("Ручное управление")
-        self.chk_manual.setToolTip("Режим ручного управления для real/mock: маршрут остается подсказкой, а руль/педали управляются клавиатурой.")
-        self.chk_manual.stateChanged.connect(self._on_manual_checkbox_changed)
         modules_layout.addWidget(self.chk_telemetry)
         modules_layout.addWidget(self.chk_ai)
-        modules_layout.addWidget(self.chk_manual)
         right_col.addWidget(modules_card)
 
         self.log_console = QTextEdit()
@@ -1968,9 +1958,7 @@ class MainWindow(QMainWindow):
 
     def on_control_toggled(self, checked):
         self.control_active = checked
-        if checked and getattr(self, "current_ui_mode", "carla") == "real" and self.is_manual_control_enabled():
-            self.btn_control.setText("Ручное управление активно")
-        elif checked and getattr(self, "current_ui_mode", "carla") == "real":
+        if checked and getattr(self, "current_ui_mode", "carla") == "real":
             self.btn_control.setText("Отключить ИИ / ручное")
         else:
             self.btn_control.setText("Управление активно" if checked else "Активировать управление")
@@ -2012,28 +2000,6 @@ class MainWindow(QMainWindow):
         else:
             self._append_log("UI AI: AI Control включен; маршрут пока не выбран." if is_active else "UI AI: AI Control выключен.")
         self.ai_toggled.emit(is_active)
-
-    def _on_manual_checkbox_changed(self, *_):
-        is_active = bool(self.chk_manual.isChecked()) if hasattr(self, "chk_manual") else False
-        self.manual_control_enabled = is_active
-        if getattr(self, "current_ui_mode", "carla") == "real":
-            if is_active:
-                self._append_log("UI MANUAL: ручное управление включено; Activate Control подготовит Drive, маршрут остается подсказкой.")
-            else:
-                self._append_log("UI MANUAL: ручное управление выключено.")
-        self.manual_toggled.emit(is_active)
-
-    def is_manual_control_enabled(self):
-        return bool(getattr(self, "manual_control_enabled", False))
-
-    def set_manual_checkbox(self, state):
-        if hasattr(self, "chk_manual") and self.chk_manual.isChecked() != bool(state):
-            self.chk_manual.blockSignals(True)
-            self.chk_manual.setChecked(bool(state))
-            self.chk_manual.blockSignals(False)
-        self.manual_control_enabled = bool(state)
-        if hasattr(self, "btn_control") and self.btn_control.isChecked():
-            self.btn_control.setText("Ручное управление активно" if self.manual_control_enabled else "Отключить ИИ / ручное")
 
     def is_ai_control_enabled(self):
         return bool(self.chk_ai.isChecked()) if hasattr(self, "chk_ai") else False
@@ -2323,12 +2289,10 @@ class MainWindow(QMainWindow):
         manual_real_connected = (
             getattr(self, "current_ui_mode", "carla") == "real"
             and hasattr(self, "btn_connect")
-            and self.btn_connect.text() in {"Disconnect", "Отключить"}
-            and self.is_manual_control_enabled()
+            and self.btn_connect.text() == "Disconnect"
+            and not self.control_active
         )
         if not self.control_active and not manual_real_connected:
-            return
-        if getattr(self, "current_ui_mode", "carla") == "real" and not self.is_manual_control_enabled():
             return
 
         MAX_ANGLE = 630  # Из config.py
