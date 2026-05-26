@@ -170,6 +170,14 @@ class Trainer:
                 desc=f"Train epoch {self.cur_epoch}/{self.config.epochs}",
             )
         ):
+            if data is None:
+                LOG.warning(
+                    "Skipping empty training batch at epoch=%s iteration=%s.",
+                    self.cur_epoch,
+                    epoch_iteration,
+                )
+                continue
+
             loss = torch.zeros(
                 1, dtype=self.config.torch_float_type, device=self.config.device
             )
@@ -334,6 +342,14 @@ class Trainer:
                     desc=f"Validation epoch {self.cur_epoch}/{self.config.epochs}",
                 )
             ):
+                if data is None:
+                    LOG.warning(
+                        "Skipping empty validation batch at epoch=%s iteration=%s.",
+                        self.cur_epoch,
+                        validation_iteration,
+                    )
+                    continue
+
                 batch_size = float(data["source_dataset"].shape[0])
                 data["iteration"] = validation_iteration
                 data["training_step"] = self.step

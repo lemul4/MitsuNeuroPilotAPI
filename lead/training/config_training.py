@@ -568,11 +568,6 @@ class TrainingConfig(BaseConfig):
             return 0.2
         return 0.1
 
-    @overridable_property
-    def num_augmented_versions_per_sample(self):
-        """Number of on-the-fly color-augmented versions per training sample."""
-        return 1
-
     # Weight decay for regularization.
     weight_decay = 0.01
 

@@ -16,6 +16,44 @@ from lead.visualization.visualizer import visualize_sample
 LOG = logging.getLogger(__name__)
 
 
+def to_scalar_for_wandb(value):
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return value.detach().float().cpu().item()
+        return value.detach().float().cpu().mean().item()
+
+    if isinstance(value, np.ndarray):
+        if value.size == 1:
+            return float(value.reshape(-1)[0])
+        return float(np.nanmean(value))
+
+    if isinstance(value, (np.integer, np.floating, np.bool_)):  # noqa: UP038
+        return value.item()
+
+    if isinstance(value, (int, float, bool, str)):  # noqa: UP038
+        return value
+
+    return None
+
+
+def is_valid_wandb_scalar(value):
+    if isinstance(value, float):
+        return np.isfinite(value)
+    return True
+
+
+def is_tensorboard_scalar(value):
+    if isinstance(value, torch.Tensor):
+        return (
+            value.numel() == 1 and torch.isfinite(value.detach().float()).all().item()
+        )
+    if isinstance(value, np.ndarray):
+        return value.size == 1 and np.isfinite(value.reshape(-1)[0])
+    if isinstance(value, int | float | np.integer | np.floating):
+        return np.isfinite(value)
+    return False
+
+
 class Logger:
     @beartype
     def __init__(
@@ -50,6 +88,7 @@ class Logger:
         self.total_gradient_steps = total_gradient_steps
         self.dataloader = dataloader
         self.scaler = scaler
+        self.wandb_failed = False
         self.validation_history = []
         self.validation_metrics_path = None
         if self.config.logdir is not None:
@@ -66,37 +105,212 @@ class Logger:
                 log_dir=config.logdir,
             )
             if self.config.log_wandb:
-                wandb_id = None
-                if self.config.wandb_resume != "never":
-                    wandb_id = config.wandb_id
-                wandb.init(
-                    project=self.config.wandb_project_name,
-                    name=config.description,
-                    config=config.training_dict(),
-                    id=wandb_id,
-                    resume=config.wandb_resume,
-                    dir=self.config.logdir,
-                    settings=wandb.Settings(_service_wait=300),
-                )
-                self.step = max(self.step, wandb.run.step)
-                LOG.info(
-                    f"WandB logger will log scalar every {self.config.log_scalars_frequency} steps"
-                )
-                LOG.info(
-                    f"WandB logger will log images every {self.config.log_images_frequency} steps"
-                )
-                if self.config.use_validation:
-                    wandb.define_metric("validation_epoch")
-                    wandb.define_metric("val/*", step_metric="validation_epoch")
-                if self.config.use_additional_metrics:
-                    LOG.info("Additional perception metrics logging is enabled.")
+                try:
+                    wandb_id = None
+                    if self.config.wandb_resume != "never":
+                        wandb_id = config.wandb_id
+                    wandb.init(
+                        project=self.config.wandb_project_name,
+                        name=config.description,
+                        config=config.training_dict(),
+                        id=wandb_id,
+                        resume=config.wandb_resume,
+                        dir=self.config.logdir,
+                        settings=wandb.Settings(_service_wait=300),
+                    )
+                    self.step = max(self.step, wandb.run.step)
+                    LOG.info(
+                        f"WandB logger will log scalar every {self.config.log_scalars_frequency} steps"
+                    )
+                    LOG.info(
+                        f"WandB logger will log images every {self.config.log_images_frequency} steps"
+                    )
+                    if self.config.use_validation:
+                        wandb.define_metric("validation_epoch")
+                        wandb.define_metric("val/*", step_metric="validation_epoch")
+                    if self.config.use_additional_metrics:
+                        LOG.info("Additional perception metrics logging is enabled.")
+                except BrokenPipeError:
+                    self.wandb_failed = True
+                    LOG.exception(
+                        "W&B initialization failed with BrokenPipeError. Disabling W&B for this run."
+                    )
+                except Exception:
+                    self.wandb_failed = True
+                    LOG.exception(
+                        "W&B initialization failed. Disabling W&B for this run."
+                    )
+
+    @staticmethod
+    def _log_exception_no_raise(message: str):
+        try:
+            LOG.exception(message)
+        except Exception:
+            pass
 
     def __del__(self):
-        if self.config.rank == 0:
-            if self.config.log_wandb:
-                wandb.finish()
-            if self.tensorboard_writer is not None:
-                self.tensorboard_writer.close()
+        config = getattr(self, "config", None)
+        if config is not None and config.rank == 0:
+            if config.log_wandb and not getattr(self, "wandb_failed", False):
+                try:
+                    wandb.finish()
+                except BrokenPipeError:
+                    self.wandb_failed = True
+                    self._log_exception_no_raise(
+                        "W&B finish failed with BrokenPipeError. Disabling W&B for this run."
+                    )
+                except Exception:
+                    self.wandb_failed = True
+                    self._log_exception_no_raise(
+                        "W&B finish failed. Disabling W&B for this run."
+                    )
+            tensorboard_writer = getattr(self, "tensorboard_writer", None)
+            if tensorboard_writer is not None:
+                try:
+                    tensorboard_writer.close()
+                except Exception:
+                    self._log_exception_no_raise(
+                        "TensorBoard writer close failed. Continuing shutdown."
+                    )
+
+    def _safe_wandb_log(self, message: dict, **kwargs):
+        if not self.config.log_wandb or self.wandb_failed:
+            return
+        try:
+            wandb.log(message, **kwargs)
+        except BrokenPipeError:
+            self.wandb_failed = True
+            LOG.exception(
+                "W&B logging failed with BrokenPipeError. Disabling W&B for this run."
+            )
+        except Exception:
+            self.wandb_failed = True
+            LOG.exception("W&B logging failed. Disabling W&B for this run.")
+
+    def _safe_wandb_visualize_sample(self, **kwargs):
+        if not self.config.log_wandb or self.wandb_failed:
+            return
+        try:
+            visualize_sample(**kwargs)
+        except BrokenPipeError:
+            self.wandb_failed = True
+            LOG.exception(
+                "W&B visualization logging failed with BrokenPipeError. Disabling W&B for this run."
+            )
+        except Exception:
+            self.wandb_failed = True
+            LOG.exception(
+                "W&B visualization logging failed. Disabling W&B for this run."
+            )
+
+    def _safe_logger_call(self, fn, description: str):
+        try:
+            return fn()
+        except Exception:
+            LOG.exception("%s failed. Continuing training.", description)
+            return None
+
+    @staticmethod
+    def _add_safe_scalar(message: dict, key: str, value):
+        safe_value = to_scalar_for_wandb(value)
+        if safe_value is not None and is_valid_wandb_scalar(safe_value):
+            message[key] = safe_value
+
+    def _log_train_scalars(
+        self,
+        cur_epoch: int,
+        unscaled_loss: dict,
+        scaled_loss: dict,
+        data: dict,
+        step: int,
+        gradient_steps_skipped: int,
+        log: dict,
+    ):
+        self.step = max(self.step, step)
+
+        message = {}
+
+        # General logs
+        self._add_safe_scalar(message, "debug/epoch", cur_epoch)
+        for g in range(len(self.optimizer.param_groups)):
+            self._add_safe_scalar(
+                message, f"debug/lr_{g}", self.optimizer.param_groups[g]["lr"]
+            )
+        self._add_safe_scalar(
+            message,
+            "debug/batch_size_per_gpu",
+            data["source_dataset"].shape[0],
+        )
+        self._add_safe_scalar(message, "debug/num_gpu", torch.cuda.device_count())
+        self._add_safe_scalar(
+            message,
+            "debug/model_size",
+            sum(p.numel() for p in self.model.parameters() if p.requires_grad),
+        )
+        self._add_safe_scalar(message, "debug/dataset_size", len(self.dataset))
+        self._add_safe_scalar(
+            message, "debug/num_gradient_steps", self.total_gradient_steps
+        )
+        self._add_safe_scalar(
+            message, "debug/finished_percentage", step / self.total_gradient_steps
+        )
+        self._add_safe_scalar(
+            message, "debug/steps_left", self.total_gradient_steps - step
+        )
+        self._add_safe_scalar(message, "debug/dataloader_size", len(self.dataloader))
+        self._add_safe_scalar(
+            message, "debug/allocated_cpus", self.config.assigned_cpu_cores
+        )
+        self._add_safe_scalar(
+            message, "debug/gradient_steps_skipped", gradient_steps_skipped
+        )
+        self._add_safe_scalar(
+            message,
+            "debug/max_gpu_mem",
+            torch.cuda.max_memory_allocated(self.config.device) / (1024**3),
+        )
+        self._add_safe_scalar(
+            message,
+            "debug/average_loading_time",
+            data["loading_time"].detach().float().cpu().mean(),
+        )
+        self._add_safe_scalar(
+            message,
+            "debug/average_loading_meta_time",
+            data["loading_meta_time"].detach().float().cpu().mean(),
+        )
+        self._add_safe_scalar(
+            message,
+            "debug/average_loading_sensor_time",
+            data["loading_sensor_time"].detach().float().cpu().mean(),
+        )
+        self._add_safe_scalar(
+            message,
+            "debug/source_dataset",
+            data["source_dataset"].detach().float().cpu().mean(),
+        )
+        if self.scaler is not None:
+            self._add_safe_scalar(message, "debug/grad_scale", self.scaler.get_scale())
+
+        # Loss and metrics logs
+        for key, value in log.items():
+            self._add_safe_scalar(message, key, value)
+        for loss_name, loss_value in unscaled_loss.items():
+            self._add_safe_scalar(message, f"unscaled_loss/{loss_name}", loss_value)
+        for loss_name, loss_value in scaled_loss.items():
+            self._add_safe_scalar(message, f"scaled_loss/{loss_name}", loss_value)
+
+        self._safe_wandb_log(message, step=self.step)
+
+        if self.tensorboard_writer is not None:
+            for key, value in message.items():
+                if not is_tensorboard_scalar(value):
+                    continue
+                self.tensorboard_writer.add_scalar(
+                    key,
+                    value,
+                    self.step,
+                )
 
     @beartype
     def log_train(
@@ -136,19 +350,23 @@ class Logger:
             )
         ):
             LOG.info(f"Visualizing training sample at step {step}.")
-            visualize_sample(
-                config=self.config,
-                predictions=predictions,
-                data=data,
-                save_image=True,
-                save_path=os.path.join("outputs", "training_viz"),
-                postfix=str(self.step).zfill(5),
-                prefix="train",
+            self._safe_logger_call(
+                lambda: visualize_sample(
+                    config=self.config,
+                    predictions=predictions,
+                    data=data,
+                    save_image=True,
+                    save_path=os.path.join("outputs", "training_viz"),
+                    postfix=str(self.step).zfill(5),
+                    prefix="train",
+                ),
+                "Local training visualization",
             )
 
         if self.config.rank == 0:
             if (
                 self.config.log_wandb
+                and not self.wandb_failed
                 and (
                     (epoch_iteration + 1) % self.config.log_images_frequency == 0
                     or epoch_iteration <= 1
@@ -156,7 +374,7 @@ class Logger:
                 and self.config.carla_leaderboard_mode
             ):
                 LOG.info(f"Logging training sample to WandB at step {step}.")
-                visualize_sample(
+                self._safe_wandb_visualize_sample(
                     config=self.config,
                     predictions=predictions,
                     data=data,
@@ -165,77 +383,18 @@ class Logger:
                 )
 
             if (epoch_iteration + 1) % self.config.log_scalars_frequency == 0:
-                self.step = max(self.step, step)
-
-                message = {}
-
-                # General logs
-                message["debug/epoch"] = cur_epoch
-                for g in range(len(self.optimizer.param_groups)):
-                    message[f"debug/lr_{g}"] = self.optimizer.param_groups[g]["lr"]
-                message["debug/batch_size_per_gpu"] = data["source_dataset"].shape[0]
-                message["debug/num_gpu"] = torch.cuda.device_count()
-                message["debug/model_size"] = sum(
-                    p.numel() for p in self.model.parameters() if p.requires_grad
+                self._safe_logger_call(
+                    lambda: self._log_train_scalars(
+                        cur_epoch=cur_epoch,
+                        unscaled_loss=unscaled_loss,
+                        scaled_loss=scaled_loss,
+                        data=data,
+                        step=step,
+                        gradient_steps_skipped=gradient_steps_skipped,
+                        log=log,
+                    ),
+                    "Training scalar logging",
                 )
-                message["debug/dataset_size"] = len(self.dataset)
-                message["debug/num_gradient_steps"] = self.total_gradient_steps
-                message["debug/finished_percentage"] = step / self.total_gradient_steps
-                message["debug/steps_left"] = self.total_gradient_steps - step
-                message["debug/dataloader_size"] = len(self.dataloader)
-                message["debug/allocated_cpus"] = self.config.assigned_cpu_cores
-                message["debug/gradient_steps_skipped"] = gradient_steps_skipped
-                message["debug/max_gpu_mem"] = torch.cuda.max_memory_allocated(
-                    self.config.device
-                ) / (1024**3)  # Convert to GB
-                message["debug/average_loading_time"] = (
-                    data["loading_time"].cpu().numpy().mean()
-                )
-                message["debug/average_loading_meta_time"] = (
-                    data["loading_meta_time"].cpu().numpy().mean()
-                )
-                message["debug/average_loading_sensor_time"] = (
-                    data["loading_sensor_time"].cpu().numpy().mean()
-                )
-                message["debug/source_dataset"] = (
-                    data["source_dataset"].cpu().numpy().mean()
-                )
-                if self.scaler is not None:
-                    message["debug/grad_scale"] = self.scaler.get_scale()
-
-                # Loss and metrics logs
-                message.update(log)
-                for loss_name, loss_value in unscaled_loss.items():
-                    message[f"unscaled_loss/{loss_name}"] = loss_value.float().item()
-                for loss_name, loss_value in scaled_loss.items():
-                    message[f"scaled_loss/{loss_name}"] = loss_value.float().item()
-                for msg_name, msg_value in log.items():
-                    if msg_name.startswith("metric/"):
-                        mean_val = msg_value
-                        if isinstance(msg_value, torch.Tensor):
-                            mean_val = msg_value.detach().float().cpu().numpy().mean()
-                        if isinstance(msg_value, np.ndarray):
-                            mean_val = mean_val.mean()
-                        message[msg_name] = mean_val
-
-                # Convert bfloat16 to float for logging
-                for key, value in message.items():
-                    if (
-                        isinstance(value, torch.Tensor)
-                        and value.dtype == torch.bfloat16
-                    ):
-                        message[key] = value.float().item()
-
-                if self.config.log_wandb:
-                    wandb.log(message, step=self.step, commit=False)
-
-                if self.tensorboard_writer is not None:
-                    for key, value in message.items():
-                        self.tensorboard_writer.add_scalar(
-                            key,
-                            value,
-                            self.step,
-                        )
             self.step += 1
 
     def _load_validation_history(self) -> list[dict]:
@@ -328,6 +487,12 @@ class Logger:
 
     @beartype
     def log_validation_epoch(self, epoch: int, metrics: dict[str, float]):
+        self._safe_logger_call(
+            lambda: self._log_validation_epoch(epoch, metrics),
+            "Validation epoch logging",
+        )
+
+    def _log_validation_epoch(self, epoch: int, metrics: dict[str, float]):
         if self.config.rank != 0:
             return
         clean_metrics = self._clean_validation_metrics(metrics)
@@ -337,8 +502,7 @@ class Logger:
         validation_epoch = epoch + 1
         message = {"validation_epoch": validation_epoch, **clean_metrics}
 
-        if self.config.log_wandb:
-            wandb.log(message)
+        self._safe_wandb_log(message)
 
         if self.tensorboard_writer is not None:
             for key, value in clean_metrics.items():
@@ -360,16 +524,16 @@ class Logger:
         self._save_validation_plots()
 
     def logs(self, msg: dict):
+        self._safe_logger_call(lambda: self._logs(msg), "Ad-hoc logging")
+
+    def _logs(self, msg: dict):
         if self.config.rank == 0:
-            if self.config.log_wandb:
-                wandb.log(
-                    msg,
-                    step=self.step,
-                    commit=False,
-                )
+            self._safe_wandb_log(msg, step=self.step)
 
             if self.tensorboard_writer is not None:
                 for key, value in msg.items():
+                    if not is_tensorboard_scalar(value):
+                        continue
                     self.tensorboard_writer.add_scalar(
                         key,
                         value,

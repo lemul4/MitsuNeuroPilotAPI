@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path("data/carla_leaderboard2_dual_cameras"),
+        default=Path("data/carla_leaderboard2_dual_cameras_val"),
         help="Dataset root containing the inner data/ directory.",
     )
     parser.add_argument("--left", type=int, default=44, help="Pixels to crop from the left.")

@@ -431,7 +431,6 @@ def initialize_validation_dataloader(
     validation_overrides = {
         "carla_root": config.validation_carla_root,
         "use_color_aug": False,
-        "num_augmented_versions_per_sample": 1,
         "use_sensor_perburtation": False,
         "use_sensor_perburtation_prob": 0.0,
         "carla_dataset_fraction": config.val_dataset_fraction,

@@ -126,8 +126,35 @@ class MixedDataset(torch.utils.data.Dataset):
         dataset_idx = index % self.num_datasets
         dataset_sample_idx = index // self.num_datasets
 
-        # Access the underlying dataset directly
-        return self.datasets[dataset_idx][dataset_sample_idx]
+        dataset = self.datasets[dataset_idx]
+        max_attempts = min(len(dataset), 16)
+        for attempt in range(max_attempts):
+            sample_idx = (dataset_sample_idx + attempt) % len(dataset)
+            # Access the underlying dataset directly. Datasets can return None for
+            # samples they explicitly validate and reject.
+            sample = dataset[sample_idx]
+
+            if sample is not None:
+                return sample
+
+            LOG.warning(
+                "Skipping empty dataset sample: dataset_idx=%s sample_idx=%s "
+                "mixed_idx=%s attempt=%s",
+                dataset_idx,
+                sample_idx,
+                index,
+                attempt,
+            )
+
+        LOG.warning(
+            "Could not find replacement sample: dataset_idx=%s sample_idx=%s "
+            "mixed_idx=%s attempts=%s",
+            dataset_idx,
+            dataset_sample_idx,
+            index,
+            max_attempts,
+        )
+        return None
 
     def shuffle(self, epoch):
         """Shuffle the underlying datasets with custom implemented shuffle function."""
@@ -220,6 +247,10 @@ def mixed_data_collate_fn(batch):
     What happens is that some datasets may not have all keys (e.g., some datasets may not have semantic segmentation labels).
     This function collates the batch while filling in missing keys with default values.
     """
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
+
     all_keys = set()
     for b in batch:
         all_keys.update(b.keys())

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import lzma
+import numbers
 import os
 import random
 import time
@@ -35,6 +36,14 @@ from lead.data_loader.training_cache import CacheKey, PersistentCache, SensorDat
 from lead.training.config_training import TrainingConfig
 
 LOG = logging.getLogger(__name__)
+
+
+def _is_positive_integer(value) -> bool:
+    return (
+        isinstance(value, numbers.Integral)
+        and not isinstance(value, bool)
+        and int(value) > 0
+    )
 
 
 class CARLAData(Dataset):
@@ -77,11 +86,6 @@ class CARLAData(Dataset):
         )
         self.hdmap_converter = np.uint8(list(hdmap_converter.values()))
         self.image_augmenter_func = image_augmenter(config, config.use_color_aug_prob)
-        self.num_augmented_versions_per_sample = (
-            max(1, int(config.num_augmented_versions_per_sample))
-            if config.use_color_aug and not build_cache and not build_buckets
-            else 1
-        )
         self.random = random
         self.build_cache = build_cache
         self.build_buckets = build_buckets
@@ -197,13 +201,6 @@ class CARLAData(Dataset):
         raise FileNotFoundError(f"RGB image not found: {image_path}")
 
     def __getitem__(self, index):
-        dataset_index = index
-        augmentation_version_index = 0
-        if self.num_augmented_versions_per_sample > 1:
-            index = dataset_index // self.num_augmented_versions_per_sample
-            augmentation_version_index = (
-                dataset_index % self.num_augmented_versions_per_sample
-            )
 
         # ----------------------------------------------------------------------------------------
         # First part of the dataloader: lightweight meta data
@@ -214,17 +211,33 @@ class CARLAData(Dataset):
         start_loading_time = time.time()
         data = {}
 
-        future_waypoint_indices = [self.config.waypoints_spacing]
-        for _ in range(self.config.num_way_points_prediction - 1):
-            future_waypoint_indices.append(
-                future_waypoint_indices[-1] + self.config.waypoints_spacing
+        waypoints_spacing = self.config.waypoints_spacing
+        num_way_points_prediction = self.config.num_way_points_prediction
+        if not _is_positive_integer(waypoints_spacing):
+            LOG.warning(
+                "Skipping CARLA sample with invalid waypoints_spacing: "
+                "index=%s value=%r type=%s",
+                index,
+                waypoints_spacing,
+                type(waypoints_spacing).__name__,
             )
+            return None
+        if not _is_positive_integer(num_way_points_prediction):
+            LOG.warning(
+                "Skipping CARLA sample with invalid num_way_points_prediction: "
+                "index=%s value=%r type=%s",
+                index,
+                num_way_points_prediction,
+                type(num_way_points_prediction).__name__,
+            )
+            return None
 
-        past_waypoint_indices = [self.config.waypoints_spacing]
-        for _ in range(self.config.num_way_points_prediction - 1):
-            past_waypoint_indices.append(
-                past_waypoint_indices[-1] + self.config.waypoints_spacing
-            )
+        waypoints_spacing = int(waypoints_spacing)
+        num_way_points_prediction = int(num_way_points_prediction)
+        future_waypoint_indices = [
+            waypoints_spacing * (i + 1) for i in range(num_way_points_prediction)
+        ]
+        past_waypoint_indices = list(future_waypoint_indices)
 
         # Determine files of index
         global_index = self.global_indices[index]  # Index in dataset
@@ -262,8 +275,6 @@ class CARLAData(Dataset):
                 "perturbation_translation": perturbation_translation,
                 "perturbation_rotation": perturbation_rotation,
                 "index": index,
-                "dataset_index": dataset_index,
-                "augmentation_version_index": augmentation_version_index,
                 "global_index": global_index,
                 "bucket_identity": self.bucket_identity[index],
                 "route_number": measurement_file.split("/")[-3],
@@ -1369,4 +1380,4 @@ class CARLAData(Dataset):
             self.global_indices = self.global_indices[indices]
 
     def __len__(self):
-        return self.lidars.shape[0] * self.num_augmented_versions_per_sample
+        return self.lidars.shape[0]
