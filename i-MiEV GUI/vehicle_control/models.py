@@ -5,6 +5,8 @@ from enum import Enum
 import time
 from typing import Optional, Tuple, Dict, Any, List
 
+from .road_option import RoadOption, nav_command_to_road_option, road_option_name
+
 
 class DeviceKind(str, Enum):
     VIRTUAL_DEMO = "virtual_demo"
@@ -61,6 +63,8 @@ class NavCommand(str, Enum):
     LANE_FOLLOW = "lane_follow"
     TURN_LEFT = "turn_left"
     TURN_RIGHT = "turn_right"
+    CHANGE_LANE_LEFT = "change_lane_left"
+    CHANGE_LANE_RIGHT = "change_lane_right"
     INTERSECTION = "intersection"
     SLOW = "slow"
     STOP = "stop"
@@ -79,6 +83,12 @@ class NavCommand(str, Enum):
             "forward": cls.STRAIGHT,
             "left": cls.TURN_LEFT,
             "right": cls.TURN_RIGHT,
+            "changelaneleft": cls.CHANGE_LANE_LEFT,
+            "changeleft": cls.CHANGE_LANE_LEFT,
+            "lane_change_left": cls.CHANGE_LANE_LEFT,
+            "changelaneright": cls.CHANGE_LANE_RIGHT,
+            "changeright": cls.CHANGE_LANE_RIGHT,
+            "lane_change_right": cls.CHANGE_LANE_RIGHT,
             "junction": cls.INTERSECTION,
             "crossroad": cls.INTERSECTION,
             "finish": cls.GOAL,
@@ -303,6 +313,15 @@ class Waypoint:
     def nav_command(self) -> NavCommand:
         return NavCommand.normalize(self.command or self.action)
 
+    @property
+    def road_option(self) -> RoadOption:
+        explicit = self.metadata.get("road_option") or self.metadata.get("road_option_name")
+        return nav_command_to_road_option(explicit if explicit is not None else self.nav_command.value)
+
+    @property
+    def road_option_name(self) -> str:
+        return road_option_name(self.road_option)
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any], default_speed_kmh: float = 3.0) -> "Waypoint":
         d = dict(data or {})
@@ -359,6 +378,10 @@ class LocalNavigationGoal:
     heading_error_deg: float = 0.0
     waypoint_index: int = 0
     maneuver: str = "idle"
+    road_option: int = int(RoadOption.LANEFOLLOW)
+    road_option_name: str = RoadOption.LANEFOLLOW.name
+    next_road_option: int = int(RoadOption.LANEFOLLOW)
+    next_road_option_name: str = RoadOption.LANEFOLLOW.name
     desired_speed_kmh: float = 0.0
     speed_cap_kmh: float = 0.0
     stop_required: bool = False

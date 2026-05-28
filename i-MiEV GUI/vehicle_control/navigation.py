@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from .models import Mission, Waypoint, Pose2D, LocalNavigationGoal, NavCommand
+from .road_option import RoadOption, nav_command_to_road_option, road_option_name
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -198,9 +199,9 @@ class NavigatorService:
 
     def update(self, mission: Optional[Mission], pose: Pose2D, speed_kmh: float = 0.0) -> LocalNavigationGoal:
         if mission is None or not mission.waypoints:
-            return LocalNavigationGoal(maneuver="no_mission", valid_until_monotonic=time.monotonic() + 0.1)
+            return LocalNavigationGoal(maneuver="no_mission", road_option=int(RoadOption.VOID), road_option_name=RoadOption.VOID.name, next_road_option=int(RoadOption.VOID), next_road_option_name=RoadOption.VOID.name, valid_until_monotonic=time.monotonic() + 0.1)
         if not pose.valid or pose.age_ms() > self.stale_pose_ms:
-            return LocalNavigationGoal(mission_id=mission.mission_id, maneuver="pose_lost", valid_until_monotonic=time.monotonic() + 0.1)
+            return LocalNavigationGoal(mission_id=mission.mission_id, maneuver="pose_lost", road_option=int(RoadOption.VOID), road_option_name=RoadOption.VOID.name, next_road_option=int(RoadOption.VOID), next_road_option_name=RoadOption.VOID.name, valid_until_monotonic=time.monotonic() + 0.1)
 
         wps = list(mission.waypoints)
         self._active_index = max(0, min(self._active_index, len(wps) - 1))
@@ -227,6 +228,10 @@ class NavigatorService:
         desired_speed = 0.0 if stop_required else speed_cap
         progress = 100.0 * float(target_idx) / max(1.0, float(len(wps) - 1))
 
+        current_road_option = target.road_option
+        next_wp = wps[min(target_idx + 1, len(wps) - 1)]
+        next_road_option = next_wp.road_option
+
         goal = LocalNavigationGoal(
             mission_id=mission.mission_id,
             route_progress=progress,
@@ -239,6 +244,10 @@ class NavigatorService:
             heading_error_deg=heading_error,
             waypoint_index=target_idx,
             maneuver=target.nav_command.value,
+            road_option=int(current_road_option),
+            road_option_name=road_option_name(current_road_option),
+            next_road_option=int(next_road_option),
+            next_road_option_name=road_option_name(next_road_option),
             desired_speed_kmh=desired_speed,
             speed_cap_kmh=speed_cap,
             stop_required=stop_required,

@@ -1,0 +1,14 @@
+{
+  "description": "MCU feedback mapping. Replace CAN IDs and offsets with the firmware contract before real actuation.",
+  "fields": [
+    {"can_id": "0x0001", "field": "angle_deg", "offset": 0, "length": 2, "signed": true, "scale": 0.4921875},
+    {"can_id": "0x0003", "field": "speed_kmh", "offset": 0, "length": 1, "signed": false, "scale": 1.0},
+    {"can_id": "0x0017", "field": "brake_pct", "offset": 0, "length": 1, "signed": false, "scale": 1.0},
+    {"can_id": "0x0018", "field": "accel_pct", "offset": 0, "length": 1, "signed": false, "scale": 1.0},
+    {"can_id": "0x0004", "field": "gear", "offset": 0, "length": 1, "enum": "gear_1_6"},
+    {"can_id": "0x0100", "field": "x_m", "offset": 0, "length": 2, "signed": true, "scale": 0.01},
+    {"can_id": "0x0100", "field": "y_m", "offset": 2, "length": 2, "signed": true, "scale": 0.01},
+    {"can_id": "0x0101", "field": "yaw_deg", "offset": 0, "length": 2, "signed": true, "scale": 0.01},
+    {"can_id": "0x0102", "field": "pose_valid", "offset": 0, "length": 1, "valid_value": 1}
+  ]
+}

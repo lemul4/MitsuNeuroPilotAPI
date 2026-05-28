@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from .models import ControlIntent, LocalNavigationGoal
 from .navigation import clamp
+from .road_option import goal_command_payload
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,21 @@ class RealAgentBridge:
     default_valid_for_ms: int = 100
     max_prediction_age_ms: float = 150.0
     _seq: int = 0
+
+    @staticmethod
+    def build_model_command_payload(goal: Optional[LocalNavigationGoal]) -> Dict[str, Any]:
+        """Return CARLA/Leaderboard-compatible command and next_command fields.
+
+        A real dual-camera adapter should convert `command_one_hot` and
+        `next_command_one_hot` to tensors shaped (1, 6) and pass them to
+        ClosedLoopInference together with RGB, target points and speed.
+        """
+        if goal is None:
+            class EmptyGoal:
+                road_option = -1
+                next_road_option = -1
+            return goal_command_payload(EmptyGoal())
+        return goal_command_payload(goal)
 
     def build_intent(self, prediction: AgentPrediction, goal: Optional[LocalNavigationGoal]) -> ControlIntent:
         self._seq = (self._seq + 1) & 0x7FFFFFFF

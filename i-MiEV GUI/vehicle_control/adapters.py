@@ -7,6 +7,8 @@ from typing import Dict, Optional
 
 from .models import DeviceDescriptor, DeviceKind, VehicleCommand, VehicleTelemetry, Gear
 from .vehicle_gateway import VehicleGateway
+from .mcu_protocol import McuTelemetryParser
+from .safety_config import RealVehicleSafetyConfig
 
 
 class VehicleAdapterError(RuntimeError):
@@ -32,9 +34,11 @@ class BaseVehicleAdapter:
 
 
 class RealSerialVehicleAdapter(BaseVehicleAdapter):
-    def __init__(self, serial_manager, gateway: VehicleGateway):
+    def __init__(self, serial_manager, gateway: VehicleGateway, safety_config: RealVehicleSafetyConfig | None = None, telemetry_parser: McuTelemetryParser | None = None):
         self.serial = serial_manager
         self.gateway = gateway
+        self.safety_config = safety_config or RealVehicleSafetyConfig.load()
+        self.telemetry_parser = telemetry_parser or McuTelemetryParser.load()
         self.telemetry = VehicleTelemetry()
         self.descriptor: Optional[DeviceDescriptor] = None
         self._connected_event = asyncio.Event()
@@ -67,7 +71,13 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
         self.telemetry.heartbeat_ok = False
 
     async def send_command(self, command: VehicleCommand) -> None:
-        self.gateway.write_vehicle_command_now(command)
+        command_to_send = command
+        if not self.safety_config.actuation_allowed:
+            # Host-side dry-run guard. The GUI/control stack can exercise the full
+            # pipeline, but no active acceleration or gear request is emitted unless
+            # MITSU_REAL_ENABLE_ACTUATION=1 and dry_run=false in safety config.
+            command_to_send = VehicleCommand.safe_stop(seq=command.seq, brake_pct=max(25, int(command.brake_pct)), reason="host_dry_run_guard")
+        self.gateway.write_vehicle_command_now(command_to_send)
         self.telemetry.requested_gear = command.gear_request or self.telemetry.requested_gear
         self.telemetry.target_angle_deg = float(command.steering_raw) / 100.0 * 630.0
         self.telemetry.accel_pct = float(command.accel_pct)
@@ -92,29 +102,7 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
         try:
             can_id = int(pkt.CAN_ID)
             data = pkt.CAN_DATA.DATA
-            if can_id == 0x0001:
-                val = int.from_bytes(data[0:2], "little", signed=True)
-                self.telemetry.angle_deg = int(val * 630 / 0x500)
-            elif can_id == 0x0003:
-                self.telemetry.speed_kmh = float(data[0])
-            elif can_id == 0x0017:
-                self.telemetry.brake_pct = float(data[0])
-            elif can_id == 0x0018:
-                self.telemetry.accel_pct = float(data[0])
-            elif can_id == 0x0004:
-                self.telemetry.gear = Gear.from_value(data[0])
-            # Optional future localization telemetry. These IDs are intentionally
-            # isolated here; if the MCU uses different IDs, change only this adapter.
-            elif can_id == 0x0100:
-                self.telemetry.x_m = float(int.from_bytes(data[0:2], "little", signed=True)) / 100.0
-                self.telemetry.y_m = float(int.from_bytes(data[2:4], "little", signed=True)) / 100.0
-                self.telemetry.pose_valid = True
-                self.telemetry.pose_source = "mcu_can_0x0100"
-            elif can_id == 0x0101:
-                raw_yaw = int.from_bytes(data[0:2], "little", signed=True)
-                self.telemetry.yaw_deg = float(raw_yaw) / 100.0
-                self.telemetry.pose_valid = True
-                self.telemetry.pose_source = "mcu_can_0x0101"
+            self.telemetry_parser.apply_packet(can_id, data, self.telemetry)
             self.telemetry.last_rx_monotonic = time.monotonic()
             self.telemetry.heartbeat_ok = True
         except Exception as exc:
@@ -211,7 +199,7 @@ class MockVehicleAdapter(BaseVehicleAdapter):
 
 
 class VehicleAdapterFactory:
-    def __init__(self, real_adapter: RealSerialVehicleAdapter, mock_adapter: MockVehicleAdapter, loopback_adapter: Optional[MockVehicleAdapter] = None):
+    def __init__(self, real_adapter: Optional[RealSerialVehicleAdapter], mock_adapter: MockVehicleAdapter, loopback_adapter: Optional[MockVehicleAdapter] = None):
         self.real_adapter = real_adapter
         self.mock_adapter = mock_adapter
         self.loopback_adapter = loopback_adapter or MockVehicleAdapter(label="TEST_SERIAL_LOOPBACK")
@@ -224,5 +212,7 @@ class VehicleAdapterFactory:
         if descriptor.kind == DeviceKind.REPLAY_LOG:
             return self.mock_adapter
         if descriptor.kind == DeviceKind.REAL_SERIAL:
+            if self.real_adapter is None:
+                raise VehicleAdapterError("Real serial adapter is not configured")
             return self.real_adapter
         raise VehicleAdapterError(f"Unsupported vehicle adapter kind: {descriptor.kind}")
