@@ -644,7 +644,25 @@ class CARLAData(Dataset):
         # Only load this for visualization or training.
         # ----------------------------------------------------------------------------------------
         start_loading_sensor_time = time.time()
-        sensor_data = self._load_sensor_data(data, meta, index, perturbate_sensor)
+        try:
+            sensor_data = self._load_sensor_data(data, meta, index, perturbate_sensor)
+        except Exception as exc:
+            if self.build_cache:
+                error = str(exc)
+                LOG.exception(
+                    "Skipping CARLA sample during cache build: route_dir=%s seq=%s",
+                    data.get("route_dir"),
+                    data.get("seq"),
+                )
+                return {
+                    "cache_build_failed": True,
+                    "route_dir": data.get("route_dir"),
+                    "seq": data.get("seq"),
+                    "index": index,
+                    "error_type": type(exc).__name__,
+                    "error": error[:4000],
+                }
+            raise
         if self.build_cache:
             return data
         # BEV 3rd person images
@@ -899,6 +917,17 @@ class CARLAData(Dataset):
 
         return data
 
+    def _invalidate_sensor_cache_keys(self, *cache_keys: CacheKey):
+        for cache_key in cache_keys:
+            if self.training_session_cache is not None:
+                try:
+                    if cache_key in self.training_session_cache:
+                        del self.training_session_cache[cache_key]
+                except KeyError:
+                    pass
+            if self.persistent_cache is not None:
+                self.persistent_cache.invalidate(cache_key)
+
     @beartype
     def _load_sensor_data(
         self, data: dict, meta: dict, index: int, perturbate_sensor: bool
@@ -988,28 +1017,32 @@ class CARLAData(Dataset):
                 if isinstance(cache, PersistentCache):
                     cache.invalidate(used_cache_key)
 
-        # Data not in cache, load from disk. Do this for all 3 views, since we might need them later.
-        sensor_data_normal = self._load_sensor_data_and_build_cache(
-            data=data,
-            meta=meta,
-            index=index,
-            perturbated=False,
-            perturbation_translation=0.0,
-            perturbation_rotation=0.0,
-            cache_key=cache_key_normal,
-        )
-
-        sensor_data_perturbated = None
-        if self.config.use_sensor_perburtation:
-            sensor_data_perturbated = self._load_sensor_data_and_build_cache(
+        try:
+            # Data not in cache, load from disk. Do this for all 3 views, since we might need them later.
+            sensor_data_normal = self._load_sensor_data_and_build_cache(
                 data=data,
                 meta=meta,
                 index=index,
-                perturbated=True,
-                perturbation_translation=meta["perturbation_translation"],
-                perturbation_rotation=meta["perturbation_rotation"],
-                cache_key=cache_key_perturbated,
+                perturbated=False,
+                perturbation_translation=0.0,
+                perturbation_rotation=0.0,
+                cache_key=cache_key_normal,
             )
+
+            sensor_data_perturbated = None
+            if self.config.use_sensor_perburtation:
+                sensor_data_perturbated = self._load_sensor_data_and_build_cache(
+                    data=data,
+                    meta=meta,
+                    index=index,
+                    perturbated=True,
+                    perturbation_translation=meta["perturbation_translation"],
+                    perturbation_rotation=meta["perturbation_rotation"],
+                    cache_key=cache_key_perturbated,
+                )
+        except Exception:
+            self._invalidate_sensor_cache_keys(cache_key_normal, cache_key_perturbated)
+            raise
 
         # This part is needed to handle special case: bev_3rd_person_image always uses unaugmented version
         if perturbate_sensor and sensor_data_perturbated is not None:

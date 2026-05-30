@@ -4,6 +4,10 @@ import os
 import sys
 
 import torch
+from lead.data_buckets.skip_list import (
+    append_cache_build_failure,
+    cache_build_failures_path,
+)
 from lead.data_loader.carla_dataset import CARLAData
 from lead.training.config_training import TrainingConfig
 from tqdm import tqdm
@@ -116,5 +120,39 @@ if num_workers > 0:
     dataloader_kwargs["prefetch_factor"] = 1
 dataloader = torch.utils.data.DataLoader(data, **dataloader_kwargs)
 
+failed_samples = 0
+failed_keys = set()
 for i, sample in tqdm(enumerate(dataloader), total=len(dataloader)):
-    pass
+    for item in sample:
+        if not isinstance(item, dict) or not item.get("cache_build_failed"):
+            continue
+        route_dir = item.get("route_dir")
+        seq = item.get("seq")
+        if route_dir is None or seq is None:
+            failed_samples += 1
+            continue
+        key = append_cache_build_failure(
+            config.bucket_collection_path,
+            route_dir,
+            seq,
+            item.get("error_type", "Exception"),
+            item.get("error", ""),
+            index=item.get("index"),
+        )
+        failed_keys.add(key)
+        failed_samples += 1
+
+if failed_samples:
+    print(
+        f"Skipped {failed_samples} samples during cache build. "
+        f"Recorded {len(failed_keys)} unique keys in "
+        f"{cache_build_failures_path(config.bucket_collection_path)}."
+    )
+    print("Rebuilding bucket cache without failed samples.")
+    _set_config_value(config, "force_rebuild_bucket", True)
+    CARLAData(
+        root=config.carla_data,
+        config=config,
+        training_session_cache=None,
+        build_buckets=True,
+    )

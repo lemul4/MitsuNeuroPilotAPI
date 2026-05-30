@@ -57,6 +57,8 @@ class BEVDecoder(nn.Module):
             mode=str(self.config.compile_mode).lower(),
         )
         bev_class_weights = torch.ones(self.num_classes, dtype=torch.float32)
+        lane_markers_idx = int(TransfuserBEVSemanticClass.LANE_MARKERS)
+        broken_lane_markers_idx = int(TransfuserBEVSemanticClass.LANE_MARKERS_BROKEN)
         walker_idx = int(TransfuserBEVSemanticClass.WALKER)
         biker_idx = int(TransfuserBEVSemanticClass.BIKER)
         traffic_light_indices = (
@@ -64,6 +66,14 @@ class BEVDecoder(nn.Module):
             int(TransfuserBEVSemanticClass.TRAFFIC_RED_NORMAL),
             int(TransfuserBEVSemanticClass.TRAFFIC_RED_NOT_NORMAL),
         )
+        if lane_markers_idx < self.num_classes:
+            bev_class_weights[lane_markers_idx] = float(
+                self.config.bev_semantic_lane_markers_loss_weight
+            )
+        if broken_lane_markers_idx < self.num_classes:
+            bev_class_weights[broken_lane_markers_idx] = float(
+                self.config.bev_semantic_broken_lane_markers_loss_weight
+            )
         if walker_idx < self.num_classes:
             bev_class_weights[walker_idx] = float(
                 self.config.bev_semantic_walker_loss_weight
