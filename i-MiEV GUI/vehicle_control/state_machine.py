@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from .models import DriveState, ReadinessStatus, ActivationDecision, Gear
+from .models import DriveState, ReadinessStatus, ActivationDecision
 
 
 @dataclass
@@ -21,7 +21,8 @@ class DriveStateMachine:
         if self.state == DriveState.DISCONNECTED:
             return
         if enabled:
-            self.state = DriveState.READY_TO_ARM if readiness.all_ok else DriveState.AI_PREVIEW
+            if self.state not in (DriveState.ARMING, DriveState.AI_ACTIVE, DriveState.MANUAL_ACTIVE, DriveState.DISENGAGING):
+                self.state = DriveState.READY_TO_ARM if readiness.all_ok else DriveState.AI_PREVIEW
         else:
             if self.state not in (DriveState.ARMING, DriveState.AI_ACTIVE, DriveState.MANUAL_ACTIVE, DriveState.DISENGAGING):
                 self.state = DriveState.CONNECTED_MANUAL
@@ -43,21 +44,21 @@ class DriveStateMachine:
     def on_activate_requested(self) -> None:
         self.state = DriveState.ARMING
 
-    def on_gear_drive_confirmed(self) -> None:
+    def on_gear_drive_confirmed(self, manual: bool = False) -> None:
         if self.state == DriveState.ARMING:
-            self.state = DriveState.AI_ACTIVE
+            self.state = DriveState.MANUAL_ACTIVE if manual else DriveState.AI_ACTIVE
 
-    def on_deactivate_requested(self) -> None:
+    def on_manual_takeover(self) -> None:
+        if self.state == DriveState.AI_ACTIVE:
+            self.state = DriveState.MANUAL_ACTIVE
+
+    def on_deactivate_requested(self, park: bool = True) -> None:
         if self.state in (DriveState.AI_ACTIVE, DriveState.MANUAL_ACTIVE, DriveState.ARMING, DriveState.READY_TO_ARM, DriveState.AI_PREVIEW):
-            self.state = DriveState.DISENGAGING
+            self.state = DriveState.DISENGAGING if park else DriveState.MANUAL_ACTIVE
 
     def on_manual_ready(self) -> None:
         if self.state != DriveState.DISCONNECTED:
             self.state = DriveState.CONNECTED_MANUAL
-
-    def on_manual_active(self) -> None:
-        if self.state != DriveState.DISCONNECTED:
-            self.state = DriveState.MANUAL_ACTIVE
 
     def on_fault(self, reason: str) -> None:
         self.last_fault = str(reason or "fault")
@@ -66,3 +67,7 @@ class DriveStateMachine:
     @property
     def ai_has_authority(self) -> bool:
         return self.state == DriveState.AI_ACTIVE
+
+    @property
+    def manual_has_authority(self) -> bool:
+        return self.state == DriveState.MANUAL_ACTIVE

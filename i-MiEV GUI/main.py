@@ -16,20 +16,20 @@ from hardware.serial_comm import SerialManager
 
 try:
     from vehicle_control import (
-        DeviceDescriptor, DeviceKind, Gear, ControlIntent, Mission, Waypoint,
+        DeviceDescriptor, DeviceKind, Gear, ControlIntent, Mission, Waypoint, Pose2D,
         VehicleGateway, RealSerialVehicleAdapter, MockVehicleAdapter,
         VehicleAdapterFactory, VehicleControlService, ControlArbiter,
         ABRouteRequest, CoordinateRoutePlanner, RoadRouteRequest, OsrmRoadRouteProvider,
-        AgentPrediction, RealAgentBridge,
+        AgentPrediction, RealAgentBridge, RealVehicleSafetyConfig,
     )
     VEHICLE_CONTROL_AVAILABLE = True
 except Exception as _vehicle_control_import_error:
     VEHICLE_CONTROL_AVAILABLE = False
-    DeviceDescriptor = DeviceKind = Gear = ControlIntent = Mission = Waypoint = None
+    DeviceDescriptor = DeviceKind = Gear = ControlIntent = Mission = Waypoint = Pose2D = None
     VehicleGateway = RealSerialVehicleAdapter = MockVehicleAdapter = None
     VehicleAdapterFactory = VehicleControlService = ControlArbiter = None
     ABRouteRequest = CoordinateRoutePlanner = RoadRouteRequest = OsrmRoadRouteProvider = None
-    AgentPrediction = RealAgentBridge = None
+    AgentPrediction = RealAgentBridge = RealVehicleSafetyConfig = None
 
 import utils 
 from core.telemetry import TelemetryRecorder, RawTelemetryJsonlReader
@@ -48,6 +48,11 @@ except Exception as _camera_zmq_import_error:
     CameraZmqConfig = None
     ZmqCameraCellReceiverThread = None
     RealCameraAgentAnalyzerThread = None
+
+try:
+    from hardware.pose_provider import JsonPoseProviderThread
+except Exception:
+    JsonPoseProviderThread = None
 
 
 class VideoReceiverThread(QThread):
@@ -279,19 +284,24 @@ class AppController(QObject):
         self.real_agent_analyzer = None
         self.real_camera_status = {"wide_90": False, "narrow_50": False}
         self.real_agent_bridge = RealAgentBridge() if RealAgentBridge is not None else None
+        self.real_pose_provider = None
+        self.real_safety_config = RealVehicleSafetyConfig.load() if RealVehicleSafetyConfig is not None else None
+        if self.real_safety_config is not None:
+            print(f"REAL SAFETY: {self.real_safety_config.describe()}")
         self.vehicle_adapter_factory = None
         self.vehicle_gateway = None
         if VEHICLE_CONTROL_AVAILABLE:
             try:
                 self.vehicle_gateway = VehicleGateway(serial_manager=self.serial)
                 self.vehicle_adapter_factory = VehicleAdapterFactory(
-                    real_adapter=RealSerialVehicleAdapter(self.serial, self.vehicle_gateway),
+                    real_adapter=RealSerialVehicleAdapter(self.serial, self.vehicle_gateway, safety_config=self.real_safety_config),
                     mock_adapter=MockVehicleAdapter(),
                     loopback_adapter=MockVehicleAdapter(label="TEST_SERIAL_LOOPBACK"),
                 )
+                arbiter = ControlArbiter.from_safety_config(self.real_safety_config) if self.real_safety_config is not None else ControlArbiter()
                 self.vehicle_control = VehicleControlService(
                     adapter_factory=self.vehicle_adapter_factory,
-                    arbiter=ControlArbiter(),
+                    arbiter=arbiter,
                 )
                 self.vehicle_control.telemetry_changed.connect(self.handle_vehicle_control_telemetry)
                 self.vehicle_control.state_changed.connect(self.handle_vehicle_control_state)
@@ -312,7 +322,6 @@ class AppController(QObject):
         self.is_connected = False
         self.control_active = False
         self.ai_control_requested = False
-        self.manual_control_requested = False
         self.ai_agent_loading = False
         self.ai_agent_running = False
 
@@ -389,8 +398,6 @@ class AppController(QObject):
         self.view.manual_input_updated.connect(self.handle_manual_input)
         self.view.telemetry_toggled.connect(self.handle_telemetry_toggle)
         self.view.ai_toggled.connect(self.handle_ai_toggle)
-        if hasattr(self.view, "manual_toggled"):
-            self.view.manual_toggled.connect(self.handle_manual_toggle)
 
         # Новый UI отправляет один список: 1 маршрут => одиночный запуск, N маршрутов => очередь.
         # Старые сигналы single/queue оставлены как fallback, но основной путь — route_launch_requested.
@@ -463,6 +470,7 @@ class AppController(QObject):
             self.view.set_connection_status(ok, message)
             if ok:
                 self._start_real_camera_stack()
+                self._start_real_pose_provider()
             if hasattr(self.view, "set_real_readiness"):
                 self.view.set_real_readiness(
                     route=self.real_mission_prepared,
@@ -477,6 +485,7 @@ class AppController(QObject):
             self.is_connected = False
             self.control_active = False
             self._stop_real_camera_stack()
+            self._stop_real_pose_provider()
             if hasattr(self.view, "set_real_readiness"):
                 self.view.set_real_readiness(route=self.real_mission_prepared, pose=False, cameras=False, ai=self.ai_control_requested, vehicle=False)
             return
@@ -484,16 +493,10 @@ class AppController(QObject):
         if label == "real_control_toggle":
             requested = bool(result.get("requested"))
             active = bool(result.get("active")) and not error
-            mode = str(result.get("mode") or "")
             self.control_active = active
-            if mode == "manual":
-                self.manual_control_requested = True
-                if hasattr(self.view, "set_manual_checkbox"):
-                    self.view.set_manual_checkbox(True)
-                self._set_control_button_checked_later(True)
-            elif requested and not active:
+            if requested and not active:
                 self._set_control_button_checked_later(False)
-            elif not requested and not active:
+            if not requested:
                 self._set_control_button_checked_later(False)
             message = result.get("message")
             if message:
@@ -591,12 +594,50 @@ class AppController(QObject):
                 wide_url=f"tcp://127.0.0.1:{ports['wide_90']}",
                 narrow_url=f"tcp://127.0.0.1:{ports['narrow_50']}",
             )
-            analyzer = RealCameraAgentAnalyzerThread(cfg)
+            analyzer = RealCameraAgentAnalyzerThread(cfg, context_provider=self._build_real_agent_context)
             analyzer.camera_status_changed.connect(self.handle_real_agent_camera_status)
             analyzer.prediction_ready.connect(self.handle_real_agent_prediction)
             analyzer.analyzer_status_changed.connect(lambda msg: print(f"REAL AGENT: {msg}"))
             self.real_agent_analyzer = analyzer
             analyzer.start()
+
+    def _start_real_pose_provider(self):
+        if JsonPoseProviderThread is None or self.real_pose_provider is not None:
+            return
+        pose_path = os.environ.get("MITSU_REAL_POSE_JSON", "").strip()
+        if not pose_path:
+            return
+        provider = JsonPoseProviderThread(pose_path)
+        provider.pose_received.connect(self.handle_real_pose_payload)
+        provider.status_changed.connect(lambda ok, msg: print(f"REAL POSE: {msg}"))
+        self.real_pose_provider = provider
+        provider.start()
+        print(f"REAL POSE: provider started: {pose_path}")
+
+    def _stop_real_pose_provider(self):
+        provider = self.real_pose_provider
+        self.real_pose_provider = None
+        if provider is not None:
+            try:
+                provider.stop()
+            except Exception:
+                pass
+
+    @Slot(dict)
+    def handle_real_pose_payload(self, payload):
+        if self.vehicle_control is None or Pose2D is None:
+            return
+        try:
+            pose = Pose2D(
+                x_m=float(payload.get("x_m", 0.0)),
+                y_m=float(payload.get("y_m", 0.0)),
+                yaw_deg=float(payload.get("yaw_deg", 0.0)),
+                valid=bool(payload.get("valid", True)),
+                source=str(payload.get("source", "json_pose_provider")),
+            )
+            self.vehicle_control.submit_pose(pose)
+        except Exception as exc:
+            print(f"REAL POSE: payload rejected: {exc}")
 
     def _stop_real_camera_stack(self):
         analyzer = self.real_agent_analyzer
@@ -640,6 +681,32 @@ class AppController(QObject):
         if hasattr(self.view, "set_real_agent_status"):
             self.view.set_real_agent_status(bool(ok), str(message or ""))
 
+    def _build_real_agent_context(self):
+        if self.vehicle_control is None or RealAgentBridge is None:
+            return {}
+        telemetry = self.vehicle_control.get_telemetry()
+        goal = self.vehicle_control.get_current_goal() if hasattr(self.vehicle_control, "get_current_goal") else None
+        payload = RealAgentBridge.build_model_command_payload(goal)
+        target_point = [0.0, 0.0]
+        target_point_next = [0.0, 0.0]
+        target_point_previous = [0.0, 0.0]
+        if goal is not None and getattr(goal, "is_valid", lambda: False)():
+            # target_* are already in the real local route frame. A concrete model
+            # adapter may rotate them into ego coordinates if its checkpoint requires it.
+            target_point = [float(goal.target_x_m), float(goal.target_y_m)]
+            target_point_next = target_point
+            target_point_previous = [float(telemetry.x_m), float(telemetry.y_m)]
+        return {
+            "telemetry": telemetry,
+            "goal": goal,
+            "speed_kmh": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0),
+            "speed_mps": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0) / 3.6,
+            "target_point": target_point,
+            "target_point_next": target_point_next,
+            "target_point_previous": target_point_previous,
+            **payload,
+        }
+
     @Slot(dict)
     def handle_real_agent_prediction(self, payload):
         if self.vehicle_control is None or self.real_agent_bridge is None or AgentPrediction is None:
@@ -679,6 +746,7 @@ class AppController(QObject):
 
         try:
             self._stop_real_camera_stack()
+            self._stop_real_pose_provider()
         except Exception:
             pass
 
@@ -929,49 +997,24 @@ class AppController(QObject):
                 "active": False,
                 "message": "Real vehicle control modules unavailable",
             }
-
-        # Activate in manual mode: the vehicle is armed into Drive with brake hold,
-        # but no autonomy loop is started. The route remains a navigation hint.
         if is_active:
-            if self.manual_control_requested:
-                ok = await self.vehicle_control.activate_manual_control()
-                return {
-                    "ok": bool(ok),
-                    "requested": True,
-                    "active": bool(ok),
-                    "mode": "manual",
-                    "message": "Ручное управление активно" if ok else "Ручное управление заблокировано",
-                }
             ok = await self.vehicle_control.activate_control()
             return {
                 "ok": bool(ok),
                 "requested": True,
                 "active": bool(ok),
-                "mode": "ai",
                 "message": "AI control active" if ok else "Activation blocked",
             }
-
-        # If the user presses Activate Control again while AI has authority,
-        # transfer to manual mode instead of parking. A subsequent click with the
-        # manual flag off will perform safe stop + Park.
-        state = self.vehicle_control.state_machine.state if getattr(self.vehicle_control, "state_machine", None) else None
-        if state is not None and getattr(state, "value", "") == "AI_ACTIVE":
-            ok = await self.vehicle_control.transfer_ai_to_manual(reason="user_takeover")
-            return {
-                "ok": bool(ok),
-                "requested": False,
-                "active": bool(ok),
-                "mode": "manual",
-                "message": "ИИ отключен, включено ручное управление" if ok else "Переход в ручной режим заблокирован",
-            }
-
-        await self.vehicle_control.deactivate_control(reason="user_requested", park=True)
+        current_state = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+        park = not (current_state is not None and getattr(current_state, "value", str(current_state)) == "AI_ACTIVE")
+        await self.vehicle_control.deactivate_control(reason="user_requested", park=park)
+        still_manual = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+        manual_active = still_manual is not None and getattr(still_manual, "value", str(still_manual)) == "MANUAL_ACTIVE"
         return {
             "ok": True,
             "requested": False,
-            "active": False,
-            "mode": "parked",
-            "message": "Управление отключено, Park запрошен после остановки",
+            "active": manual_active,
+            "message": "Manual control active" if manual_active else "Control disabled",
         }
 
     async def _disable_real_ai_preview_after_disengage(self):
@@ -1113,19 +1156,6 @@ class AppController(QObject):
         self.control_active = False
         self._send_cruise_state(False)
         self.abort_active_scenario("Control выключен: сценарий остановлен", keep_plan=True)
-
-    def handle_manual_toggle(self, is_active):
-        self.manual_control_requested = bool(is_active)
-        if self.runtime_mode != "real":
-            return
-        if is_active:
-            self.view.statusBar().showMessage("Ручное управление включено: маршрут будет подсказкой, управление — с клавиатуры")
-            return
-        self.view.statusBar().showMessage("Ручное управление выключено")
-        # If manual control currently owns the vehicle, turning the flag off means
-        # safe stop + Park. This keeps the AI Preview flag separate from manual mode.
-        if self.control_active and self.vehicle_control is not None:
-            self._schedule_async(self.vehicle_control.deactivate_control(reason="manual_disabled", park=True), "real_control_toggle")
 
     def handle_ai_toggle(self, is_active):
         self.ai_control_requested = bool(is_active)
@@ -1996,13 +2026,10 @@ class AppController(QObject):
         if self.runtime_mode == "real":
             if self.vehicle_control is None or not self.is_connected:
                 return
-            if not self.manual_control_requested:
-                return
-            # While AI has authority manual keys are ignored. When the user presses
-            # Activate Control again, _handle_real_control_toggle transfers the
-            # vehicle to MANUAL_ACTIVE and sets manual_control_requested=True.
-            state = self.vehicle_control.state_machine.state if getattr(self.vehicle_control, "state_machine", None) else None
-            if state is not None and getattr(state, "value", "") == "AI_ACTIVE":
+            # In real/mock mode manual commands are available after AI authority
+            # has been disengaged. While AI is active, keyboard input is ignored
+            # rather than mixed into the autonomy command stream.
+            if self.control_active:
                 return
             self._schedule_async(self.vehicle_control.submit_manual_command(angle, accel, brake), "real_manual_command")
             return
@@ -2020,18 +2047,11 @@ class AppController(QObject):
         if self.runtime_mode == "real":
             if self.vehicle_control is None or not self.is_connected:
                 return
-            if not self.manual_control_requested:
+            if self.control_active:
                 now = time.monotonic()
                 if now - self._last_real_gear_ignore_log_at > 1.0:
                     self._last_real_gear_ignore_log_at = now
-                    print("REAL CONTROL: ручная передача заблокирована: включите флаг Ручное управление")
-                return
-            state = self.vehicle_control.state_machine.state if getattr(self.vehicle_control, "state_machine", None) else None
-            if state is not None and getattr(state, "value", "") == "AI_ACTIVE":
-                now = time.monotonic()
-                if now - self._last_real_gear_ignore_log_at > 1.0:
-                    self._last_real_gear_ignore_log_at = now
-                    print("REAL CONTROL: ручная передача заблокирована: сначала перейдите из ИИ в ручной режим")
+                    print("REAL CONTROL: ручная передача заблокирована: сначала отключите Activate Control")
                 return
             self._schedule_async(self.vehicle_control.request_manual_gear(gear_idx), "real_gear_request")
             return

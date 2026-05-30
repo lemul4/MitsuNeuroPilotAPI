@@ -1,0 +1,19 @@
+{
+  "profile_name": "first_real_vehicle_test",
+  "dry_run": true,
+  "allow_real_actuation": false,
+  "require_heartbeat": true,
+  "require_pose": true,
+  "require_two_cameras": true,
+  "require_gear_feedback": true,
+  "max_speed_kmh": 1.0,
+  "max_accel_pct": 8,
+  "max_brake_pct": 80,
+  "max_steering_raw": 45,
+  "command_timeout_ms": 100,
+  "gear_confirm_timeout_sec": 2.0,
+  "park_speed_threshold_kmh": 0.25,
+  "metadata": {
+    "note": "Keep dry_run=true until MCU bench, telemetry-only and gear test have passed."
+  }
+}

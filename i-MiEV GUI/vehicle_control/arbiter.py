@@ -32,6 +32,17 @@ class ControlArbiter:
     _last_command_time: float = 0.0
     _seq: int = 0
 
+    @classmethod
+    def from_safety_config(cls, config) -> "ControlArbiter":
+        """Create conservative command limits from RealVehicleSafetyConfig."""
+        return cls(
+            max_accel_pct=int(getattr(config, "max_accel_pct", 10)),
+            max_brake_pct=int(getattr(config, "max_brake_pct", 80)),
+            max_steering_raw=int(getattr(config, "max_steering_raw", 60)),
+            stale_prediction_ms=float(getattr(config, "command_timeout_ms", 100)),
+            default_speed_cap_kmh=float(getattr(config, "max_speed_kmh", 1.0)),
+        )
+
     def build_command(
         self,
         intent: ControlIntent,

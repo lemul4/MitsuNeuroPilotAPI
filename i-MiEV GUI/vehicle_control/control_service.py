@@ -65,6 +65,7 @@ class VehicleControlService(QObject):
         self.adapter = None
         self.descriptor: Optional[DeviceDescriptor] = None
         self.ai_preview_enabled = False
+        self.manual_mode_enabled = False
         self.mission: Optional[Mission] = None
         self.pose_ok = True
         self.cameras_ok = True
@@ -182,6 +183,14 @@ class VehicleControlService(QObject):
         if not enabled:
             self._last_external_intent = None
 
+    def set_manual_mode_enabled(self, enabled: bool) -> None:
+        self.manual_mode_enabled = bool(enabled)
+        # Manual mode is an explicit authority mode. It does not require the neural
+        # preview flag, but it still requires mission, pose, cameras and vehicle readiness
+        # before Activate Control can arm Drive.
+        self._refresh_readiness_state()
+        self._log("Manual mode enabled" if enabled else "Manual mode disabled")
+
     def get_current_goal(self):
         return self._last_goal
 
@@ -211,8 +220,8 @@ class VehicleControlService(QObject):
             connected=self._connected and telemetry.connected,
             mission_ok=self.mission is not None and bool(self.mission.waypoints),
             pose_ok=self.pose_ok and pose_valid and pose_fresh,
-            cameras_ok=self.cameras_ok,
-            ai_preview_ok=self.ai_preview_enabled,
+            cameras_ok=self.cameras_ok or self.manual_mode_enabled,
+            ai_preview_ok=self.ai_preview_enabled or self.manual_mode_enabled,
             vehicle_ok=self.vehicle_ok and telemetry.heartbeat_ok,
             speed_zero=telemetry.speed_kmh <= self.park_speed_threshold_kmh,
             gear_known=telemetry.gear is not None,
@@ -252,6 +261,7 @@ class VehicleControlService(QObject):
         self._connected = False
         self.vehicle_ok = False
         self.ai_preview_enabled = False
+        self.manual_mode_enabled = False
         self.state_machine.on_disconnected()
         self._emit_state()
         self._log("Vehicle disconnected")
@@ -279,35 +289,6 @@ class VehicleControlService(QObject):
             self._refresh_readiness_state()
             await asyncio.sleep(0.05)
 
-    async def _request_drive_with_brake_hold(self, reason: str) -> bool:
-        """Hold brake, request Drive and verify feedback before enabling authority."""
-        self._log(f"ARMING: brake hold ({reason})")
-        await self._send_raw_command(
-            VehicleCommand(
-                active=False,
-                gear_request=None,
-                accel_pct=0,
-                brake_pct=35,
-                cruise_enabled=False,
-                reason=f"brake_hold_{reason}",
-            )
-        )
-        await asyncio.sleep(0.1)
-
-        telemetry = self.get_telemetry()
-        if telemetry.gear != Gear.D:
-            self._log("ARMING: requesting Drive")
-            if self.adapter is not None:
-                await self.adapter.request_gear(Gear.D)
-            await asyncio.sleep(self.arming_delay_sec)
-
-        telemetry = self.get_telemetry()
-        if telemetry.gear != Gear.D:
-            actual = telemetry.gear.name if telemetry.gear else "unknown"
-            self._log(f"Drive request not confirmed: actual={actual}")
-            return False
-        return True
-
     async def activate_control(self) -> bool:
         async with self._mode_lock:
             readiness = self._build_readiness()
@@ -319,8 +300,17 @@ class VehicleControlService(QObject):
 
             self.state_machine.on_activate_requested()
             self._emit_state()
-            if not await self._request_drive_with_brake_hold("ai"):
-                telemetry = self.get_telemetry()
+            self._log("ARMING: brake hold")
+            await self._send_raw_command(VehicleCommand(active=False, gear_request=None, accel_pct=0, brake_pct=35, cruise_enabled=False, reason="brake_hold"))
+            await asyncio.sleep(0.1)
+
+            self._log("ARMING: requesting Drive")
+            if self.adapter is not None:
+                await self.adapter.request_gear(Gear.D)
+            await asyncio.sleep(self.arming_delay_sec)
+
+            telemetry = self.get_telemetry()
+            if telemetry.gear != Gear.D:
                 reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
                 self.state_machine.on_fault(reason)
                 self._emit_state()
@@ -328,59 +318,58 @@ class VehicleControlService(QObject):
                 self._log(f"Activation failed: {reason}")
                 return False
 
-            self.state_machine.on_gear_drive_confirmed()
+            manual_active = bool(self.manual_mode_enabled and not self.ai_preview_enabled)
+            self.state_machine.on_gear_drive_confirmed(manual=manual_active)
             self._emit_state()
-            self._log("AI_ACTIVE")
-            self._start_autonomy_loop()
-            return True
-
-    async def activate_manual_control(self) -> bool:
-        """Arm the real vehicle for keyboard/manual driving without AI authority."""
-        async with self._mode_lock:
-            if self.adapter is None or self.state_machine.state == DriveState.DISCONNECTED:
-                self.activation_blocked.emit("Vehicle is not connected")
-                self._log("Manual activation blocked: vehicle is not connected")
-                return False
-            telemetry = self.get_telemetry()
-            if not telemetry.connected or not telemetry.heartbeat_ok:
-                self.activation_blocked.emit("Vehicle heartbeat is not valid")
-                self._log("Manual activation blocked: heartbeat is not valid")
-                return False
-
-            self._stop_autonomy_loop()
-            self.state_machine.on_activate_requested()
-            self._emit_state()
-            if not await self._request_drive_with_brake_hold("manual"):
-                telemetry = self.get_telemetry()
-                reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
-                self.state_machine.on_fault(reason)
-                self._emit_state()
-                self.activation_blocked.emit(reason)
-                self._log(f"Manual activation failed: {reason}")
-                return False
-
-            self.state_machine.on_manual_active()
-            self._emit_state()
-            self._log("MANUAL_ACTIVE")
+            if manual_active:
+                self._log("MANUAL_ACTIVE")
+            else:
+                self._log("AI_ACTIVE")
+                self._start_autonomy_loop()
             return True
 
     async def transfer_ai_to_manual(self, reason: str = "driver_takeover") -> bool:
-        """Drop AI authority and keep the vehicle ready for manual control.
+        """Transfer authority from AI to manual control without requesting Park.
 
-        This does not request Park. It sends a short brake/zero-throttle command,
-        leaves Drive confirmed, switches the state to MANUAL_ACTIVE and lets the
-        UI/driver send manual steering/throttle/brake commands immediately.
+        This method is used when the operator presses Activate Control again
+        while AI_ACTIVE. The vehicle remains in Drive, AI commands are stopped,
+        a short zero-throttle/brake command is sent, and manual steering/throttle/
+        brake commands can be accepted immediately afterwards. Park is handled
+        only by full deactivation after the vehicle has stopped.
         """
         async with self._mode_lock:
-            if self.adapter is None or self.state_machine.state == DriveState.DISCONNECTED:
+            if self.adapter is None:
                 return False
+            if self.state_machine.state == DriveState.DISCONNECTED:
+                return False
+            if self.state_machine.state == DriveState.MANUAL_ACTIVE:
+                self.manual_mode_enabled = True
+                return True
+            if self.state_machine.state != DriveState.AI_ACTIVE:
+                self._log(f"Manual takeover ignored: state={self.state_machine.state.value}")
+                return False
+
             self._stop_autonomy_loop()
+            self.manual_mode_enabled = True
+
+            # Drop AI authority and remove throttle immediately. This is not a
+            # Park request and must not wait for full stop; the operator receives
+            # manual authority right away.
             await self._send_raw_command(VehicleCommand.safe_stop(reason=reason))
+
             telemetry = self.get_telemetry()
-            if telemetry.gear != Gear.D:
-                await self._request_drive_with_brake_hold("manual_takeover")
-            self.state_machine.on_manual_active()
+            if telemetry.gear != Gear.D and self.adapter is not None:
+                self._log(f"Manual takeover: Drive not confirmed, requesting D; actual={telemetry.gear.name if telemetry.gear else 'unknown'}")
+                await self.adapter.request_gear(Gear.D)
+                await asyncio.sleep(min(0.15, float(self.arming_delay_sec)))
+
+            self.state_machine.on_manual_takeover()
+            # If state machine implementation is stricter, force the resulting
+            # authority state only after a valid AI_ACTIVE precondition above.
+            if self.state_machine.state != DriveState.MANUAL_ACTIVE:
+                self.state_machine.state = DriveState.MANUAL_ACTIVE
             self._emit_state()
+            self.telemetry_changed.emit(self.get_telemetry())
             self._log(f"MANUAL_ACTIVE: {reason}")
             return True
 
@@ -390,8 +379,20 @@ class VehicleControlService(QObject):
                 return
             if self.state_machine.state == DriveState.DISCONNECTED:
                 return
+
+            # Repeated Activate/Deactivate while AI has authority is a driver takeover,
+            # not an immediate Park request. Park is allowed only after explicit full
+            # disengage and after the vehicle has stopped.
+            if not park and self.state_machine.state == DriveState.AI_ACTIVE:
+                self._stop_autonomy_loop()
+                self.manual_mode_enabled = True
+                self.state_machine.on_manual_takeover()
+                self._emit_state()
+                self._log(f"MANUAL_ACTIVE: {reason}")
+                return
+
             self._stop_autonomy_loop()
-            self.state_machine.on_deactivate_requested()
+            self.state_machine.on_deactivate_requested(park=park)
             self._emit_state()
             self._log(f"DISENGAGING: {reason}")
 
@@ -405,11 +406,8 @@ class VehicleControlService(QObject):
                 await asyncio.sleep(0.05)
 
             telemetry = self.get_telemetry()
-            if park and telemetry.speed_kmh <= self.park_speed_threshold_kmh:
+            if telemetry.speed_kmh <= self.park_speed_threshold_kmh:
                 try:
-                    # i-MiEV style interlock: brake/zero throttle first, then Park request.
-                    await self._send_raw_command(VehicleCommand.safe_stop(reason="brake_hold_before_park"))
-                    await asyncio.sleep(0.1)
                     await self.adapter.request_gear(Gear.P)
                     telemetry = self.get_telemetry()
                     if telemetry.gear == Gear.P:
@@ -419,10 +417,8 @@ class VehicleControlService(QObject):
                         self._log(f"Gear P requested, waiting feedback: actual={actual}")
                 except Exception as exc:
                     self._log(f"Park request skipped: {exc}")
-            elif park:
-                self._log(f"Park skipped: vehicle still moving ({telemetry.speed_kmh:.2f} km/h)")
             else:
-                self._log("Park request skipped: manual takeover mode")
+                self._log(f"Park skipped: vehicle still moving ({telemetry.speed_kmh:.2f} km/h)")
 
             self.state_machine.on_manual_ready()
             self._emit_state()

@@ -1,0 +1,7 @@
+{
+  "x_m": 0.0,
+  "y_m": 0.0,
+  "yaw_deg": 0.0,
+  "valid": true,
+  "source": "external_pose_provider"
+}
