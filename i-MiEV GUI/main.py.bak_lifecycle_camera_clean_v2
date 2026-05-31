@@ -16,20 +16,20 @@ from hardware.serial_comm import SerialManager
 
 try:
     from vehicle_control import (
-        DeviceDescriptor, DeviceKind, Gear, ControlIntent, Mission, Waypoint,
+        DeviceDescriptor, DeviceKind, Gear, ControlIntent, Mission, Waypoint, Pose2D,
         VehicleGateway, RealSerialVehicleAdapter, MockVehicleAdapter,
         VehicleAdapterFactory, VehicleControlService, ControlArbiter,
         ABRouteRequest, CoordinateRoutePlanner, RoadRouteRequest, OsrmRoadRouteProvider,
-        AgentPrediction, RealAgentBridge,
+        AgentPrediction, RealAgentBridge, RealVehicleSafetyConfig,
     )
     VEHICLE_CONTROL_AVAILABLE = True
 except Exception as _vehicle_control_import_error:
     VEHICLE_CONTROL_AVAILABLE = False
-    DeviceDescriptor = DeviceKind = Gear = ControlIntent = Mission = Waypoint = None
+    DeviceDescriptor = DeviceKind = Gear = ControlIntent = Mission = Waypoint = Pose2D = None
     VehicleGateway = RealSerialVehicleAdapter = MockVehicleAdapter = None
     VehicleAdapterFactory = VehicleControlService = ControlArbiter = None
     ABRouteRequest = CoordinateRoutePlanner = RoadRouteRequest = OsrmRoadRouteProvider = None
-    AgentPrediction = RealAgentBridge = None
+    AgentPrediction = RealAgentBridge = RealVehicleSafetyConfig = None
 
 import utils 
 from core.telemetry import TelemetryRecorder, RawTelemetryJsonlReader
@@ -49,6 +49,11 @@ except Exception as _camera_zmq_import_error:
     ZmqCameraCellReceiverThread = None
     RealCameraAgentAnalyzerThread = None
 
+try:
+    from hardware.pose_provider import JsonPoseProviderThread
+except Exception:
+    JsonPoseProviderThread = None
+
 
 class VideoReceiverThread(QThread):
     frame_received = Signal(QPixmap)
@@ -62,6 +67,15 @@ class VideoReceiverThread(QThread):
         print("[GUI_VIDEO_THREAD] Запуск потока приема видео...")
         context = zmq.Context()
         socket = context.socket(zmq.SUB)
+        # MITSU_REALTIME_ZMQ_RECEIVER_PATCH
+        # Operator preview must show the newest road frame, not a queued backlog.
+        # If the UI thread is slower than the camera service, drop old JPEGs.
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.RCVHWM, 1)
+        try:
+            socket.setsockopt(zmq.CONFLATE, 1)
+        except Exception:
+            pass
         
         # Важно: используем адрес отправителя
         try:
@@ -95,6 +109,12 @@ class VideoReceiverThread(QThread):
                 # Если данных нет долгое время
                 pass 
 
+
+        # MITSU_REALTIME_ZMQ_RECEIVER_CLOSE
+        try:
+            socket.close(0)
+        except Exception:
+            pass
     def stop(self):
         self.is_running = False
         self.wait()
@@ -279,19 +299,24 @@ class AppController(QObject):
         self.real_agent_analyzer = None
         self.real_camera_status = {"wide_90": False, "narrow_50": False}
         self.real_agent_bridge = RealAgentBridge() if RealAgentBridge is not None else None
+        self.real_pose_provider = None
+        self.real_safety_config = RealVehicleSafetyConfig.load() if RealVehicleSafetyConfig is not None else None
+        if self.real_safety_config is not None:
+            print(f"REAL SAFETY: {self.real_safety_config.describe()}")
         self.vehicle_adapter_factory = None
         self.vehicle_gateway = None
         if VEHICLE_CONTROL_AVAILABLE:
             try:
                 self.vehicle_gateway = VehicleGateway(serial_manager=self.serial)
                 self.vehicle_adapter_factory = VehicleAdapterFactory(
-                    real_adapter=RealSerialVehicleAdapter(self.serial, self.vehicle_gateway),
+                    real_adapter=RealSerialVehicleAdapter(self.serial, self.vehicle_gateway, safety_config=self.real_safety_config),
                     mock_adapter=MockVehicleAdapter(),
                     loopback_adapter=MockVehicleAdapter(label="TEST_SERIAL_LOOPBACK"),
                 )
+                arbiter = ControlArbiter.from_safety_config(self.real_safety_config) if self.real_safety_config is not None else ControlArbiter()
                 self.vehicle_control = VehicleControlService(
                     adapter_factory=self.vehicle_adapter_factory,
-                    arbiter=ControlArbiter(),
+                    arbiter=arbiter,
                 )
                 self.vehicle_control.telemetry_changed.connect(self.handle_vehicle_control_telemetry)
                 self.vehicle_control.state_changed.connect(self.handle_vehicle_control_state)
@@ -460,6 +485,7 @@ class AppController(QObject):
             self.view.set_connection_status(ok, message)
             if ok:
                 self._start_real_camera_stack()
+                self._start_real_pose_provider()
             if hasattr(self.view, "set_real_readiness"):
                 self.view.set_real_readiness(
                     route=self.real_mission_prepared,
@@ -474,6 +500,7 @@ class AppController(QObject):
             self.is_connected = False
             self.control_active = False
             self._stop_real_camera_stack()
+            self._stop_real_pose_provider()
             if hasattr(self.view, "set_real_readiness"):
                 self.view.set_real_readiness(route=self.real_mission_prepared, pose=False, cameras=False, ai=self.ai_control_requested, vehicle=False)
             return
@@ -582,12 +609,50 @@ class AppController(QObject):
                 wide_url=f"tcp://127.0.0.1:{ports['wide_90']}",
                 narrow_url=f"tcp://127.0.0.1:{ports['narrow_50']}",
             )
-            analyzer = RealCameraAgentAnalyzerThread(cfg)
+            analyzer = RealCameraAgentAnalyzerThread(cfg, context_provider=self._build_real_agent_context)
             analyzer.camera_status_changed.connect(self.handle_real_agent_camera_status)
             analyzer.prediction_ready.connect(self.handle_real_agent_prediction)
             analyzer.analyzer_status_changed.connect(lambda msg: print(f"REAL AGENT: {msg}"))
             self.real_agent_analyzer = analyzer
             analyzer.start()
+
+    def _start_real_pose_provider(self):
+        if JsonPoseProviderThread is None or self.real_pose_provider is not None:
+            return
+        pose_path = os.environ.get("MITSU_REAL_POSE_JSON", "").strip()
+        if not pose_path:
+            return
+        provider = JsonPoseProviderThread(pose_path)
+        provider.pose_received.connect(self.handle_real_pose_payload)
+        provider.status_changed.connect(lambda ok, msg: print(f"REAL POSE: {msg}"))
+        self.real_pose_provider = provider
+        provider.start()
+        print(f"REAL POSE: provider started: {pose_path}")
+
+    def _stop_real_pose_provider(self):
+        provider = self.real_pose_provider
+        self.real_pose_provider = None
+        if provider is not None:
+            try:
+                provider.stop()
+            except Exception:
+                pass
+
+    @Slot(dict)
+    def handle_real_pose_payload(self, payload):
+        if self.vehicle_control is None or Pose2D is None:
+            return
+        try:
+            pose = Pose2D(
+                x_m=float(payload.get("x_m", 0.0)),
+                y_m=float(payload.get("y_m", 0.0)),
+                yaw_deg=float(payload.get("yaw_deg", 0.0)),
+                valid=bool(payload.get("valid", True)),
+                source=str(payload.get("source", "json_pose_provider")),
+            )
+            self.vehicle_control.submit_pose(pose)
+        except Exception as exc:
+            print(f"REAL POSE: payload rejected: {exc}")
 
     def _stop_real_camera_stack(self):
         analyzer = self.real_agent_analyzer
@@ -631,6 +696,32 @@ class AppController(QObject):
         if hasattr(self.view, "set_real_agent_status"):
             self.view.set_real_agent_status(bool(ok), str(message or ""))
 
+    def _build_real_agent_context(self):
+        if self.vehicle_control is None or RealAgentBridge is None:
+            return {}
+        telemetry = self.vehicle_control.get_telemetry()
+        goal = self.vehicle_control.get_current_goal() if hasattr(self.vehicle_control, "get_current_goal") else None
+        payload = RealAgentBridge.build_model_command_payload(goal)
+        target_point = [0.0, 0.0]
+        target_point_next = [0.0, 0.0]
+        target_point_previous = [0.0, 0.0]
+        if goal is not None and getattr(goal, "is_valid", lambda: False)():
+            # target_* are already in the real local route frame. A concrete model
+            # adapter may rotate them into ego coordinates if its checkpoint requires it.
+            target_point = [float(goal.target_x_m), float(goal.target_y_m)]
+            target_point_next = target_point
+            target_point_previous = [float(telemetry.x_m), float(telemetry.y_m)]
+        return {
+            "telemetry": telemetry,
+            "goal": goal,
+            "speed_kmh": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0),
+            "speed_mps": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0) / 3.6,
+            "target_point": target_point,
+            "target_point_next": target_point_next,
+            "target_point_previous": target_point_previous,
+            **payload,
+        }
+
     @Slot(dict)
     def handle_real_agent_prediction(self, payload):
         if self.vehicle_control is None or self.real_agent_bridge is None or AgentPrediction is None:
@@ -670,6 +761,7 @@ class AppController(QObject):
 
         try:
             self._stop_real_camera_stack()
+            self._stop_real_pose_provider()
         except Exception:
             pass
 
@@ -928,12 +1020,16 @@ class AppController(QObject):
                 "active": bool(ok),
                 "message": "AI control active" if ok else "Activation blocked",
             }
-        await self.vehicle_control.deactivate_control(reason="user_requested")
+        current_state = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+        park = not (current_state is not None and getattr(current_state, "value", str(current_state)) == "AI_ACTIVE")
+        await self.vehicle_control.deactivate_control(reason="user_requested", park=park)
+        still_manual = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+        manual_active = still_manual is not None and getattr(still_manual, "value", str(still_manual)) == "MANUAL_ACTIVE"
         return {
             "ok": True,
             "requested": False,
-            "active": False,
-            "message": "AI control disabled",
+            "active": manual_active,
+            "message": "Manual control active" if manual_active else "Control disabled",
         }
 
     async def _disable_real_ai_preview_after_disengage(self):

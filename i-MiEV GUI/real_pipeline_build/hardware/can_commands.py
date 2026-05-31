@@ -20,7 +20,7 @@ class CANCommandFactory:
         cmd_obj.store_crc8()
         return cmd_obj
 
-# Преднастроенные шаблоны (ID команд взяты из вашего исходника)
+# Преднастроенные шаблоны
 GEAR_TEMPLATE = "AA 00000000 3300 00 02 01 00 00 00 01 00 00"
 ACCEL_TEMPLATE = "AA 00000000 3800 00 02 01 00 00 00 01 00 00"
 BRAKE_TEMPLATE = "AA 00000000 3700 00 02 01 00 00 00 01 00 00"

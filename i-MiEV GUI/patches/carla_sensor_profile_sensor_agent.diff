@@ -1,0 +1,21 @@
+diff --git a/lead/inference/sensor_agent.py b/lead/inference/sensor_agent.py
+--- a/lead/inference/sensor_agent.py
++++ b/lead/inference/sensor_agent.py
+@@
+-from lead.common.sensor_setup import av_sensor_setup
++from lead.common.sensor_setup import av_sensor_setup
++from lead.common.carla_vehicle_sensor_profile import apply_camera_sensor_profile
+@@
+     @beartype
+     def sensors(self) -> list[dict]:
+-        return av_sensor_setup(
++        sensors = av_sensor_setup(
+             config=self.training_config,
+             lidar=True,
+             radar=True,
+             sensor_agent=True,
+             perturbate=False,
+             perturbation_rotation=0.0,
+             perturbation_translation=0.0,
+         )
++        return apply_camera_sensor_profile(sensors, config=self.training_config)

@@ -1,5 +1,7 @@
 carla_fix.pth
 model_2.pth
+model_0011.pth
+trace_log.jsonl
 # Byte-compiled / optimized / DLL files
 **/__pycache__/
 *.py[cod]
@@ -211,3 +213,8 @@ telemetry_*
 .mnp_runtime/
 .idea/
 .agents/
+# Local patch / generated backup files
+*.bak
+*.bak_*
+*.orig
+*.rej

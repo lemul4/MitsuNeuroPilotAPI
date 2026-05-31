@@ -54,6 +54,41 @@ try:
 except Exception:
     JsonPoseProviderThread = None
 
+# --- MITSU_SAFE_MOCK_READY_PRINT_FILTER_V11B_BEGIN ---
+# Safe duplicate-log filter for mock readiness.
+#
+# This does not modify readiness/control logic. It only suppresses repeated
+# identical console messages in this module.
+
+import builtins as _mitsu_v11b_builtins
+
+if not hasattr(_mitsu_v11b_builtins, "_mitsu_original_print"):
+    _mitsu_v11b_builtins._mitsu_original_print = _mitsu_v11b_builtins.print
+
+_mitsu_v11b_seen_mock_ready_logs = set()
+
+
+def print(*args, **kwargs):  # noqa: A001 - intentional module-local print wrapper
+    try:
+        message = " ".join(str(arg) for arg in args)
+    except Exception:
+        message = ""
+
+    suppress_prefixes = (
+        "MOCK MODE: camera stream marked ready",
+        "MOCK MODE: camera readiness forced at service level",
+    )
+
+    for prefix in suppress_prefixes:
+        if message.startswith(prefix):
+            if prefix in _mitsu_v11b_seen_mock_ready_logs:
+                return
+            _mitsu_v11b_seen_mock_ready_logs.add(prefix)
+            break
+
+    return _mitsu_v11b_builtins._mitsu_original_print(*args, **kwargs)
+
+# --- MITSU_SAFE_MOCK_READY_PRINT_FILTER_V11B_END ---
 
 class VideoReceiverThread(QThread):
     frame_received = Signal(QPixmap)
@@ -67,6 +102,15 @@ class VideoReceiverThread(QThread):
         print("[GUI_VIDEO_THREAD] Запуск потока приема видео...")
         context = zmq.Context()
         socket = context.socket(zmq.SUB)
+        # MITSU_REALTIME_ZMQ_RECEIVER_PATCH
+        # Operator preview must show the newest road frame, not a queued backlog.
+        # If the UI thread is slower than the camera service, drop old JPEGs.
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.RCVHWM, 1)
+        try:
+            socket.setsockopt(zmq.CONFLATE, 1)
+        except Exception:
+            pass
         
         # Важно: используем адрес отправителя
         try:
@@ -100,10 +144,14 @@ class VideoReceiverThread(QThread):
                 # Если данных нет долгое время
                 pass 
 
+        # MITSU_REALTIME_ZMQ_RECEIVER_CLOSE
+        try:
+            socket.close(0)
+        except Exception:
+            pass
     def stop(self):
         self.is_running = False
         self.wait()
-
 
 class CarlaMotionMonitorThread(QThread):
     """Background CARLA motion probe for startup watchdog.
@@ -197,7 +245,6 @@ class CarlaMotionMonitorThread(QThread):
                     break
                 self.msleep(100)
 
-
 class AsyncRuntime:
     """Dedicated standard asyncio loop for serial/real-vehicle coroutines.
 
@@ -257,7 +304,6 @@ class AsyncRuntime:
             self._thread.join(timeout=2.0)
         except RuntimeError:
             pass
-
 
 class AppController(QObject):
     async_task_completed = Signal(str, object, str)
@@ -420,7 +466,6 @@ class AppController(QObject):
         self.serial.data_received.connect(self.handle_can_packet)
         self.latest_frame_path = os.path.join("outputs", "visualizations", "latest_front_cam.png")
         self.init_commands()
-
 
     def _schedule_async(self, coro, label="async task"):
         """Run a coroutine on the dedicated asyncio worker, not on qasync.
@@ -1712,7 +1757,7 @@ class AppController(QObject):
         config = {
             "project_root": project_root,
             "routes": selected_route_path,
-            "checkpoint_path": os.path.join(project_root, "model_2.pth"),
+            "checkpoint_path": os.path.join(project_root, "model_0011.pth"),
             "telemetry_file": telemetry_file,
             "expert_mode": True,
             "host": "localhost"
@@ -1962,7 +2007,6 @@ class AppController(QObject):
             else:
                 self.vehicle.update_physics(dt=0.05)
 
-
             # Если управление активно, отправляем в CAN
             if self.control_active:
                 self.handle_manual_input(target_angle, target_accel, target_brake)
@@ -1975,7 +2019,6 @@ class AppController(QObject):
         self.view.statusBar().showMessage(f"AI: {text[:40]}")
         self._update_route_loading_from_text(text)
 
-
     @Slot(str)
     def handle_agent_status(self, status):
         if not self._is_carla_mode():
@@ -1983,7 +2026,6 @@ class AppController(QObject):
         text = str(status)
         self.view.statusBar().showMessage(f"AI Status: {text}")
         self._update_route_loading_from_text(text)
-
 
     def _update_route_loading_from_text(self, text):
         low = str(text or "").lower()
@@ -1995,7 +2037,6 @@ class AppController(QObject):
             if any(token in low for token in ("spawn", "world", "map", "route", "scenario", "carla", "load", "loading", "connect")):
                 if hasattr(self.view, "set_route_loading_status"):
                     self.view.set_route_loading_status(str(text))
-
 
     @Slot(str)
     def handle_agent_error(self, error):
@@ -2107,6 +2148,768 @@ class AppController(QObject):
 
     def update_view(self):
         self.view.update_dashboard(self.vehicle)
+
+# --- MITSU_LIFECYCLE_CAMERA_CLEAN_PATCH_BEGIN ---
+# Runtime lifecycle patch:
+# - telemetry != scenario running;
+# - no phantom throttle/brake during loading;
+# - watchdog is armed only after hero actor + first telemetry are both available;
+# - RUNNING is shown only after the CARLA ego actor physically moves.
+
+def _mitsu_zero_visual_controls(self):
+    try:
+        self.vehicle.target_accel = 0
+        self.vehicle.target_brake = 0
+        self.vehicle.accel = 0
+        self.vehicle.brake = 0
+    except Exception:
+        pass
+
+def _mitsu_set_route_loading_text(self, text):
+    self._route_lifecycle_phase = "loading"
+    if hasattr(self.view, "set_route_loading_status"):
+        self.view.set_route_loading_status(text)
+    elif hasattr(self.view, "set_route_runtime_state"):
+        self.view.set_route_runtime_state("loading", text)
+
+def _mitsu_set_route_waiting_motion_status(self, message=None):
+    self._route_lifecycle_phase = "waiting_motion"
+    text = message or "Сценарий загружен: ожидание физического движения ego"
+    if hasattr(self.view, "set_route_loading_status"):
+        self.view.set_route_loading_status(text)
+    elif hasattr(self.view, "set_route_runtime_state"):
+        self.view.set_route_runtime_state("loading", text)
+
+def _mitsu_arm_motion_watchdog_if_ready(self, reason=""):
+    if getattr(self, "_route_started_monotonic", None) is None:
+        return
+    if getattr(self, "_route_motion_watchdog_armed_at", None) is not None:
+        return
+    if not getattr(self, "_route_carla_vehicle_seen", False):
+        return
+    if getattr(self, "_route_last_telemetry_monotonic", None) is None:
+        return
+
+    self._route_motion_watchdog_armed_at = time.monotonic()
+    self._set_route_waiting_motion_status("Сценарий загружен: ожидание начала движения ego")
+    print(f"AI WATCHDOG: motion watchdog armed ({reason})")
+
+def _mitsu_reset_route_watchdog(self):
+    self._stop_carla_motion_monitor()
+
+    self._route_started_monotonic = time.monotonic()
+    self._route_motion_watchdog_armed_at = None
+    self._route_lifecycle_phase = "loading"
+
+    self._route_last_telemetry_monotonic = None
+    self._route_progress_seen = False
+    self._route_progress_reason = ""
+    self._route_last_physical_progress_monotonic = None
+    self._route_last_progress_location = None
+    self._route_has_motion_measurement = False
+    self._route_start_location = None
+    self._route_last_location = None
+    self._route_carla_actor_id = None
+    self._route_carla_start_location = None
+    self._route_carla_last_location = None
+    self._route_carla_last_speed_kmh = 0.0
+    self._route_carla_vehicle_seen = False
+    self._route_carla_last_update_monotonic = None
+    self._route_carla_last_error = ""
+    self._route_skip_after_stop = False
+    self._route_skip_reason = ""
+    self._route_total_distance_m = 0.0
+    self._route_debug_last_log_monotonic = None
+
+    self._zero_visual_controls()
+    self._set_route_loading_text("Загрузка мира и сценария")
+
+    if hasattr(self, "_route_force_continue_timer"):
+        self._route_force_continue_timer.stop()
+
+    self._start_carla_motion_monitor()
+
+def _mitsu_clear_route_watchdog(self):
+    self._stop_carla_motion_monitor()
+
+    self._route_started_monotonic = None
+    self._route_motion_watchdog_armed_at = None
+    self._route_lifecycle_phase = "idle"
+
+    self._route_last_telemetry_monotonic = None
+    self._route_progress_seen = False
+    self._route_progress_reason = ""
+    self._route_last_physical_progress_monotonic = None
+    self._route_last_progress_location = None
+    self._route_has_motion_measurement = False
+    self._route_start_location = None
+    self._route_last_location = None
+    self._route_carla_actor_id = None
+    self._route_carla_start_location = None
+    self._route_carla_last_location = None
+    self._route_carla_last_speed_kmh = 0.0
+    self._route_carla_vehicle_seen = False
+    self._route_carla_last_update_monotonic = None
+    self._route_carla_last_error = ""
+    self._route_total_distance_m = 0.0
+    self._route_debug_last_log_monotonic = None
+
+    if hasattr(self, "_route_force_continue_timer"):
+        self._route_force_continue_timer.stop()
+
+def _mitsu_mark_route_progress(self, reason):
+    if not getattr(self, "_route_progress_seen", False):
+        print(f"AI WATCHDOG: маршрут начал физическое движение: {reason}")
+        self._route_progress_seen = True
+
+        self.ai_agent_loading = False
+        self.ai_agent_running = True
+        self._route_lifecycle_phase = "running"
+
+        if hasattr(self.view, "set_route_running_status"):
+            self.view.set_route_running_status("Сценарий выполняется: ego начал движение")
+        elif hasattr(self.view, "set_route_runtime_state"):
+            self.view.set_route_runtime_state("running", "Сценарий выполняется: ego начал движение")
+
+        try:
+            self.view.statusBar().showMessage("AI Status: scenario running; ego is moving")
+        except Exception:
+            pass
+
+    self._route_progress_reason = str(reason or "physical progress")
+    self._route_last_physical_progress_monotonic = time.monotonic()
+
+def _mitsu_handle_carla_motion_update(self, info):
+    if getattr(self, "_route_started_monotonic", None) is None or getattr(self, "_route_skip_after_stop", False):
+        return
+    if not isinstance(info, dict):
+        return
+
+    now = time.monotonic()
+    self._route_carla_last_update_monotonic = now
+
+    if not info.get("found"):
+        error = info.get("error") or info.get("reason") or "ego vehicle not found"
+        self._route_carla_last_error = str(error)
+        return
+
+    self._route_carla_vehicle_seen = True
+    self._route_carla_last_error = ""
+
+    actor_id = info.get("actor_id")
+    location = (
+        self._safe_float(info.get("x")),
+        self._safe_float(info.get("y")),
+        self._safe_float(info.get("z", 0.0)) or 0.0,
+    )
+    if location[0] is None or location[1] is None:
+        location = None
+
+    if actor_id != getattr(self, "_route_carla_actor_id", None):
+        self._route_carla_actor_id = actor_id
+        self._route_carla_start_location = location
+        self._route_last_progress_location = location
+        self._route_total_distance_m = 0.0
+        print(
+            f"AI WATCHDOG: найден ego actor id={actor_id}, "
+            f"type={info.get('type_id', '-')}, role={info.get('role', '-')}, "
+            f"start={location}"
+        )
+
+    self._route_carla_last_location = location
+
+    if getattr(self, "_route_carla_start_location", None) is not None and location is not None:
+        self._route_total_distance_m = self._distance_2d(self._route_carla_start_location, location)
+
+    speed_kmh = self._safe_float(info.get("speed_kmh"))
+    if speed_kmh is not None:
+        self._route_carla_last_speed_kmh = speed_kmh
+
+    if not getattr(self, "_route_progress_seen", False):
+        self._zero_visual_controls()
+        self._set_route_waiting_motion_status("Сценарий загружен: ожидание движения ego")
+
+    self._arm_motion_watchdog_if_ready("hero actor visible")
+
+    if getattr(self, "_route_total_distance_m", 0.0) >= getattr(self, "route_startup_min_distance_m", 5.0):
+        self._mark_route_progress(
+            f"CARLA actor moved {self._route_total_distance_m:.1f} m from start"
+        )
+
+    if getattr(self, "_route_progress_seen", False) and speed_kmh is not None:
+        try:
+            if hasattr(self.vehicle, "apply_external_speed_kmh"):
+                self.vehicle.apply_external_speed_kmh(speed_kmh, smooth=True)
+            else:
+                self.vehicle.speed = speed_kmh
+        except Exception:
+            pass
+
+    if self._route_debug_last_log_monotonic is None or now - self._route_debug_last_log_monotonic >= 15.0:
+        self._route_debug_last_log_monotonic = now
+        elapsed = self._route_elapsed_seconds()
+        armed = "yes" if getattr(self, "_route_motion_watchdog_armed_at", None) is not None else "no"
+        try:
+            idx_text = f"{self.current_route_index + 1}/{len(self.pending_route_queue)}"
+        except Exception:
+            idx_text = "-/-"
+        print(
+            f"AI WATCHDOG: route {idx_text} "
+            f"phase={getattr(self, '_route_lifecycle_phase', '-')}, armed={armed}, "
+            f"elapsed={elapsed:.0f}s, speed={getattr(self, '_route_carla_last_speed_kmh', 0.0):.1f} km/h, "
+            f"dist={getattr(self, '_route_total_distance_m', 0.0):.1f} m"
+        )
+
+def _mitsu_check_route_startup_watchdog(self):
+    if not self._is_carla_mode():
+        return
+    if getattr(self, "_route_started_monotonic", None) is None:
+        return
+    if getattr(self, "_route_skip_after_stop", False) or getattr(self, "queue_stop_requested", False):
+        return
+    if not (self.control_active and self.route_plan_prepared and self.current_route_index >= 0):
+        return
+    if self.agent_thread is None and not self.ai_agent_loading and not self.ai_agent_running:
+        return
+
+    now = time.monotonic()
+    timeout_s = self.route_startup_timeout_ms / 1000.0
+
+    # Loading phase: do NOT kill slow CARLA/Leaderboard startup.
+    if not getattr(self, "_route_carla_vehicle_seen", False) or getattr(self, "_route_last_telemetry_monotonic", None) is None:
+        return
+
+    self._arm_motion_watchdog_if_ready("watchdog tick")
+
+    # Loaded + telemetry + hero actor, but no physical movement yet.
+    if not getattr(self, "_route_progress_seen", False):
+        armed_at = getattr(self, "_route_motion_watchdog_armed_at", None)
+        if armed_at is None:
+            return
+        waiting_ms = (now - armed_at) * 1000.0
+        if waiting_ms >= self.route_startup_timeout_ms:
+            reason = (
+                f"после загрузки сценария ego actor не начал движение за {timeout_s:.0f} секунд; "
+                f"dist_from_start={getattr(self, '_route_total_distance_m', 0.0):.1f} м "
+                f"< {getattr(self, 'route_startup_min_distance_m', 5.0):.1f} м"
+            )
+            self._skip_current_route_due_to_timeout(reason)
+        return
+
+    # Already running: catch hard stalls only after confirmed physical movement.
+    last_progress = getattr(self, "_route_last_physical_progress_monotonic", None)
+    if last_progress is not None:
+        stalled_ms = (now - last_progress) * 1000.0
+        if stalled_ms >= self.route_startup_timeout_ms:
+            reason = (
+                f"нет нового физического движения ego {timeout_s:.0f} секунд "
+                f"после последнего прогресса ({getattr(self, '_route_progress_reason', '')}); "
+                f"dist_from_start={getattr(self, '_route_total_distance_m', 0.0):.1f} м"
+            )
+            self._skip_current_route_due_to_timeout(reason)
+
+def _mitsu_poll_ai_telemetry(self):
+    if not self._is_carla_mode():
+        return
+    if not self.raw_telemetry_reader:
+        return
+
+    data = self.raw_telemetry_reader.get_latest_data()
+    if data is None:
+        return
+
+    self._update_route_watchdog_from_telemetry(data)
+    self._arm_motion_watchdog_if_ready("first telemetry")
+
+    steer = data.get("steer", 0.0)
+    throttle = data.get("throttle", 0.0)
+    brake = data.get("brake", 0.0)
+
+    target_angle = int(steer * 630)
+    target_accel = int(throttle * 100)
+    target_brake = int(brake * 100)
+
+    log_line = (
+        f"[AI TELEMETRY] "
+        f"Steer: {steer:>6.2f} | "
+        f"Thr: {throttle:>5.2f} | "
+        f"Brk: {brake:>5.2f} | "
+        f"Target Angle: {target_angle:>4}°"
+    )
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] {log_line}")
+
+    # Telemetry means the agent is alive, not that the route is physically running.
+    if not getattr(self, "_route_progress_seen", False):
+        self.ai_agent_loading = True
+        self.ai_agent_running = False
+        self._zero_visual_controls()
+
+        if getattr(self, "_route_carla_vehicle_seen", False):
+            self._set_route_waiting_motion_status("Сценарий загружен: ожидание движения ego")
+        else:
+            self._set_route_loading_text("Загрузка мира и сценария")
+        return
+
+    # RUNNING phase: only after CARLA physical displacement has been confirmed.
+    self.vehicle.target_angle = target_angle
+    self.vehicle.target_accel = target_accel
+    self.vehicle.target_brake = target_brake
+
+    if hasattr(self.vehicle, "force_drive_gear"):
+        self.vehicle.force_drive_gear()
+    else:
+        self.vehicle.target_gear = 4
+        self.vehicle.gear = 4
+
+    if hasattr(self.vehicle, "apply_telemetry") and self.vehicle.apply_telemetry(data):
+        pass
+    else:
+        self.vehicle.update_physics(dt=0.05)
+
+    if self.control_active:
+        self.handle_manual_input(target_angle, target_accel, target_brake)
+
+# Patch methods before AppController is instantiated.
+AppController._zero_visual_controls = _mitsu_zero_visual_controls
+AppController._set_route_loading_text = _mitsu_set_route_loading_text
+AppController._set_route_waiting_motion_status = _mitsu_set_route_waiting_motion_status
+AppController._arm_motion_watchdog_if_ready = _mitsu_arm_motion_watchdog_if_ready
+AppController._reset_route_watchdog = _mitsu_reset_route_watchdog
+AppController._clear_route_watchdog = _mitsu_clear_route_watchdog
+AppController._mark_route_progress = _mitsu_mark_route_progress
+AppController.handle_carla_motion_update = _mitsu_handle_carla_motion_update
+AppController.check_route_startup_watchdog = _mitsu_check_route_startup_watchdog
+AppController.poll_ai_telemetry = _mitsu_poll_ai_telemetry
+
+_mitsu_original_appcontroller_init = AppController.__init__
+
+def _mitsu_appcontroller_init(self, *args, **kwargs):
+    _mitsu_original_appcontroller_init(self, *args, **kwargs)
+
+    # Ensure fields exist even if the base file did not define them.
+    self._route_motion_watchdog_armed_at = None
+    self._route_lifecycle_phase = "idle"
+    if not hasattr(self, "route_startup_min_distance_m"):
+        self.route_startup_min_distance_m = 5.0
+
+AppController.__init__ = _mitsu_appcontroller_init
+# --- MITSU_LIFECYCLE_CAMERA_CLEAN_PATCH_END ---
+
+# --- MITSU_ROUTE_COMPLETION_STATUS_V2_BEGIN ---
+# Non-blocking completion notifications for routes/queues.
+# No modal QMessageBox: queue execution should never be blocked by UI.
+
+_mitsu_original_finish_route_queue = AppController._finish_route_queue
+_mitsu_original_handle_agent_finished = AppController.handle_agent_finished
+
+def _mitsu_is_success_finish_message(message):
+    low = str(message or "").lower()
+    bad = ("таймаут", "ошиб", "error", "failed", "останов", "прерван", "stop", "abort")
+    return not any(token in low for token in bad)
+
+def _mitsu_success_message_for_finish(self, message, total_before):
+    text = str(message or "")
+    if not _mitsu_is_success_finish_message(text):
+        return text
+
+    if getattr(self, "queue_mode", None) == "queue" or total_before > 1 or "очеред" in text.lower():
+        done = max(1, total_before)
+        return f"Очередь завершена успешно: {done}/{done} маршрутов"
+
+    return "Маршрут успешно завершён"
+
+def _mitsu_finish_route_queue(self, message):
+    total_before = len(getattr(self, "pending_route_queue", []) or [])
+    success = _mitsu_is_success_finish_message(message)
+    final_message = _mitsu_success_message_for_finish(self, message, total_before)
+
+    result = _mitsu_original_finish_route_queue(self, final_message)
+
+    if success:
+        print(f"AI ROUTES: SUCCESS: {final_message}")
+        try:
+            self.view.statusBar().showMessage(final_message, 7000)
+        except TypeError:
+            self.view.statusBar().showMessage(final_message)
+        except Exception:
+            pass
+
+    return result
+
+def _mitsu_handle_agent_finished(self):
+    total = len(getattr(self, "pending_route_queue", []) or [])
+    idx = getattr(self, "current_route_index", -1)
+    skip = getattr(self, "_route_skip_after_stop", False)
+    stop = getattr(self, "_agent_stop_requested", False) or getattr(self, "queue_stop_requested", False)
+
+    if not skip and not stop and total > 0 and idx >= 0:
+        print(f"AI ROUTES: маршрут {idx + 1}/{total} завершён штатно")
+        try:
+            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён", 5000)
+        except TypeError:
+            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён")
+        except Exception:
+            pass
+
+    return _mitsu_original_handle_agent_finished(self)
+
+AppController._finish_route_queue = _mitsu_finish_route_queue
+AppController.handle_agent_finished = _mitsu_handle_agent_finished
+# --- MITSU_ROUTE_COMPLETION_STATUS_V2_END ---
+
+# --- MITSU_ROUTE_COMPLETION_STATUS_V4_BEGIN ---
+# Non-blocking route/queue completion status.
+# No modal QMessageBox: queue execution must not be blocked by UI.
+
+_mitsu_v4_original_finish_route_queue = AppController._finish_route_queue
+_mitsu_v4_original_handle_agent_finished = AppController.handle_agent_finished
+
+def _mitsu_v4_is_success_finish_message(message):
+    low = str(message or "").lower()
+    bad = ("таймаут", "ошиб", "error", "failed", "останов", "прерван", "stop", "abort")
+    return not any(token in low for token in bad)
+
+def _mitsu_v4_success_message_for_finish(self, message, total_before):
+    text = str(message or "")
+    if not _mitsu_v4_is_success_finish_message(text):
+        return text
+
+    if getattr(self, "queue_mode", None) == "queue" or total_before > 1 or "очеред" in text.lower():
+        done = max(1, total_before)
+        return f"Очередь завершена успешно: {done}/{done} маршрутов"
+
+    return "Маршрут успешно завершён"
+
+def _mitsu_v4_finish_route_queue(self, message):
+    total_before = len(getattr(self, "pending_route_queue", []) or [])
+    success = _mitsu_v4_is_success_finish_message(message)
+    final_message = _mitsu_v4_success_message_for_finish(self, message, total_before)
+
+    result = _mitsu_v4_original_finish_route_queue(self, final_message)
+
+    if success:
+        print(f"AI ROUTES: SUCCESS: {final_message}")
+        try:
+            self.view.statusBar().showMessage(final_message, 7000)
+        except TypeError:
+            self.view.statusBar().showMessage(final_message)
+        except Exception:
+            pass
+
+    return result
+
+def _mitsu_v4_handle_agent_finished(self):
+    total = len(getattr(self, "pending_route_queue", []) or [])
+    idx = getattr(self, "current_route_index", -1)
+    skip = getattr(self, "_route_skip_after_stop", False)
+    stop = getattr(self, "_agent_stop_requested", False) or getattr(self, "queue_stop_requested", False)
+
+    if not skip and not stop and total > 0 and idx >= 0:
+        print(f"AI ROUTES: маршрут {idx + 1}/{total} завершён штатно")
+        try:
+            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён", 5000)
+        except TypeError:
+            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён")
+        except Exception:
+            pass
+
+    return _mitsu_v4_original_handle_agent_finished(self)
+
+AppController._finish_route_queue = _mitsu_v4_finish_route_queue
+AppController.handle_agent_finished = _mitsu_v4_handle_agent_finished
+# --- MITSU_ROUTE_COMPLETION_STATUS_V4_END ---
+
+# --- MITSU_REAL_TAKEOVER_SINGLE_SOURCE_V18_BEGIN ---
+# Single source of truth for real/mock authority state.
+#
+# This block replaces the previous V12/V17 takeover UI patches. It fixes the
+# core race:
+#   AI_ACTIVE + clicked checked button => Qt emits False.
+#   Service correctly transfers to MANUAL_ACTIVE.
+#   UI must keep control button checked and set authority=manual_takeover.
+#
+# CAN/service behavior is not bypassed. The service remains source of truth for
+# gear, brake, Drive/Park and command submission.
+
+def _mitsu_v18_state(controller):
+    vc = getattr(controller, "vehicle_control", None)
+    state = getattr(getattr(vc, "state_machine", None), "state", None)
+    return str(getattr(state, "value", state) or "")
+
+
+def _mitsu_v18_is_test_cameraless(controller):
+    vc = getattr(controller, "vehicle_control", None)
+    descriptor = getattr(vc, "descriptor", None)
+    text = ""
+    if descriptor is not None:
+        text = " ".join([
+            str(getattr(descriptor, "label", "") or ""),
+            str(getattr(getattr(descriptor, "kind", None), "name", getattr(descriptor, "kind", "")) or ""),
+        ]).upper()
+    return any(token in text for token in ("MOCK", "REPLAY", "LOOPBACK"))
+
+
+def _mitsu_v18_seed_test_cameras(controller):
+    if not _mitsu_v18_is_test_cameraless(controller):
+        return False
+
+    view = getattr(controller, "view", None)
+    helper = getattr(view, "_mitsu_v18_enable_test_camera_frames", None) if view is not None else None
+    if callable(helper):
+        try:
+            helper(force=True)
+        except Exception:
+            pass
+
+    try:
+        controller.real_camera_status = {"wide_90": True, "narrow_50": True}
+    except Exception:
+        pass
+
+    vc = getattr(controller, "vehicle_control", None)
+    if vc is not None:
+        try:
+            vc.set_camera_status(True)
+        except Exception:
+            try:
+                vc.cameras_ok = True
+                if hasattr(vc, "_refresh_readiness_state"):
+                    vc._refresh_readiness_state()
+            except Exception:
+                pass
+
+    if not bool(getattr(controller, "_mitsu_v18_test_camera_logged", False)):
+        controller._mitsu_v18_test_camera_logged = True
+        print("TEST CAMERA: physical cameras bypassed for test/mock contour")
+
+    return True
+
+
+def _mitsu_v18_set_button(controller, checked, text=None):
+    view = getattr(controller, "view", None)
+    helper = getattr(view, "set_control_button_silent", None) if view is not None else None
+    if callable(helper):
+        try:
+            helper(bool(checked), text=text)
+            return
+        except Exception:
+            pass
+
+    btn = getattr(view, "btn_control", None) if view is not None else None
+    if btn is None:
+        return
+
+    try:
+        btn.blockSignals(True)
+        btn.setChecked(bool(checked))
+        if text is not None:
+            btn.setText(str(text))
+    finally:
+        try:
+            btn.blockSignals(False)
+        except Exception:
+            pass
+
+
+def _mitsu_v18_set_authority(controller, authority, message=""):
+    view = getattr(controller, "view", None)
+    if view is None:
+        return
+
+    helper = getattr(view, "set_real_authority_mode", None)
+    if callable(helper):
+        try:
+            helper(authority, message)
+            return
+        except Exception as exc:
+            print(f"REAL UI: authority update failed: {exc}")
+
+
+def _mitsu_v18_apply_state_to_ui(controller, previous_state=""):
+    state = _mitsu_v18_state(controller)
+
+    if state == "AI_ACTIVE":
+        controller.control_active = True
+        controller.manual_control_requested = False
+        _mitsu_v18_set_button(controller, True, "Отключить ИИ / ручное")
+        _mitsu_v18_set_authority(controller, "ai", "Автономное управление активно")
+        return
+
+    if state == "MANUAL_ACTIVE":
+        controller.control_active = True
+        controller.ai_control_requested = False
+        controller.manual_control_requested = True
+
+        takeover = bool(getattr(controller, "_mitsu_v18_takeover_latched", False)) or previous_state == "AI_ACTIVE"
+        _mitsu_v18_set_button(controller, True, "Ручное управление активно")
+        _mitsu_v18_set_authority(
+            controller,
+            "manual_takeover" if takeover else "manual",
+            "Перехват ИИ: ручное управление активно" if takeover else "Ручное управление активно",
+        )
+        return
+
+    if state in {"IDLE", "DISCONNECTED"}:
+        if bool(getattr(controller, "control_active", False)):
+            # If service says IDLE after a real full deactivation, release UI. If
+            # a delayed IDLE leaks during takeover, it will be overwritten by the
+            # next service state; this is still safer than using toggle-requested.
+            controller.control_active = False
+            controller.ai_control_requested = False
+            controller.manual_control_requested = False
+            controller._mitsu_v18_takeover_latched = False
+            _mitsu_v18_set_button(controller, False, "Активировать управление")
+            _mitsu_v18_set_authority(controller, "off", "Миссия подготовлена")
+
+
+if hasattr(AppController, "_start_real_camera_stack") and not hasattr(AppController, "_mitsu_v18_original_start_real_camera_stack"):
+    AppController._mitsu_v18_original_start_real_camera_stack = AppController._start_real_camera_stack
+
+    def _mitsu_v18_start_real_camera_stack(self):
+        if _mitsu_v18_seed_test_cameras(self):
+            return
+        return AppController._mitsu_v18_original_start_real_camera_stack(self)
+
+    AppController._start_real_camera_stack = _mitsu_v18_start_real_camera_stack
+
+
+if hasattr(AppController, "handle_real_camera_cell_status") and not hasattr(AppController, "_mitsu_v18_original_handle_real_camera_cell_status"):
+    AppController._mitsu_v18_original_handle_real_camera_cell_status = AppController.handle_real_camera_cell_status
+
+    def _mitsu_v18_handle_real_camera_cell_status(self, camera_name, ok, message):
+        if _mitsu_v18_seed_test_cameras(self):
+            return
+        return AppController._mitsu_v18_original_handle_real_camera_cell_status(self, camera_name, ok, message)
+
+    AppController.handle_real_camera_cell_status = _mitsu_v18_handle_real_camera_cell_status
+
+
+if hasattr(AppController, "handle_real_agent_camera_status") and not hasattr(AppController, "_mitsu_v18_original_handle_real_agent_camera_status"):
+    AppController._mitsu_v18_original_handle_real_agent_camera_status = AppController.handle_real_agent_camera_status
+
+    def _mitsu_v18_handle_real_agent_camera_status(self, ok, message):
+        if _mitsu_v18_seed_test_cameras(self):
+            return
+        return AppController._mitsu_v18_original_handle_real_agent_camera_status(self, ok, message)
+
+    AppController.handle_real_agent_camera_status = _mitsu_v18_handle_real_agent_camera_status
+
+
+if hasattr(AppController, "_handle_real_control_toggle") and not hasattr(AppController, "_mitsu_v18_original_handle_real_control_toggle"):
+    AppController._mitsu_v18_original_handle_real_control_toggle = AppController._handle_real_control_toggle
+
+    async def _mitsu_v18_handle_real_control_toggle(self, is_active):
+        before_state = _mitsu_v18_state(self)
+        takeover = self.runtime_mode == "real" and not bool(is_active) and before_state == "AI_ACTIVE"
+
+        if self.runtime_mode == "real":
+            _mitsu_v18_seed_test_cameras(self)
+
+        if takeover:
+            self._mitsu_v18_takeover_latched = True
+            _mitsu_v18_set_authority(self, "manual_takeover", "Перехват ИИ: ручное управление активно")
+            _mitsu_v18_set_button(self, True, "Переход в ручное")
+
+        result = await AppController._mitsu_v18_original_handle_real_control_toggle(self, is_active)
+        if not isinstance(result, dict):
+            result = {}
+
+        after_state = _mitsu_v18_state(self)
+
+        if self.runtime_mode == "real":
+            if takeover and after_state == "MANUAL_ACTIVE":
+                # Normalize result so async completion cannot turn the button off
+                # just because the original Qt toggle value was False.
+                result["requested"] = True
+                result["active"] = True
+                result["authority"] = "manual_takeover"
+                result["message"] = "Перехват ИИ: ручное управление активно"
+                self.control_active = True
+                self.ai_control_requested = False
+                self.manual_control_requested = True
+
+                vc = getattr(self, "vehicle_control", None)
+                if vc is not None:
+                    try:
+                        vc.set_ai_preview_enabled(False)
+                    except Exception:
+                        pass
+                    try:
+                        vc.set_manual_mode_enabled(True)
+                    except Exception:
+                        pass
+
+                analyzer = getattr(self, "real_agent_analyzer", None)
+                if analyzer is not None:
+                    try:
+                        analyzer.set_ai_enabled(False)
+                    except Exception:
+                        pass
+
+            _mitsu_v18_apply_state_to_ui(self, previous_state=before_state)
+
+        return result
+
+    AppController._handle_real_control_toggle = _mitsu_v18_handle_real_control_toggle
+
+
+if hasattr(AppController, "_handle_async_task_completed") and not hasattr(AppController, "_mitsu_v18_original_handle_async_task_completed"):
+    AppController._mitsu_v18_original_handle_async_task_completed = AppController._handle_async_task_completed
+
+    @Slot(str, object, str)
+    def _mitsu_v18_handle_async_task_completed(self, label, result, error):
+        if label != "real_control_toggle":
+            return AppController._mitsu_v18_original_handle_async_task_completed(self, label, result, error)
+
+        result = result or {}
+        error = str(error or "")
+        if error and error != "cancelled":
+            print(f"ASYNC WORKER: {label} failed: {error}")
+
+        # Service state wins over requested toggle value.
+        state = _mitsu_v18_state(self)
+        if state in {"AI_ACTIVE", "MANUAL_ACTIVE"} and not error:
+            result = dict(result)
+            result["active"] = True
+            result["requested"] = True
+            if state == "MANUAL_ACTIVE" and bool(getattr(self, "_mitsu_v18_takeover_latched", False)):
+                result["authority"] = "manual_takeover"
+
+        # Let the original handler process non-active failures and normal off.
+        if not bool(result.get("active")):
+            return AppController._mitsu_v18_original_handle_async_task_completed(self, label, result, error)
+
+        self.control_active = True
+        _mitsu_v18_apply_state_to_ui(self)
+
+        message = result.get("message")
+        if message:
+            self.view.statusBar().showMessage(str(message))
+        return
+
+    AppController._handle_async_task_completed = _mitsu_v18_handle_async_task_completed
+
+
+if hasattr(AppController, "handle_vehicle_control_state") and not hasattr(AppController, "_mitsu_v18_original_handle_vehicle_control_state"):
+    AppController._mitsu_v18_original_handle_vehicle_control_state = AppController.handle_vehicle_control_state
+
+    @Slot(str)
+    def _mitsu_v18_handle_vehicle_control_state(self, state):
+        AppController._mitsu_v18_original_handle_vehicle_control_state(self, state)
+
+        if self.runtime_mode != "real":
+            return
+
+        # Do not repaint route-preview for transient states.
+        if str(state or "") in {"ARMING", "DISENGAGING", "READY", "MANUAL_READY"}:
+            return
+
+        _mitsu_v18_apply_state_to_ui(self)
+
+    AppController.handle_vehicle_control_state = _mitsu_v18_handle_vehicle_control_state
+
+# --- MITSU_REAL_TAKEOVER_SINGLE_SOURCE_V18_END ---
 
 if __name__ == "__main__":
     # Use the plain Qt event loop for the GUI. Async serial/real-control work

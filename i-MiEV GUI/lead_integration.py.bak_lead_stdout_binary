@@ -41,7 +41,7 @@ class LeadAgentThread(QThread):
         env = dict(os.environ)
         env["LEAD_PROJECT_ROOT"] = project_root
         env["PYTHONUNBUFFERED"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8:replace"
+        env["PYTHONIOENCODING"] = "utf-8"
 
         expert_mode = bool(self.config.get("expert_mode", True))
         telemetry_file = self.config.get("telemetry_file")
@@ -97,12 +97,12 @@ class LeadAgentThread(QThread):
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=False,
+                text=True,
                 
                 # MITSU_SUBPROCESS_ENCODING_PATCH
-                
-                
-bufsize=0,
+                encoding='utf-8',
+                errors='replace',
+bufsize=1,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
 
@@ -127,16 +127,11 @@ bufsize=0,
 
             # 6. Цикл чтения логов
             while self._is_running and self.process.poll() is None:
-                # MITSU_LEAD_STDOUT_BINARY_DECODE_FIX
-                    raw_line = self.process.stdout.readline()
-                    if raw_line:
-                        if isinstance(raw_line, bytes):
-                            line = raw_line.decode("utf-8", errors="replace")
-                        else:
-                            line = str(raw_line)
-                        self.log_received.emit(line.strip())
-                    elif not raw_line and self.process.poll() is not None:
-                        break
+                line = self.process.stdout.readline()
+                if line:
+                    self.log_received.emit(line.strip())
+                elif not line and self.process.poll() is not None:
+                    break
 
         except Exception as e:
             self.error_occurred.emit(f"Failed to start agent: {str(e)}")

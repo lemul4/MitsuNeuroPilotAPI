@@ -1,4 +1,9 @@
-"""Compatibility wrapper for the MitsuNeuroPilot dual-front CARLA preview service."""
+"""Compatibility wrapper for the MitsuNeuroPilot dual-front CARLA preview service.
+
+The old implementation spawned a three-camera GUI preview (front/left/right).
+It has been replaced by a dual-front preview aligned with the real i-MiEV camera
+layout: wide 90 deg + narrow 50 deg.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ try:
         run_service,
         main,
     )
-except Exception:  # pragma: no cover
+except Exception:  # pragma: no cover - allows direct execution from hardware dir
     from carla_dual_front_camera_service import (  # type: ignore
         CarlaDualFrontCameraService,
         CarlaCameraService,
@@ -18,6 +23,7 @@ except Exception:  # pragma: no cover
         run_service,
         main,
     )
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

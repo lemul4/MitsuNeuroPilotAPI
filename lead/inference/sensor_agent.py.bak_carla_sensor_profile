@@ -23,7 +23,6 @@ from lead.common.constants import TransfuserBoundingBoxClass
 from lead.common.logging_config import setup_logging
 from lead.common.route_planner import RoutePlanner
 from lead.common.sensor_setup import av_sensor_setup
-from lead.common.carla_vehicle_sensor_profile import apply_camera_sensor_profile
 from lead.data_loader import carla_dataset_utils, training_cache
 from lead.data_loader.carla_dataset_utils import rasterize_lidar
 from lead.expert import expert_utils
@@ -249,7 +248,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
     @beartype
     def sensors(self) -> list[dict]:
-        sensors = av_sensor_setup(
+        return av_sensor_setup(
             config=self.training_config,
             lidar=True,
             radar=True,
@@ -258,7 +257,6 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             perturbation_rotation=0.0,
             perturbation_translation=0.0,
         )
-        return apply_camera_sensor_profile(sensors, config=self.training_config)
 
     def check_infractions(self) -> None:
         """Check for infractions that occurred in the current step and log them.
