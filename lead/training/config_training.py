@@ -154,6 +154,8 @@ class TrainingConfig(BaseConfig):
 
     # Flag to visualize the dataset and deactivate randomization and augmentation.
     visualize_dataset = False
+    # If false, BEV visualizations use a blank canvas instead of the LiDAR raster.
+    visualize_lidar_bev = True
     # Flag to visualize the failed scenarios and deactivate randomization and augmentation.
     visualize_failed_scenarios = False
     # Flag to load the BEV 3rd person images from the dataset for debugging.
@@ -421,6 +423,8 @@ class TrainingConfig(BaseConfig):
     # --- Learning rate and epochs ---
     # Base learning rate for the model.
     lr = 3e-4
+    # Multiplicative decay for the peak LR after each cosine warm restart.
+    cosine_annealing_restart_peak_decay = 1.0
 
     # --- Model input ---
     @overridable_property
@@ -996,6 +1000,7 @@ class TrainingConfig(BaseConfig):
     semantic_pedestrian_loss_weight = 2.0
     semantic_biker_loss_weight = 2.0
     semantic_traffic_light_loss_weight = 2.0
+    semantic_road_line_loss_weight = 1.0
     # Total number of semantic segmentation classes.
     num_semantic_classes = len(TransfuserSemanticSegmentationClass)
     # Resolution at which the perspective auxiliary tasks are predicted
@@ -1023,6 +1028,8 @@ class TrainingConfig(BaseConfig):
     bev_semantic_walker_loss_weight = 2.0
     bev_semantic_biker_loss_weight = 2.0
     bev_semantic_traffic_light_loss_weight = 2.0
+    bev_semantic_lane_markers_loss_weight = 1.0
+    bev_semantic_broken_lane_markers_loss_weight = 1.0
 
     # Extra CenterNet detection loss weights for vulnerable users and traffic lights.
     center_net_walker_loss_weight = 2.0

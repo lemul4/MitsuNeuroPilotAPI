@@ -78,6 +78,9 @@ class PerspectiveDecoder(nn.Module):
         semantic_class_weights[
             int(TransfuserSemanticSegmentationClass.TRAFFIC_LIGHT)
         ] = float(self.config.semantic_traffic_light_loss_weight)
+        semantic_class_weights[
+            int(TransfuserSemanticSegmentationClass.ROAD_LINE)
+        ] = float(self.config.semantic_road_line_loss_weight)
         self.register_buffer(
             "semantic_class_weights",
             semantic_class_weights,

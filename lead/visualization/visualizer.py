@@ -3,6 +3,8 @@ import os
 from copy import deepcopy
 
 import cv2
+import matplotlib
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -85,17 +87,25 @@ class Visualizer:
         )
         self.loc_pixels_per_meter = self.config.pixels_per_meter * self.scale_factor
 
-        start_color = np.array([255, 255, 255], dtype=np.float32)
-        end_color = np.array(constants.LIDAR_COLOR, dtype=np.float32)
+        if self.config.visualize_lidar_bev:
+            start_color = np.array([255, 255, 255], dtype=np.float32)
+            end_color = np.array(constants.LIDAR_COLOR, dtype=np.float32)
 
-        bev = self.rasterized_lidar.detach().cpu().numpy()[0][0]
-        bev = bev / (bev.max() + 1e-6)
-        bev = bev.astype(np.float32)
+            bev = self.rasterized_lidar.detach().cpu().numpy()[0][0]
+            bev = bev / (bev.max() + 1e-6)
+            bev = bev.astype(np.float32)
 
-        bev_img = np.zeros((*bev.shape, 3), dtype=np.float32)
-        for c in range(3):
-            bev_img[..., c] = start_color[c] + (end_color[c] - start_color[c]) * bev
-        bev_img = bev_img.astype(np.uint8)
+            bev_img = np.zeros((*bev.shape, 3), dtype=np.float32)
+            for c in range(3):
+                bev_img[..., c] = (
+                    start_color[c] + (end_color[c] - start_color[c]) * bev
+                )
+            bev_img = bev_img.astype(np.uint8)
+        else:
+            bev_img = 255 * np.ones(
+                (self.config.lidar_height_pixel, self.config.lidar_width_pixel, 3),
+                dtype=np.uint8,
+            )
 
         self.bev_image = cv2.resize(
             bev_img,
@@ -1610,6 +1620,7 @@ def visualize_feature_maps(
         
         try:
             plt.savefig(bridge_path, dpi=100) # Меньше DPI для скорости
+            plt.close("all")
             print(f"DEBUG: Saved frame to {bridge_path}") # Раскомментируйте для отладки
         except Exception as e:
             print(f"CRITICAL: Visualizer failed to save: {e}")
@@ -1618,11 +1629,13 @@ def visualize_feature_maps(
     if save_image:
         out_path = f"{save_path}/{prefix}_bev_{postfix}.png"
         plt.savefig(out_path, dpi=300)
+        plt.close("all")
 
     # Log the whole figure to wandb
     if log_wandb and config.log_wandb:
         buf = io.BytesIO()
         plt.savefig(buf, format="png", dpi=150)
+        plt.close("all")
         buf.seek(0)
         wandb.log(
             {"train_viz/feature_maps": wandb.Image(Image.open(buf))}, commit=False

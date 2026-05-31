@@ -3,10 +3,12 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import math
 import os
 import pathlib
 import random
 import typing
+import warnings
 
 import diskcache
 import numpy as np
@@ -31,6 +33,50 @@ from lead.training import mixed_training_utils
 from lead.training.config_training import TrainingConfig
 
 LOG = logging.getLogger(__name__)
+
+
+class DecayingPeakCosineAnnealingWarmRestarts(CosineAnnealingWarmRestarts):
+    """Cosine restarts scheduler with a multiplicative decay on restart peaks."""
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        T_0: int,
+        T_mult: int = 1,
+        eta_min: float = 0.0,
+        last_epoch: int = -1,
+        peak_decay: float = 1.0,
+    ):
+        self.peak_decay = float(peak_decay)
+        super().__init__(
+            optimizer=optimizer,
+            T_0=T_0,
+            T_mult=T_mult,
+            eta_min=eta_min,
+            last_epoch=last_epoch,
+        )
+
+    def _restart_index(self) -> int:
+        if self.T_mult == 1:
+            return max(0, int(self.last_epoch // self.T_0))
+        return max(0, int(round(math.log(self.T_i / self.T_0, self.T_mult))))
+
+    def get_lr(self) -> list[float]:
+        if not self._get_lr_called_within_step:
+            warnings.warn(
+                "To get the last learning rate computed by the scheduler, "
+                "please use `get_last_lr()`.",
+                UserWarning,
+            )
+
+        peak_multiplier = self.peak_decay ** self._restart_index()
+        return [
+            self.eta_min
+            + (base_lr * peak_multiplier - self.eta_min)
+            * (1 + math.cos(math.pi * self.T_cur / self.T_i))
+            / 2
+            for base_lr in self.base_lrs
+        ]
 
 
 class DistributedEvalSampler(torch.utils.data.Sampler):
@@ -220,7 +266,7 @@ def initialize_optimizer(
     gradient_steps_per_epoch: int,
 ) -> tuple[
     ZeroRedundancyOptimizer | torch.optim.AdamW,
-    CosineAnnealingWarmRestarts | LambdaLR | CosineAnnealingLR,
+    DecayingPeakCosineAnnealingWarmRestarts | LambdaLR | CosineAnnealingLR,
     torch.amp.GradScaler,
     int,
 ]:
@@ -244,8 +290,12 @@ def initialize_optimizer(
         )
 
     if config.use_cosine_annealing_with_restarts:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=gradient_steps_per_epoch, T_mult=2
+        scheduler = DecayingPeakCosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=gradient_steps_per_epoch,
+            T_mult=2,
+            eta_min=1e-9,
+            peak_decay=config.cosine_annealing_restart_peak_decay,
         )
     else:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(

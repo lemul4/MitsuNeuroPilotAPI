@@ -12,6 +12,7 @@ from collections.abc import Generator
 from beartype import beartype
 from tqdm import tqdm
 
+from lead.data_buckets import skip_list
 from lead.data_buckets.bucket import Bucket
 from lead.training.config_training import TrainingConfig
 
@@ -33,6 +34,15 @@ class AbstractBucketCollection(abc.ABC):
         self.trainable_routes = 0
         self.all_frames = 0
         self.trainable_frames = 0
+        self.skipped_sample_keys = skip_list.load_cache_build_failure_keys(
+            self.config.bucket_collection_path
+        )
+        if self.skipped_sample_keys:
+            LOG.info(
+                "Loaded %d cache-build skip-list entries from %s.",
+                len(self.skipped_sample_keys),
+                skip_list.cache_build_failures_path(self.config.bucket_collection_path),
+            )
 
         # Try to load from cache first
         cache_loaded = False
@@ -41,7 +51,7 @@ class AbstractBucketCollection(abc.ABC):
             try:
                 self._load_from_cache()
                 cache_loaded = True
-            except lzma.LZMAError as e:
+            except (ValueError, lzma.LZMAError) as e:
                 LOG.error(f"Error while trying to load bucket from cache {str(e)}")
         if not cache_loaded:
             LOG.info("Building collection from scratch...")
@@ -94,6 +104,10 @@ class AbstractBucketCollection(abc.ABC):
 
         for seq in range(self.config.skip_first, num_seq - self.config.skip_last):
             self.all_frames += 1
+            key = skip_list.sample_key(route_path, seq)
+            if key in self.skipped_sample_keys:
+                LOG.info("Skipping cache-build failed sample: %s", key)
+                continue
             yield seq
 
     # Abstract methods that subclasses MUST implement
@@ -123,6 +137,11 @@ class AbstractBucketCollection(abc.ABC):
         with lzma.open(self.cache_file_path(), "rb") as f:
             cached_data = pickle.load(f)
 
+        cached_skipped_sample_keys = set(cached_data.get("skipped_sample_keys", []))
+        if cached_skipped_sample_keys != self.skipped_sample_keys:
+            raise ValueError(
+                "Bucket cache skip-list does not match current cache-build failures."
+            )
         self.buckets = cached_data["buckets"]
         self.total_routes = cached_data["total_routes"]
         self.trainable_routes = cached_data["trainable_routes"]
@@ -140,6 +159,7 @@ class AbstractBucketCollection(abc.ABC):
                 "trainable_routes": self.trainable_routes,
                 "all_frames": self.all_frames,
                 "trainable_frames": self.trainable_frames,
+                "skipped_sample_keys": sorted(self.skipped_sample_keys),
             }
 
             # Create cache directory if it doesn't exist
