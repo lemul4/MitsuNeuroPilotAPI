@@ -1,0 +1,36 @@
+{
+  "profile": "imiev_dual_front_rgb_1_rgb_2",
+  "description": "Alternative sequential dual-front profile for CARLA ego vehicle. Use only if the checkpoint/runtime expects rgb_1 and rgb_2.",
+  "keep_non_camera_sensors": true,
+  "camera_order": ["wide_90", "narrow_50"],
+  "cameras": [
+    {
+      "id": "rgb_1",
+      "role": "wide_90",
+      "type": "sensor.camera.rgb",
+      "x": 0.9,
+      "y": -0.0675,
+      "z": 1.55,
+      "roll": 0.0,
+      "pitch": 0.0,
+      "yaw": 0.0,
+      "width": 960,
+      "height": 540,
+      "fov": 90.0
+    },
+    {
+      "id": "rgb_2",
+      "role": "narrow_50",
+      "type": "sensor.camera.rgb",
+      "x": 0.9,
+      "y": 0.0675,
+      "z": 1.55,
+      "roll": 0.0,
+      "pitch": 0.0,
+      "yaw": 0.0,
+      "width": 960,
+      "height": 540,
+      "fov": 50.03
+    }
+  ]
+}

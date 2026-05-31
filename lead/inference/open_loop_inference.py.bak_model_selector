@@ -50,19 +50,7 @@ class OpenLoopInference:
 
         # Loading models
         self.nets: list[TFv6] = []
-        model_file_filter = os.environ.get("MITSU_CARLA_MODEL_FILE", "").strip()
-        if not model_file_filter and os.path.exists(os.path.join(model_path, "model_0011.pth")):
-            model_file_filter = "model_0011.pth"
-            LOG.info("[Model selector] MITSU_CARLA_MODEL_FILE not set; auto-selecting model_0011.pth from %s", model_path)
-        if model_file_filter:
-            LOG.info(
-                "[Model selector] MITSU_CARLA_MODEL_FILE=%s; loading only this file from %s",
-                model_file_filter,
-                model_path,
-            )
         for file in sorted(os.listdir(model_path)):
-            if model_file_filter and file != model_file_filter:
-                continue
             if file.startswith(prefix) and file.endswith(".pth"):
                 LOG.info(f"Loading model weight from {os.path.join(model_path, file)}")
                 net = TFv6(self.device, self.config_training)
@@ -78,14 +66,6 @@ class OpenLoopInference:
                 )
                 net.cuda(device=self.device).eval()
                 self.nets.append(net)
-        if not self.nets:
-            available = sorted([f for f in os.listdir(model_path) if f.endswith(".pth")])
-            raise RuntimeError(
-                f"No model weights loaded from {model_path}. "
-                f"prefix={prefix!r}, MITSU_CARLA_MODEL_FILE={model_file_filter!r}, "
-                f"available_pth={available}"
-            )
-        LOG.info("[Model selector] Loaded %d model file(s): %s", len(self.nets), [f for f in sorted(os.listdir(model_path)) if (not model_file_filter or f == model_file_filter) and f.startswith(prefix) and f.endswith(".pth")])
         self.step = 4  # Constant so produced images start with 5, not really important
 
     @beartype

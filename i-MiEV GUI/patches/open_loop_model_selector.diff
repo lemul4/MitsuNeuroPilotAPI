@@ -1,0 +1,33 @@
+diff --git a/lead/inference/open_loop_inference.py b/lead/inference/open_loop_inference.py
+--- a/lead/inference/open_loop_inference.py
++++ b/lead/inference/open_loop_inference.py
+@@
+         # Loading models
+         self.nets: list[TFv6] = []
++        model_file_filter = os.environ.get("MITSU_CARLA_MODEL_FILE", "").strip()
++        if model_file_filter:
++            LOG.info(
++                "[Model selector] MITSU_CARLA_MODEL_FILE=%s; loading only this file from %s",
++                model_file_filter,
++                model_path,
++            )
+         for file in sorted(os.listdir(model_path)):
++            if model_file_filter and file != model_file_filter:
++                continue
+             if file.startswith(prefix) and file.endswith(".pth"):
+                 LOG.info(f"Loading model weight from {os.path.join(model_path, file)}")
+@@
+                 net.load_state_dict(
+                     state_dict, strict=config_open_loop.strict_weight_load
+                 )
+                 net.cuda(device=self.device).eval()
+                 self.nets.append(net)
++        if not self.nets:
++            available = sorted([f for f in os.listdir(model_path) if f.endswith(".pth")])
++            raise RuntimeError(
++                f"No model weights loaded from {model_path}. "
++                f"prefix={prefix!r}, MITSU_CARLA_MODEL_FILE={model_file_filter!r}, "
++                f"available_pth={available}"
++            )
++        LOG.info("[Model selector] Loaded %d model file(s)", len(self.nets))
+         self.step = 4

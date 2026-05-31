@@ -1,0 +1,41 @@
+{
+  "profile": "imiev_dual_front_rgb_1_rgb_3",
+  "description": "Dual-front camera profile for CARLA ego vehicle: Mitsubishi i-MiEV style wide 90 deg + narrow 50 deg cameras. Uses rgb_1 and rgb_3 to match TrainingConfig.rgb_camera_ids=(1,3).",
+  "keep_non_camera_sensors": true,
+  "camera_order": ["wide_90", "narrow_50"],
+  "notes": [
+    "Attach these cameras to the CARLA ego/hero vehicle through SensorAgent.sensors().",
+    "This profile is intended for checkpoints trained with dual_front_camera_mode and rgb_camera_ids=(1,3).",
+    "If the checkpoint expects sequential rgb_1/rgb_2 ids, use the rgb_1_rgb_2 profile instead."
+  ],
+  "cameras": [
+    {
+      "id": "rgb_1",
+      "role": "wide_90",
+      "type": "sensor.camera.rgb",
+      "x": 0.9,
+      "y": -0.0675,
+      "z": 1.55,
+      "roll": 0.0,
+      "pitch": 0.0,
+      "yaw": 0.0,
+      "width": 960,
+      "height": 540,
+      "fov": 90.0
+    },
+    {
+      "id": "rgb_3",
+      "role": "narrow_50",
+      "type": "sensor.camera.rgb",
+      "x": 0.9,
+      "y": 0.0675,
+      "z": 1.55,
+      "roll": 0.0,
+      "pitch": 0.0,
+      "yaw": 0.0,
+      "width": 960,
+      "height": 540,
+      "fov": 50.03
+    }
+  ]
+}

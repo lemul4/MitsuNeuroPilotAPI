@@ -51,9 +51,6 @@ class OpenLoopInference:
         # Loading models
         self.nets: list[TFv6] = []
         model_file_filter = os.environ.get("MITSU_CARLA_MODEL_FILE", "").strip()
-        if not model_file_filter and os.path.exists(os.path.join(model_path, "model_0011.pth")):
-            model_file_filter = "model_0011.pth"
-            LOG.info("[Model selector] MITSU_CARLA_MODEL_FILE not set; auto-selecting model_0011.pth from %s", model_path)
         if model_file_filter:
             LOG.info(
                 "[Model selector] MITSU_CARLA_MODEL_FILE=%s; loading only this file from %s",
