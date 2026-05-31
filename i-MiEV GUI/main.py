@@ -2620,360 +2620,73 @@ AppController._finish_route_queue = _mitsu_v4_finish_route_queue
 AppController.handle_agent_finished = _mitsu_v4_handle_agent_finished
 # --- MITSU_ROUTE_COMPLETION_STATUS_V4_END ---
 
-# --- MITSU_MOCK_CAMERA_CONTROLLER_BYPASS_V8_BEGIN ---
-# Allow TEST_MOCK_VEHICLE to run without physical camera devices.
-# Narrow behavior:
-#   - active only when selected contour contains MOCK;
-#   - camera-readiness methods are short-circuited;
-#   - start/preview methods only swallow camera-missing exceptions.
+# --- MITSU_REAL_CONTROL_RESTORE_V12_BEGIN ---
+# Narrow real/mock control restore.
+#
+# The core VehicleControlService already has the correct policy:
+# - TEST_MOCK / TEST_REPLAY / TEST_SERIAL_LOOPBACK can run without physical cameras;
+# - real serial mode must prove fresh physical camera streams;
+# - second Activate Control press while AI_ACTIVE transfers to MANUAL_ACTIVE.
+#
+# This patch keeps that policy and only fixes GUI/controller glue.
 
-def _mitsu_v8_controller_mode_text(controller):
+def _mitsu_v12_descriptor_text(controller):
+    vc = getattr(controller, "vehicle_control", None)
+    descriptor = getattr(vc, "descriptor", None)
+    if descriptor is not None:
+        parts = [
+            str(getattr(descriptor, "label", "") or ""),
+            str(getattr(getattr(descriptor, "kind", None), "name", getattr(descriptor, "kind", "")) or ""),
+        ]
+        return " ".join(parts)
+
     view = getattr(controller, "view", None)
-    if view is None:
-        return ""
-
-    helper = getattr(view, "_mitsu_v8_get_mode_text", None)
-    if callable(helper):
+    combo = getattr(view, "combo_ports", None)
+    if combo is not None and hasattr(combo, "currentText"):
         try:
-            return str(helper())
+            return str(combo.currentText())
         except Exception:
             pass
-
-    try:
-        for widget in view.findChildren(QComboBox):
-            text = str(widget.currentText())
-            up = text.upper()
-            if any(token in up for token in ("MOCK", "COM", "REAL", "REPLAY", "VIRTUAL", "CARLA", "DEMO")):
-                return text
-    except Exception:
-        pass
-
     return ""
 
-def _mitsu_v8_controller_is_mock(controller):
-    return "MOCK" in _mitsu_v8_controller_mode_text(controller).upper()
 
-def _mitsu_v8_camera_error(exc):
-    low = str(exc or "").lower()
-    return any(token in low for token in (
-        "camera", "камера", "камер", "opencv", "video", "capture",
-        "no device", "not found", "не найден", "не подключ",
-    ))
+def _mitsu_v12_is_test_cameraless(controller):
+    text = _mitsu_v12_descriptor_text(controller).upper()
+    return any(token in text for token in ("MOCK", "REPLAY", "LOOPBACK"))
 
-def _mitsu_v8_enable_view_mock_cameras(controller):
+
+def _mitsu_v12_real_state(controller):
+    vc = getattr(controller, "vehicle_control", None)
+    state = getattr(getattr(vc, "state_machine", None), "state", None)
+    return str(getattr(state, "value", state) or "")
+
+
+def _mitsu_v12_is_ai_active(controller):
+    return _mitsu_v12_real_state(controller) == "AI_ACTIVE"
+
+
+def _mitsu_v12_is_manual_active(controller):
+    return _mitsu_v12_real_state(controller) == "MANUAL_ACTIVE"
+
+
+def _mitsu_v12_seed_test_camera_frames(controller):
     view = getattr(controller, "view", None)
     if view is None:
         return
-    helper = getattr(view, "_mitsu_v8_enable_mock_cameras", None)
+
+    helper = getattr(view, "_mitsu_v12_enable_test_camera_frames", None)
     if callable(helper):
         try:
             helper(force=True)
         except Exception:
             pass
 
-def _mitsu_v8_patch_controller_method(name, behavior):
-    if not hasattr(AppController, name):
-        return
-    original = getattr(AppController, name)
-    if not callable(original) or getattr(original, "_mitsu_v8_patched", False):
-        return
 
-    def wrapper(self, *args, **kwargs):
-        if behavior == "ready" and _mitsu_v8_controller_is_mock(self):
-            _mitsu_v8_enable_view_mock_cameras(self)
-            print(f"MOCK MODE: camera readiness bypassed in {name}")
-            return True
-
-        try:
-            return original(self, *args, **kwargs)
-        except Exception as exc:
-            if _mitsu_v8_controller_is_mock(self) and _mitsu_v8_camera_error(exc):
-                _mitsu_v8_enable_view_mock_cameras(self)
-                print(f"MOCK MODE: ignored physical camera error in {name}: {exc}")
-                if behavior in {"ready", "validate"}:
-                    return True
-                return None
-            raise
-
-    wrapper._mitsu_v8_patched = True
-    setattr(AppController, name, wrapper)
-
-for _name in (
-    "ensure_real_cameras_ready",
-    "_ensure_real_cameras_ready",
-    "check_real_cameras_ready",
-    "_check_real_cameras_ready",
-    "wait_real_cameras_ready",
-    "_wait_real_cameras_ready",
-    "has_real_cameras",
-    "_has_real_cameras",
-    "real_cameras_ready",
-    "_real_cameras_ready",
-):
-    _mitsu_v8_patch_controller_method(_name, "ready")
-
-for _name in (
-    "validate_real_mission",
-    "_validate_real_mission",
-    "validate_mission",
-    "_validate_mission",
-    "prepare_real_mission",
-    "_prepare_real_mission",
-):
-    _mitsu_v8_patch_controller_method(_name, "validate")
-
-for _name in (
-    "start_real_ai_preview",
-    "_start_real_ai_preview",
-    "start_ai_preview",
-    "_start_ai_preview",
-    "start_real_camera_preview",
-    "_start_real_camera_preview",
-    "start_real_cameras",
-    "_start_real_cameras",
-    "handle_ai_preview_toggle",
-    "handle_preview_toggle",
-):
-    _mitsu_v8_patch_controller_method(_name, "start")
-
-# --- MITSU_MOCK_CAMERA_CONTROLLER_BYPASS_V8_END ---
-
-# --- MITSU_MOCK_CAMERA_CONTROLLER_READY_V9_BEGIN ---
-# Mock-only camera-ready shim for TEST_MOCK_VEHICLE.
-
-def _mitsu_v9_controller_mode_text(controller):
-    view = getattr(controller, "view", None)
-    if view is None:
-        return ""
-
-    for helper_name in ("_mitsu_v9_get_mode_text", "_mitsu_v8_get_mode_text"):
-        helper = getattr(view, helper_name, None)
-        if callable(helper):
-            try:
-                text = str(helper())
-                if text:
-                    return text
-            except Exception:
-                pass
-
-    try:
-        for widget in view.findChildren(QComboBox):
-            text = str(widget.currentText())
-            up = text.upper()
-            if any(token in up for token in ("MOCK", "COM", "REAL", "REPLAY", "VIRTUAL", "CARLA", "DEMO")):
-                return text
-    except Exception:
-        pass
-
-    return ""
-
-def _mitsu_v9_controller_is_mock(controller):
-    return "MOCK" in _mitsu_v9_controller_mode_text(controller).upper()
-
-def _mitsu_v9_enable_view_mock_cameras(controller):
-    view = getattr(controller, "view", None)
-    if view is None:
-        return
-    for helper_name in ("_mitsu_v9_enable_mock_cameras", "_mitsu_v8_enable_mock_cameras"):
-        helper = getattr(view, helper_name, None)
-        if callable(helper):
-            try:
-                helper(force=True)
-                break
-            except Exception:
-                pass
-
-def _mitsu_v9_mark_mock_camera_ready(controller):
-    if not _mitsu_v9_controller_is_mock(controller):
+def _mitsu_v12_set_test_cameras_ready(controller, reason="test mode"):
+    if not _mitsu_v12_is_test_cameraless(controller):
         return False
 
-    _mitsu_v9_enable_view_mock_cameras(controller)
-
-    for obj in (controller, getattr(controller, "view", None)):
-        if obj is None:
-            continue
-        for attr in (
-            "camera_stream_ready",
-            "_camera_stream_ready",
-            "real_camera_stream_ready",
-            "_real_camera_stream_ready",
-            "real_cameras_ready",
-            "_real_cameras_ready",
-            "camera_ready",
-            "_camera_ready",
-            "ai_preview_ready",
-            "_ai_preview_ready",
-            "preview_ready",
-            "_preview_ready",
-        ):
-            try:
-                setattr(obj, attr, True)
-            except Exception:
-                pass
-
-    for name in (
-        "real_camera_receiver",
-        "real_video_receiver",
-        "camera_receiver",
-        "video_receiver",
-        "real_camera_worker",
-        "camera_worker",
-    ):
-        obj = getattr(controller, name, None)
-        if obj is None:
-            continue
-
-        for attr in ("ready", "is_ready_flag", "connected", "running", "_running"):
-            try:
-                setattr(obj, attr, True)
-            except Exception:
-                pass
-
-        try:
-            setattr(obj, "is_ready", lambda: True)
-        except Exception:
-            pass
-        try:
-            setattr(obj, "isRunning", lambda: True)
-        except Exception:
-            pass
-
-    print("MOCK MODE: camera stream marked ready")
-    return True
-
-def _mitsu_v9_camera_error(exc):
-    low = str(exc or "").lower()
-    return any(token in low for token in (
-        "camera", "камера", "камер", "opencv", "video", "capture",
-        "stream is not ready", "no device", "not found", "не найден", "не подключ",
-    ))
-
-def _mitsu_v9_patch_controller_method(name, behavior):
-    if not hasattr(AppController, name):
-        return
-    original = getattr(AppController, name)
-    if not callable(original) or getattr(original, "_mitsu_v9_patched", False):
-        return
-
-    def wrapper(self, *args, **kwargs):
-        if _mitsu_v9_controller_is_mock(self):
-            _mitsu_v9_mark_mock_camera_ready(self)
-            if behavior == "ready":
-                return True
-
-        try:
-            return original(self, *args, **kwargs)
-        except Exception as exc:
-            if _mitsu_v9_controller_is_mock(self) and _mitsu_v9_camera_error(exc):
-                _mitsu_v9_mark_mock_camera_ready(self)
-                print(f"MOCK MODE: ignored physical camera error in {name}: {exc}")
-                if behavior in {"ready", "validate"}:
-                    return True
-                return None
-            raise
-
-    wrapper._mitsu_v9_patched = True
-    setattr(AppController, name, wrapper)
-
-for _name in (
-    "ensure_real_cameras_ready",
-    "_ensure_real_cameras_ready",
-    "check_real_cameras_ready",
-    "_check_real_cameras_ready",
-    "wait_real_cameras_ready",
-    "_wait_real_cameras_ready",
-    "has_real_cameras",
-    "_has_real_cameras",
-    "real_cameras_ready",
-    "_real_cameras_ready",
-    "is_camera_stream_ready",
-    "_is_camera_stream_ready",
-):
-    _mitsu_v9_patch_controller_method(_name, "ready")
-
-for _name in list(vars(AppController).keys()):
-    low = _name.lower()
-    if low.startswith("__"):
-        continue
-    if any(token in low for token in (
-        "activate", "control", "preview", "camera", "mission", "real", "ai_toggle", "ai_preview"
-    )):
-        _mitsu_v9_patch_controller_method(_name, "start")
-
-# --- MITSU_MOCK_CAMERA_CONTROLLER_READY_V9_END ---
-
-# --- MITSU_MOCK_CONTROL_ACTIVATION_FIX_V10_BEGIN ---
-# Mock-mode activation fix.
-#
-# This fixes the case where the UI says "MOCK MODE: camera stream marked ready",
-# but VehicleControlService still rejects activation with "Camera stream is not ready".
-# The real cause is a later negative physical-camera receiver status overriding
-# the service-level cameras_ok flag.
-
-def _mitsu_v10_controller_mode_text(controller):
-    view = getattr(controller, "view", None)
-
-    for helper_name in ("_mitsu_v9_get_mode_text", "_mitsu_v8_get_mode_text"):
-        helper = getattr(view, helper_name, None) if view is not None else None
-        if callable(helper):
-            try:
-                text = str(helper()).strip()
-                if text:
-                    return text
-            except Exception:
-                pass
-
-    try:
-        if view is not None:
-            for widget in view.findChildren(QComboBox):
-                text = str(widget.currentText()).strip()
-                up = text.upper()
-                if any(token in up for token in ("TEST_MOCK", "MOCK", "COM", "REAL", "REPLAY", "VIRTUAL", "CARLA", "DEMO")):
-                    return text
-    except Exception:
-        pass
-
-    descriptor = getattr(getattr(controller, "vehicle_control", None), "descriptor", None)
-    label = getattr(descriptor, "label", None)
-    if label:
-        return str(label)
-
-    kind = getattr(descriptor, "kind", None)
-    if kind is not None:
-        return str(getattr(kind, "name", kind))
-
-    return ""
-
-def _mitsu_v10_is_mock_controller(controller):
-    text = _mitsu_v10_controller_mode_text(controller).upper()
-    if "MOCK" in text or "TEST_MOCK" in text:
-        return True
-
-    descriptor = getattr(getattr(controller, "vehicle_control", None), "descriptor", None)
-    kind = getattr(descriptor, "kind", None)
-    kind_text = str(getattr(kind, "name", kind)).upper() if kind is not None else ""
-    return "MOCK" in kind_text
-
-def _mitsu_v10_enable_view_mock_cameras(controller):
-    view = getattr(controller, "view", None)
-    if view is None:
-        return
-
-    for helper_name in ("_mitsu_v9_enable_mock_cameras", "_mitsu_v8_enable_mock_cameras"):
-        helper = getattr(view, helper_name, None)
-        if callable(helper):
-            try:
-                helper(force=True)
-                return
-            except Exception:
-                pass
-
-def _mitsu_v10_force_mock_camera_ready(controller, reason="mock"):
-    if not _mitsu_v10_is_mock_controller(controller):
-        return False
-
-    _mitsu_v10_enable_view_mock_cameras(controller)
-
+    _mitsu_v12_seed_test_camera_frames(controller)
     controller.real_camera_status = {"wide_90": True, "narrow_50": True}
 
     vc = getattr(controller, "vehicle_control", None)
@@ -2988,146 +2701,221 @@ def _mitsu_v10_force_mock_camera_ready(controller, reason="mock"):
             except Exception:
                 pass
 
-        if bool(getattr(controller, "ai_control_requested", False)):
-            try:
-                vc.set_ai_preview_enabled(True)
-            except Exception:
-                pass
+    if not bool(getattr(controller, "_mitsu_v12_test_camera_ready_logged", False)):
+        controller._mitsu_v12_test_camera_ready_logged = True
+        print(f"TEST CAMERA: physical cameras bypassed for {reason}")
 
-    for obj in (controller, getattr(controller, "view", None)):
-        if obj is None:
-            continue
-        for attr in (
-            "camera_stream_ready",
-            "_camera_stream_ready",
-            "real_camera_stream_ready",
-            "_real_camera_stream_ready",
-            "real_cameras_ready",
-            "_real_cameras_ready",
-            "camera_ready",
-            "_camera_ready",
-            "ai_preview_ready",
-            "_ai_preview_ready",
-            "preview_ready",
-            "_preview_ready",
-        ):
-            try:
-                setattr(obj, attr, True)
-            except Exception:
-                pass
-
-    view = getattr(controller, "view", None)
-    if view is not None and hasattr(view, "set_real_readiness"):
-        try:
-            view.set_real_readiness(
-                route=bool(getattr(controller, "real_mission_prepared", False)),
-                pose=True,
-                cameras=True,
-                ai=bool(getattr(controller, "ai_control_requested", False)),
-                vehicle=bool(getattr(controller, "is_connected", False)),
-            )
-        except Exception:
-            pass
-
-    print(f"MOCK MODE: camera readiness forced at service level ({reason})")
     return True
 
-if hasattr(AppController, "_start_real_camera_stack") and not hasattr(AppController, "_mitsu_v10_original_start_real_camera_stack"):
-    AppController._mitsu_v10_original_start_real_camera_stack = AppController._start_real_camera_stack
 
-    def _mitsu_v10_start_real_camera_stack(self):
-        if _mitsu_v10_is_mock_controller(self):
-            _mitsu_v10_force_mock_camera_ready(self, "skip physical camera stack")
-            print("MOCK MODE: physical real-camera stack skipped")
-            return
-        return AppController._mitsu_v10_original_start_real_camera_stack(self)
+if not hasattr(AppController, "_mitsu_v12_original_init"):
+    AppController._mitsu_v12_original_init = AppController.__init__
 
-    AppController._start_real_camera_stack = _mitsu_v10_start_real_camera_stack
+    def _mitsu_v12_init(self, *args, **kwargs):
+        AppController._mitsu_v12_original_init(self, *args, **kwargs)
 
-if hasattr(AppController, "handle_real_camera_cell_status") and not hasattr(AppController, "_mitsu_v10_original_handle_real_camera_cell_status"):
-    AppController._mitsu_v10_original_handle_real_camera_cell_status = AppController.handle_real_camera_cell_status
+        self.manual_control_requested = False
 
-    def _mitsu_v10_handle_real_camera_cell_status(self, camera_name, ok, message):
-        if _mitsu_v10_is_mock_controller(self):
-            _mitsu_v10_force_mock_camera_ready(self, f"ignore camera status {camera_name}={ok}")
+        signal = getattr(self.view, "manual_toggled", None)
+        if signal is not None and not bool(getattr(self, "_mitsu_v12_manual_signal_connected", False)):
+            try:
+                signal.connect(self.handle_real_manual_toggle)
+                self._mitsu_v12_manual_signal_connected = True
+            except Exception as exc:
+                print(f"REAL CONTROL: manual_toggled connect skipped: {exc}")
+
+    AppController.__init__ = _mitsu_v12_init
+
+
+def handle_real_manual_toggle(self, is_active):
+    self.manual_control_requested = bool(is_active)
+
+    if self.runtime_mode != "real" or self.vehicle_control is None:
+        return
+
+    try:
+        self.vehicle_control.set_manual_mode_enabled(bool(is_active))
+    except Exception as exc:
+        print(f"REAL CONTROL: manual mode toggle failed: {exc}")
+
+    if bool(is_active):
+        self.ai_control_requested = False
+        try:
+            self.vehicle_control.set_ai_preview_enabled(False)
+        except Exception:
+            pass
+        if hasattr(self.view, "set_ai_checkbox"):
+            try:
+                self.view.set_ai_checkbox(False)
+            except Exception:
+                pass
+        self.view.statusBar().showMessage("Ручное управление включено: Activate Control подготовит Drive")
+    else:
+        self.view.statusBar().showMessage("Ручное управление выключено")
+
+
+AppController.handle_real_manual_toggle = handle_real_manual_toggle
+
+
+if hasattr(AppController, "_start_real_camera_stack") and not hasattr(AppController, "_mitsu_v12_original_start_real_camera_stack"):
+    AppController._mitsu_v12_original_start_real_camera_stack = AppController._start_real_camera_stack
+
+    def _mitsu_v12_start_real_camera_stack(self):
+        if _mitsu_v12_is_test_cameraless(self):
+            _mitsu_v12_set_test_cameras_ready(self, "test contour")
             view = getattr(self, "view", None)
             if view is not None and hasattr(view, "set_real_camera_status"):
                 try:
-                    view.set_real_camera_status(str(camera_name), True, "mock camera stream")
+                    view.set_real_camera_status("wide_90", True, "test camera bypass")
+                    view.set_real_camera_status("narrow_50", True, "test camera bypass")
                 except Exception:
                     pass
             return
-        return AppController._mitsu_v10_original_handle_real_camera_cell_status(self, camera_name, ok, message)
 
-    AppController.handle_real_camera_cell_status = _mitsu_v10_handle_real_camera_cell_status
+        return AppController._mitsu_v12_original_start_real_camera_stack(self)
 
-if hasattr(AppController, "handle_real_agent_camera_status") and not hasattr(AppController, "_mitsu_v10_original_handle_real_agent_camera_status"):
-    AppController._mitsu_v10_original_handle_real_agent_camera_status = AppController.handle_real_agent_camera_status
+    AppController._start_real_camera_stack = _mitsu_v12_start_real_camera_stack
 
-    def _mitsu_v10_handle_real_agent_camera_status(self, ok, message):
-        if _mitsu_v10_is_mock_controller(self):
-            _mitsu_v10_force_mock_camera_ready(self, f"ignore agent camera status={ok}")
-            view = getattr(self, "view", None)
-            if view is not None and hasattr(view, "set_real_agent_status"):
+
+if hasattr(AppController, "handle_real_camera_cell_status") and not hasattr(AppController, "_mitsu_v12_original_handle_real_camera_cell_status"):
+    AppController._mitsu_v12_original_handle_real_camera_cell_status = AppController.handle_real_camera_cell_status
+
+    def _mitsu_v12_handle_real_camera_cell_status(self, camera_name, ok, message):
+        if _mitsu_v12_is_test_cameraless(self):
+            _mitsu_v12_set_test_cameras_ready(self, f"ignore physical camera status {camera_name}")
+            return
+        return AppController._mitsu_v12_original_handle_real_camera_cell_status(self, camera_name, ok, message)
+
+    AppController.handle_real_camera_cell_status = _mitsu_v12_handle_real_camera_cell_status
+
+
+if hasattr(AppController, "handle_real_agent_camera_status") and not hasattr(AppController, "_mitsu_v12_original_handle_real_agent_camera_status"):
+    AppController._mitsu_v12_original_handle_real_agent_camera_status = AppController.handle_real_agent_camera_status
+
+    def _mitsu_v12_handle_real_agent_camera_status(self, ok, message):
+        if _mitsu_v12_is_test_cameraless(self):
+            _mitsu_v12_set_test_cameras_ready(self, "ignore analyzer camera status")
+            return
+        return AppController._mitsu_v12_original_handle_real_agent_camera_status(self, ok, message)
+
+    AppController.handle_real_agent_camera_status = _mitsu_v12_handle_real_agent_camera_status
+
+
+if hasattr(AppController, "handle_ai_toggle") and not hasattr(AppController, "_mitsu_v12_original_handle_ai_toggle"):
+    AppController._mitsu_v12_original_handle_ai_toggle = AppController.handle_ai_toggle
+
+    def _mitsu_v12_handle_ai_toggle(self, is_active):
+        if self.runtime_mode == "real":
+            if bool(getattr(self, "manual_control_requested", False)) and bool(is_active):
+                self.manual_control_requested = False
+                if self.vehicle_control is not None:
+                    try:
+                        self.vehicle_control.set_manual_mode_enabled(False)
+                    except Exception:
+                        pass
+                if hasattr(self.view, "set_manual_checkbox"):
+                    try:
+                        self.view.set_manual_checkbox(False)
+                    except Exception:
+                        pass
+
+            if bool(is_active) and _mitsu_v12_is_test_cameraless(self):
+                _mitsu_v12_set_test_cameras_ready(self, "AI Preview")
+
+        return AppController._mitsu_v12_original_handle_ai_toggle(self, is_active)
+
+    AppController.handle_ai_toggle = _mitsu_v12_handle_ai_toggle
+
+
+if hasattr(AppController, "_handle_real_control_toggle") and not hasattr(AppController, "_mitsu_v12_original_handle_real_control_toggle"):
+    AppController._mitsu_v12_original_handle_real_control_toggle = AppController._handle_real_control_toggle
+
+    async def _mitsu_v12_handle_real_control_toggle(self, is_active):
+        if bool(is_active) and _mitsu_v12_is_test_cameraless(self):
+            _mitsu_v12_set_test_cameras_ready(self, "before Activate Control")
+
+        result = await AppController._mitsu_v12_original_handle_real_control_toggle(self, is_active)
+
+        if self.runtime_mode == "real" and not bool(is_active) and _mitsu_v12_is_manual_active(self):
+            self.manual_control_requested = True
+            if hasattr(self.view, "set_manual_checkbox"):
                 try:
-                    view.set_real_agent_status(True, "mock camera stream")
+                    self.view.set_manual_checkbox(True)
                 except Exception:
                     pass
-            return
-        return AppController._mitsu_v10_original_handle_real_agent_camera_status(self, ok, message)
-
-    AppController.handle_real_agent_camera_status = _mitsu_v10_handle_real_agent_camera_status
-
-if hasattr(AppController, "_handle_real_control_toggle") and not hasattr(AppController, "_mitsu_v10_original_handle_real_control_toggle"):
-    AppController._mitsu_v10_original_handle_real_control_toggle = AppController._handle_real_control_toggle
-
-    async def _mitsu_v10_handle_real_control_toggle(self, is_active):
-        if bool(is_active) and _mitsu_v10_is_mock_controller(self):
-            _mitsu_v10_force_mock_camera_ready(self, "before Activate Control")
-
-            result = await AppController._mitsu_v10_original_handle_real_control_toggle(self, is_active)
-
-            if not bool((result or {}).get("active")):
-                last_msg = str((result or {}).get("message") or "")
-                if "Activation blocked" in last_msg:
-                    vc = getattr(self, "vehicle_control", None)
-                    if vc is not None:
-                        try:
-                            vc.set_camera_status(True)
-                        except Exception:
-                            pass
-                    _mitsu_v10_force_mock_camera_ready(self, "retry after blocked")
-                    retry = await AppController._mitsu_v10_original_handle_real_control_toggle(self, is_active)
-                    return retry
-
-            return result
-
-        return await AppController._mitsu_v10_original_handle_real_control_toggle(self, is_active)
-
-    AppController._handle_real_control_toggle = _mitsu_v10_handle_real_control_toggle
-
-if hasattr(AppController, "handle_ai_toggle") and not hasattr(AppController, "_mitsu_v10_original_handle_ai_toggle"):
-    AppController._mitsu_v10_original_handle_ai_toggle = AppController.handle_ai_toggle
-
-    def _mitsu_v10_handle_ai_toggle(self, is_active):
-        if self.runtime_mode == "real" and bool(is_active) and _mitsu_v10_is_mock_controller(self):
-            self.ai_control_requested = True
-            _mitsu_v10_force_mock_camera_ready(self, "AI Preview enabled")
-
-            if self.vehicle_control is not None:
+            if hasattr(self.view, "set_real_vehicle_state"):
                 try:
-                    self.vehicle_control.set_ai_preview_enabled(True)
+                    self.view.set_real_vehicle_state("MANUAL_ACTIVE", "Ручное управление активно")
                 except Exception:
                     pass
 
-            self.view.statusBar().showMessage("Мок-предпросмотр ИИ включен: физические камеры не требуются")
+        return result
+
+    AppController._handle_real_control_toggle = _mitsu_v12_handle_real_control_toggle
+
+
+if hasattr(AppController, "handle_manual_input") and not hasattr(AppController, "_mitsu_v12_original_handle_manual_input"):
+    AppController._mitsu_v12_original_handle_manual_input = AppController.handle_manual_input
+
+    def _mitsu_v12_handle_manual_input(self, angle, accel, brake):
+        if self.runtime_mode == "real":
+            if self.vehicle_control is None or not self.is_connected:
+                return
+            if _mitsu_v12_is_ai_active(self):
+                return
+            self._schedule_async(self.vehicle_control.submit_manual_command(angle, accel, brake), "real_manual_command")
             return
 
-        return AppController._mitsu_v10_original_handle_ai_toggle(self, is_active)
+        return AppController._mitsu_v12_original_handle_manual_input(self, angle, accel, brake)
 
-    AppController.handle_ai_toggle = _mitsu_v10_handle_ai_toggle
+    AppController.handle_manual_input = _mitsu_v12_handle_manual_input
 
-# --- MITSU_MOCK_CONTROL_ACTIVATION_FIX_V10_END ---
+
+if hasattr(AppController, "handle_gear_change") and not hasattr(AppController, "_mitsu_v12_original_handle_gear_change"):
+    AppController._mitsu_v12_original_handle_gear_change = AppController.handle_gear_change
+
+    def _mitsu_v12_handle_gear_change(self, gear_idx):
+        if self.runtime_mode == "real":
+            if self.vehicle_control is None or not self.is_connected:
+                return
+
+            state = _mitsu_v12_real_state(self)
+            if state in {"AI_ACTIVE", "ARMING", "DISENGAGING"}:
+                now = time.monotonic()
+                if now - self._last_real_gear_ignore_log_at > 1.0:
+                    self._last_real_gear_ignore_log_at = now
+                    print(f"REAL CONTROL: ручная передача заблокирована: state={state}")
+                return
+
+            self._schedule_async(self.vehicle_control.request_manual_gear(gear_idx), "real_gear_request")
+            return
+
+        return AppController._mitsu_v12_original_handle_gear_change(self, gear_idx)
+
+    AppController.handle_gear_change = _mitsu_v12_handle_gear_change
+
+
+if hasattr(AppController, "handle_real_mission_validated") and not hasattr(AppController, "_mitsu_v12_original_handle_real_mission_validated"):
+    AppController._mitsu_v12_original_handle_real_mission_validated = AppController.handle_real_mission_validated
+
+    def _mitsu_v12_handle_real_mission_validated(self, mission):
+        result = AppController._mitsu_v12_original_handle_real_mission_validated(self, mission)
+
+        if _mitsu_v12_is_test_cameraless(self):
+            _mitsu_v12_set_test_cameras_ready(self, "mission validation")
+
+        if hasattr(self.view, "set_real_mission_card"):
+            try:
+                service_mission = getattr(self.vehicle_control, "mission", None) if self.vehicle_control is not None else None
+                self.view.set_real_mission_card(service_mission, dict(mission or {}), mode_text=_mitsu_v12_descriptor_text(self))
+            except Exception as exc:
+                print(f"REAL UI: mission card update failed: {exc}")
+
+        return result
+
+    AppController.handle_real_mission_validated = _mitsu_v12_handle_real_mission_validated
+
+# --- MITSU_REAL_CONTROL_RESTORE_V12_END ---
 
 if __name__ == "__main__":
     # Use the plain Qt event loop for the GUI. Async serial/real-control work

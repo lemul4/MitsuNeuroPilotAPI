@@ -37,7 +37,6 @@ except Exception:
     discover_routes_fast = None
 
 
-
 class DecimalAxis(pg.AxisItem):
     """Ось графика с выводом чисел до десятых."""
 
@@ -4244,620 +4243,232 @@ else:
     print("WARNING: BusinessCameraStage is not defined. Apply camera business UI patch first.")
 # --- MITSU_CAMERA_MODE_BUTTON_FIX_V7_END ---
 
-# --- MITSU_REAL_MODE_MISSION_MOCK_CAMERA_V8_BEGIN ---
-# Real/mock mission UI normalizer and mock-camera fallback.
+# --- MITSU_REAL_MISSION_UI_RESTORE_V12_BEGIN ---
+# Explicit real/mock mission-card update.
 #
-# This block deliberately does not modify CARLA camera rendering.
-# It only prevents stale CARLA mission data from leaking into real/mock UI and
-# allows TEST_MOCK_VEHICLE to run without physical cameras connected.
+# This avoids the previous generic QLabel rewrite approach. Only known right-panel
+# widgets are updated.
 
 if "MainWindow" in globals():
-    def _mitsu_v8_get_mode_text(self):
-        names = (
-            "mode_combo", "combo_mode", "connection_combo", "port_combo",
-            "cmb_mode", "cmb_ports", "combo_port", "ports_combo",
-            "serial_combo", "connection_selector",
-        )
-        for name in names:
-            widget = getattr(self, name, None)
-            if widget is not None and hasattr(widget, "currentText"):
-                try:
-                    text = str(widget.currentText())
-                    if text:
-                        return text
-                except Exception:
-                    pass
-
-        try:
-            for widget in self.findChildren(QComboBox):
-                try:
-                    text = str(widget.currentText())
-                except Exception:
-                    continue
-                up = text.upper()
-                if any(token in up for token in ("VIRTUAL", "DEMO", "CARLA", "MOCK", "COM", "REAL", "REPLAY")):
-                    return text
-        except Exception:
-            pass
-
-        return ""
-
-
-    def _mitsu_v8_is_realish_mode(self):
-        up = _mitsu_v8_get_mode_text(self).upper()
-        if not up:
-            return False
-        if "VIRTUAL" in up or "CARLA" in up or "DEMO" in up:
-            return False
-        return any(token in up for token in ("MOCK", "COM", "REAL", "REPLAY", "TEST_"))
-
-
-    def _mitsu_v8_is_mock_mode(self):
-        return "MOCK" in _mitsu_v8_get_mode_text(self).upper()
-
-
-    def _mitsu_v8_current_mission_name(self):
-        try:
-            for widget in self.findChildren(QComboBox):
-                try:
-                    text = str(widget.currentText()).strip()
-                except Exception:
-                    continue
-                if not text:
-                    continue
-                if "→" in text or "->" in text or ("A" in text and "B" in text):
-                    return text
-        except Exception:
-            pass
-        return "A → B"
-
-
-    def _mitsu_v8_mode_label(self):
-        up = _mitsu_v8_get_mode_text(self).upper()
+    def _mitsu_v12_contour_label_from_text(text):
+        up = str(text or "").upper()
         if "MOCK" in up:
             return "Мок-контур"
         if "REPLAY" in up:
             return "Replay-контур"
-        if "COM" in up:
-            return "Реальный контур"
+        if "LOOPBACK" in up:
+            return "Loopback-контур"
         return "Реальный контур"
 
 
-    def _mitsu_v8_contains_carla_token(text):
-        low = str(text or "").lower()
-        return any(token in low for token in (
-            "carla", "route_", "town", "accident", "scenario", "ui routes",
-            "ui route state", "очередь выполняется", "сценарий выполняется",
-            "сценарий идет", "сценарий идёт",
-        ))
+    def _mitsu_v12_mission_title_from_objects(service_mission=None, raw_mission=None):
+        if service_mission is not None:
+            name = str(getattr(service_mission, "name", "") or "").strip()
+            if name:
+                return name
 
+        raw = dict(raw_mission or {})
+        for key in ("name", "mission_id", "goal_label", "route_name"):
+            value = str(raw.get(key) or "").strip()
+            if value:
+                return value
 
-    def _mitsu_v8_sanitize_real_labels(self):
-        if not _mitsu_v8_is_realish_mode(self):
-            return
-
-        mission = _mitsu_v8_current_mission_name(self)
-        contour = _mitsu_v8_mode_label(self)
-
-        try:
-            for label in self.findChildren(QLabel):
-                try:
-                    text = str(label.text())
-                except Exception:
-                    continue
-
-                stripped = text.strip()
-                low = stripped.lower()
-
-                if not stripped:
-                    continue
-
-                if "route_" in low:
-                    label.setText(mission)
-                elif re.fullmatch(r"town[\w\d_ -]*", stripped, flags=re.I):
-                    label.setText(contour)
-                elif stripped in {"Accident", "AccidentTwoWays", "ConstructionObstacle", "ControlLoss", "Clear Day", "Fog"}:
-                    label.setText("Маршрут по координатам")
-                elif "carla" in low and not ("камера" in low or "симулятор" in low):
-                    label.setText("—")
-        except Exception:
-            pass
-
-        try:
-            preview = getattr(self, "route_preview", None)
-            if preview is not None:
-                stale = False
-                for child in preview.findChildren(QLabel):
-                    try:
-                        if _mitsu_v8_contains_carla_token(child.text()):
-                            stale = True
-                            break
-                    except Exception:
-                        pass
-
-                if stale:
-                    title = f"Маршрут {mission}"
-                    subtitle = f"{contour}: миссия подготовлена"
-                    if hasattr(preview, "set_route_state"):
-                        preview.set_route_state(title, subtitle, 0, "prepared")
-                    elif hasattr(preview, "set_mode"):
-                        preview.set_mode("prepared", subtitle)
-        except Exception:
-            pass
-
-        attr_values = {
-            "lbl_queue_title": "Миссия",
-            "queue_title": "Миссия",
-            "mission_title": "Миссия",
-            "lbl_route_value": mission,
-            "route_value": mission,
-            "lbl_city_value": contour,
-            "city_value": contour,
-            "lbl_scenario_value": "Маршрут по координатам",
-            "scenario_value": "Маршрут по координатам",
-        }
-        for attr, value in attr_values.items():
-            widget = getattr(self, attr, None)
-            if widget is not None and hasattr(widget, "setText"):
-                try:
-                    widget.setText(value)
-                except Exception:
-                    pass
-
-
-    def _mitsu_v8_generate_mock_camera_pixmap(self, label, size=(960, 540)):
-        pixmap = QPixmap(size[0], size[1])
-        pixmap.fill(QColor("#10131a"))
-
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        gradient = QLinearGradient(0, 0, size[0], size[1])
-        gradient.setColorAt(0.0, QColor("#111824"))
-        gradient.setColorAt(1.0, QColor("#080b10"))
-        painter.fillRect(0, 0, size[0], size[1], QBrush(gradient))
-
-        painter.setPen(QPen(QColor("#303847"), 2))
-        horizon = int(size[1] * 0.46)
-        painter.drawLine(0, horizon, size[0], horizon)
-
-        painter.setPen(QPen(QColor("#242b36"), 1))
-        for x in range(0, size[0], 80):
-            painter.drawLine(x, 0, x, size[1])
-        for y in range(0, size[1], 60):
-            painter.drawLine(0, y, size[0], y)
-
-        painter.setPen(QPen(QColor("#566174"), 3))
-        painter.drawLine(int(size[0] * 0.40), horizon, int(size[0] * 0.25), size[1])
-        painter.drawLine(int(size[0] * 0.60), horizon, int(size[0] * 0.75), size[1])
-
-        painter.setBrush(QColor(255, 193, 7, 42))
-        painter.setPen(QPen(QColor("#ffc107"), 2))
-        painter.drawRoundedRect(24, 24, 245, 54, 12, 12)
-
-        font = QFont()
-        font.setPointSize(15)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor("#f6f7fb"))
-        painter.drawText(42, 56, f"MOCK CAMERA · {label}")
-
-        font.setPointSize(9)
-        font.setBold(False)
-        painter.setFont(font)
-        painter.setPen(QColor("#b9c2d3"))
-        painter.drawText(42, 92, "Физическая камера не подключена · программная заглушка")
-
-        painter.end()
-        return pixmap
-
-
-    def _mitsu_v8_enable_mock_cameras(self, force=False):
-        if not _mitsu_v8_is_mock_mode(self):
-            return
-
-        if not hasattr(self, "real_camera_stage"):
-            return
-
-        now = time.monotonic()
-        wide_ts = getattr(self.real_camera_stage, "_wide_ts", 0.0)
-        narrow_ts = getattr(self.real_camera_stage, "_narrow_ts", 0.0)
-        has_fresh_real = bool(wide_ts and (now - wide_ts) < 1.2) and bool(narrow_ts and (now - narrow_ts) < 1.2)
-
-        if has_fresh_real and not force:
-            return
-
-        wide = _mitsu_v8_generate_mock_camera_pixmap(self, "90°")
-        narrow = _mitsu_v8_generate_mock_camera_pixmap(self, "50°")
-        self.real_camera_stage.set_camera_pixmap("wide_90", wide)
-        self.real_camera_stage.set_camera_pixmap("narrow_50", narrow)
-
-        if hasattr(self, "lbl_real_agent_status"):
-            self.lbl_real_agent_status.setText("Агент: мок-камеры активны · физические камеры не требуются")
-
-        self._mitsu_v8_mock_cameras_active = True
-
-
-    def _mitsu_v8_tick(self):
-        try:
-            if _mitsu_v8_is_realish_mode(self):
-                _mitsu_v8_sanitize_real_labels(self)
-            if _mitsu_v8_is_mock_mode(self):
-                _mitsu_v8_enable_mock_cameras(self)
-        except Exception as exc:
-            print(f"UI REAL MODE PATCH: tick failed: {exc}")
-
-
-    if not hasattr(MainWindow, "_mitsu_v8_original_init"):
-        MainWindow._mitsu_v8_original_init = MainWindow.__init__
-
-        def _mitsu_v8_init(self, *args, **kwargs):
-            MainWindow._mitsu_v8_original_init(self, *args, **kwargs)
-
-            self._mitsu_v8_mock_cameras_active = False
-
-            self._mitsu_v8_timer = QTimer(self)
-            self._mitsu_v8_timer.setInterval(500)
-            self._mitsu_v8_timer.timeout.connect(lambda: _mitsu_v8_tick(self))
-            self._mitsu_v8_timer.start()
-
-            QTimer.singleShot(100, lambda: _mitsu_v8_tick(self))
-
-        MainWindow.__init__ = _mitsu_v8_init
-
-
-    if hasattr(MainWindow, "_append_log") and not hasattr(MainWindow, "_mitsu_v8_original_append_log"):
-        MainWindow._mitsu_v8_original_append_log = MainWindow._append_log
-
-        def _mitsu_v8_append_log(self, message):
-            text = str(message or "")
-            if _mitsu_v8_is_realish_mode(self):
-                low = text.lower()
-                is_real_line = "real " in low or "real_" in low or "mission" in low or "мисс" in low or "control" in low
-                is_carla_line = any(token in low for token in ("carla", "route_", "town", "accident", "ui routes", "ui route state"))
-                if is_carla_line and not is_real_line:
-                    return
-            return MainWindow._mitsu_v8_original_append_log(self, message)
-
-        MainWindow._append_log = _mitsu_v8_append_log
-
-else:
-    print("WARNING: MainWindow is not defined; real/mock UI patch was not installed.")
-# --- MITSU_REAL_MODE_MISSION_MOCK_CAMERA_V8_END ---
-
-# --- MITSU_REAL_MODE_MISSION_MOCK_CAMERA_V9_BEGIN ---
-# Real/mock mission panel and mock-camera fallback.
-# This block does not touch CARLA camera code.
-
-import time as _mitsu_v9_time
-import re as _mitsu_v9_re
-
-if "MainWindow" in globals():
-    def _mitsu_v9_get_mode_text(self):
-        names = (
-            "mode_combo", "combo_mode", "connection_combo", "port_combo",
-            "cmb_mode", "cmb_ports", "combo_port", "ports_combo",
-            "serial_combo", "connection_selector",
-        )
-        for name in names:
-            widget = getattr(self, name, None)
-            if widget is not None and hasattr(widget, "currentText"):
-                try:
-                    text = str(widget.currentText()).strip()
-                    if text:
-                        return text
-                except Exception:
-                    pass
-
-        try:
-            combos = list(self.findChildren(QComboBox))
-        except Exception:
-            combos = []
-
-        for widget in combos:
-            try:
-                text = str(widget.currentText()).strip()
-            except Exception:
-                continue
-            up = text.upper()
-            if any(token in up for token in ("TEST_MOCK", "MOCK", "COM", "REAL", "REPLAY", "VIRTUAL", "CARLA", "DEMO")):
-                return text
-
-        return ""
-
-
-    def _mitsu_v9_is_realish_mode(self):
-        up = _mitsu_v9_get_mode_text(self).upper()
-        if not up:
-            return False
-        if "VIRTUAL" in up or "CARLA" in up or "DEMO" in up:
-            return False
-        return any(token in up for token in ("MOCK", "COM", "REAL", "REPLAY", "TEST_"))
-
-
-    def _mitsu_v9_is_mock_mode(self):
-        return "MOCK" in _mitsu_v9_get_mode_text(self).upper()
-
-
-    def _mitsu_v9_contour_label(self):
-        up = _mitsu_v9_get_mode_text(self).upper()
-        if "MOCK" in up:
-            return "Мок-контур"
-        if "REPLAY" in up:
-            return "Replay-контур"
-        if "COM" in up:
-            return "Реальный контур"
-        return "Реальный контур"
-
-
-    def _mitsu_v9_current_mission_name(self):
-        try:
-            for widget in self.findChildren(QComboBox):
-                try:
-                    text = str(widget.currentText()).strip()
-                except Exception:
-                    continue
-                if not text:
-                    continue
-                if "→" in text or "->" in text:
-                    return text
-                if text.startswith("A") and "B" in text:
-                    return text
-        except Exception:
-            pass
         return "A → B"
 
 
-    def _mitsu_v9_is_caption(text):
-        return str(text or "").strip() in {
-            "Маршрут", "Очередь", "Город", "Сценарий",
-            "Speed", "Accel", "Brake", "Split",
-        }
-
-
-    def _mitsu_v9_set_value_after_caption(self, caption, value):
+    def _mitsu_v12_waypoint_count(service_mission=None, raw_mission=None):
         try:
-            labels = list(self.findChildren(QLabel))
+            waypoints = getattr(service_mission, "waypoints", None)
+            if waypoints is not None:
+                return len(waypoints)
         except Exception:
-            return
-
-        for i, label in enumerate(labels):
-            try:
-                text = str(label.text()).strip()
-            except Exception:
-                continue
-
-            if text != caption:
-                continue
-
-            for candidate in labels[i + 1:i + 7]:
-                try:
-                    current = str(candidate.text()).strip()
-                except Exception:
-                    continue
-
-                if not current:
-                    continue
-                if _mitsu_v9_is_caption(current):
-                    break
-                if current in {"—", "-", "0 / 0"} or "route_" in current.lower() or current.startswith("Town") or current in {"Accident", "AccidentTwoWays", "ConstructionObstacle"}:
-                    candidate.setText(value)
-                    break
+            pass
+        try:
+            return len((raw_mission or {}).get("waypoints") or [])
+        except Exception:
+            return 0
 
 
-    def _mitsu_v9_sanitize_real_mission_ui(self):
-        if not _mitsu_v9_is_realish_mode(self):
-            return
-
-        mission = _mitsu_v9_current_mission_name(self)
-        contour = _mitsu_v9_contour_label(self)
+    def set_real_mission_card(self, service_mission=None, raw_mission=None, mode_text=""):
+        title = _mitsu_v12_mission_title_from_objects(service_mission, raw_mission)
+        contour = _mitsu_v12_contour_label_from_text(mode_text)
+        waypoint_count = _mitsu_v12_waypoint_count(service_mission, raw_mission)
         scenario = "Маршрут по координатам"
 
-        _mitsu_v9_set_value_after_caption(self, "Маршрут", mission)
-        _mitsu_v9_set_value_after_caption(self, "Очередь", "1 / 1")
-        _mitsu_v9_set_value_after_caption(self, "Город", contour)
-        _mitsu_v9_set_value_after_caption(self, "Сценарий", scenario)
+        if hasattr(self, "right_panel_title"):
+            self.right_panel_title.setText("Миссия")
+        if hasattr(self, "queue_state_badge"):
+            self.queue_state_badge.setText("● Готово")
+        if hasattr(self, "queue_empty_label"):
+            self.queue_empty_label.setText("Миссия подготовлена")
 
-        try:
-            for label in self.findChildren(QLabel):
+        if hasattr(self, "lbl_queue_route"):
+            self.lbl_queue_route.value_label.setText(title)
+        if hasattr(self, "lbl_queue_count"):
+            self.lbl_queue_count.value_label.setText("1 / 1")
+        if hasattr(self, "lbl_queue_city"):
+            self.lbl_queue_city.value_label.setText(contour)
+        if hasattr(self, "lbl_queue_scenario"):
+            self.lbl_queue_scenario.value_label.setText(scenario)
+
+        subtitle = "Миссия проверена. Включите предпросмотр ИИ или ручное управление"
+        if hasattr(self, "chk_ai") and self.chk_ai.isChecked():
+            subtitle = "Предпросмотр ИИ включен. Нажмите Activate Control"
+        if hasattr(self, "chk_manual") and self.chk_manual.isChecked():
+            subtitle = "Ручное управление выбрано. Нажмите Activate Control"
+
+        if hasattr(self, "route_preview"):
+            try:
+                self.route_preview.set_route_state(
+                    f"Маршрут {title}",
+                    subtitle,
+                    0,
+                    "prepared",
+                    route={
+                        "name": title,
+                        "city": contour,
+                        "scenario": scenario,
+                        "waypoints": waypoint_count,
+                    },
+                )
+            except TypeError:
+                self.route_preview.set_route_state(f"Маршрут {title}", subtitle, 0, "prepared")
+
+        self._mitsu_v12_real_mission_title = title
+        self._mitsu_v12_real_mission_contour = contour
+        self._mitsu_v12_real_mission_scenario = scenario
+
+
+    MainWindow.set_real_mission_card = set_real_mission_card
+
+
+    if hasattr(MainWindow, "set_real_mission_summary") and not hasattr(MainWindow, "_mitsu_v12_original_set_real_mission_summary"):
+        MainWindow._mitsu_v12_original_set_real_mission_summary = MainWindow.set_real_mission_summary
+
+        def _mitsu_v12_set_real_mission_summary(self, mission):
+            MainWindow._mitsu_v12_original_set_real_mission_summary(self, mission)
+            mode_text = ""
+            combo = getattr(self, "combo_ports", None)
+            if combo is not None and hasattr(combo, "currentText"):
                 try:
-                    text = str(label.text()).strip()
+                    mode_text = str(combo.currentText())
                 except Exception:
-                    continue
+                    mode_text = ""
+            self.set_real_mission_card(mission, {}, mode_text=mode_text)
 
-                low = text.lower()
-
-                if text == "Очередь пуста":
-                    label.setText("Миссия подготовлена")
-                elif text == "Очередь выполняется":
-                    label.setText("Миссия выполняется")
-                elif text == "Очередь завершена успешно: 3/3 маршрутов":
-                    label.setText("Миссия завершена")
-                elif text == "Маршрут не выбран":
-                    label.setText(f"Маршрут {mission}")
-                elif text == "Выберите маршрут":
-                    label.setText("Миссия проверена. Нажмите Activate Control")
-                elif "route_" in low:
-                    label.setText(mission)
-                elif text.startswith("Town"):
-                    label.setText(contour)
-                elif text in {"Accident", "AccidentTwoWays", "ConstructionObstacle", "ControlLoss", "Clear Day", "Fog"}:
-                    label.setText(scenario)
-        except Exception:
-            pass
-
-        try:
-            preview = getattr(self, "route_preview", None)
-            if preview is not None:
-                stale = False
-                for child in preview.findChildren(QLabel):
-                    try:
-                        t = str(child.text()).lower()
-                    except Exception:
-                        continue
-                    if "route_" in t or "town" in t or "accident" in t or "маршрут не выбран" in t or "выберите маршрут" in t:
-                        stale = True
-                        break
-
-                if stale:
-                    title = f"Маршрут {mission}"
-                    subtitle = "Миссия проверена. Нажмите Activate Control"
-                    if hasattr(preview, "set_route_state"):
-                        preview.set_route_state(title, subtitle, 0, "prepared")
-                    elif hasattr(preview, "set_mode"):
-                        preview.set_mode("prepared", subtitle)
-        except Exception:
-            pass
-
-        attr_values = {
-            "lbl_route_value": mission,
-            "route_value": mission,
-            "mission_route_value": mission,
-            "lbl_queue_value": "1 / 1",
-            "queue_value": "1 / 1",
-            "mission_queue_value": "1 / 1",
-            "lbl_city_value": contour,
-            "city_value": contour,
-            "mission_city_value": contour,
-            "lbl_scenario_value": scenario,
-            "scenario_value": scenario,
-            "mission_scenario_value": scenario,
-            "queue_empty_label": "Миссия подготовлена",
-        }
-        for attr, value in attr_values.items():
-            widget = getattr(self, attr, None)
-            if widget is not None and hasattr(widget, "setText"):
-                try:
-                    widget.setText(value)
-                except Exception:
-                    pass
+        MainWindow.set_real_mission_summary = _mitsu_v12_set_real_mission_summary
 
 
-    def _mitsu_v9_generate_mock_camera_pixmap(self, label, size=(960, 540)):
-        pixmap = QPixmap(size[0], size[1])
-        pixmap.fill(QColor("#10131a"))
+    if hasattr(MainWindow, "set_real_vehicle_state") and not hasattr(MainWindow, "_mitsu_v12_original_set_real_vehicle_state"):
+        MainWindow._mitsu_v12_original_set_real_vehicle_state = MainWindow.set_real_vehicle_state
 
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
+        def _mitsu_v12_set_real_vehicle_state(self, state, message=""):
+            MainWindow._mitsu_v12_original_set_real_vehicle_state(self, state, message)
 
-        gradient = QLinearGradient(0, 0, size[0], size[1])
-        gradient.setColorAt(0.0, QColor("#111824"))
-        gradient.setColorAt(1.0, QColor("#080b10"))
-        painter.fillRect(0, 0, size[0], size[1], QBrush(gradient))
+            if getattr(self, "current_ui_mode", "") != "real" or not hasattr(self, "route_preview"):
+                return
 
-        horizon = int(size[1] * 0.46)
-        painter.setPen(QPen(QColor("#303847"), 2))
-        painter.drawLine(0, horizon, size[0], horizon)
+            title = getattr(self, "_mitsu_v12_real_mission_title", "A → B")
+            contour = getattr(self, "_mitsu_v12_real_mission_contour", "Реальный контур")
+            scenario = getattr(self, "_mitsu_v12_real_mission_scenario", "Маршрут по координатам")
 
-        painter.setPen(QPen(QColor("#242b36"), 1))
-        for x in range(0, size[0], 80):
-            painter.drawLine(x, 0, x, size[1])
-        for y in range(0, size[1], 60):
-            painter.drawLine(0, y, size[0], y)
+            state_text = str(state or "")
+            message = str(message or "")
 
-        painter.setPen(QPen(QColor("#566174"), 3))
-        painter.drawLine(int(size[0] * 0.40), horizon, int(size[0] * 0.25), size[1])
-        painter.drawLine(int(size[0] * 0.60), horizon, int(size[0] * 0.75), size[1])
+            mode = "prepared"
+            subtitle = "Миссия подготовлена"
+            if state_text == "AI_ACTIVE":
+                mode = "running"
+                subtitle = "Автономное управление активно"
+            elif state_text == "MANUAL_ACTIVE":
+                mode = "manual"
+                subtitle = "Ручное управление активно"
+            elif state_text in {"BLOCKED", "FAULT"}:
+                mode = "error"
+                subtitle = message or "Управление заблокировано"
+            elif state_text in {"DISCONNECTED", "IDLE"}:
+                mode = "prepared"
+                subtitle = "Миссия подготовлена"
 
-        painter.setBrush(QColor(255, 193, 7, 42))
-        painter.setPen(QPen(QColor("#ffc107"), 2))
-        painter.drawRoundedRect(24, 24, 245, 54, 12, 12)
+            try:
+                self.route_preview.set_route_state(
+                    f"Маршрут {title}",
+                    subtitle,
+                    0,
+                    mode,
+                    route={"name": title, "city": contour, "scenario": scenario},
+                )
+            except TypeError:
+                self.route_preview.set_route_state(f"Маршрут {title}", subtitle, 0, mode)
 
-        font = QFont()
-        font.setPointSize(15)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor("#f6f7fb"))
-        painter.drawText(42, 56, f"MOCK CAMERA · {label}")
-
-        font.setPointSize(9)
-        font.setBold(False)
-        painter.setFont(font)
-        painter.setPen(QColor("#b9c2d3"))
-        painter.drawText(42, 92, "Физическая камера не подключена · программная заглушка")
-
-        painter.end()
-        return pixmap
+        MainWindow.set_real_vehicle_state = _mitsu_v12_set_real_vehicle_state
 
 
-    def _mitsu_v9_enable_mock_cameras(self, force=False):
-        if not _mitsu_v9_is_mock_mode(self):
-            return False
-
+    def _mitsu_v12_enable_test_camera_frames(self, force=False):
         stage = getattr(self, "real_camera_stage", None)
         if stage is None:
             return False
 
-        now = _mitsu_v9_time.monotonic()
+        import time as _mitsu_v12_time
+        now = _mitsu_v12_time.monotonic()
         wide_ts = getattr(stage, "_wide_ts", 0.0)
         narrow_ts = getattr(stage, "_narrow_ts", 0.0)
-        has_fresh_real = bool(wide_ts and (now - wide_ts) < 1.2) and bool(narrow_ts and (now - narrow_ts) < 1.2)
-
-        if has_fresh_real and not force:
+        fresh = bool(wide_ts and now - wide_ts < 1.5) and bool(narrow_ts and now - narrow_ts < 1.5)
+        if fresh and not force:
             return True
 
-        stage.set_camera_pixmap("wide_90", _mitsu_v9_generate_mock_camera_pixmap(self, "90°"))
-        stage.set_camera_pixmap("narrow_50", _mitsu_v9_generate_mock_camera_pixmap(self, "50°"))
+        def _pix(label):
+            pixmap = QPixmap(960, 540)
+            pixmap.fill(QColor("#10131a"))
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+
+            gradient = QLinearGradient(0, 0, 960, 540)
+            gradient.setColorAt(0.0, QColor("#111824"))
+            gradient.setColorAt(1.0, QColor("#080b10"))
+            painter.fillRect(0, 0, 960, 540, QBrush(gradient))
+
+            painter.setPen(QPen(QColor("#263143"), 1))
+            for x in range(0, 960, 80):
+                painter.drawLine(x, 0, x, 540)
+            for y in range(0, 540, 60):
+                painter.drawLine(0, y, 960, y)
+
+            horizon = 250
+            painter.setPen(QPen(QColor("#536177"), 3))
+            painter.drawLine(390, horizon, 250, 540)
+            painter.drawLine(570, horizon, 710, 540)
+
+            painter.setBrush(QColor(255, 193, 7, 42))
+            painter.setPen(QPen(QColor("#ffc107"), 2))
+            painter.drawRoundedRect(24, 24, 270, 58, 12, 12)
+
+            font = QFont()
+            font.setBold(True)
+            font.setPointSize(15)
+            painter.setFont(font)
+            painter.setPen(QColor("#f6f7fb"))
+            painter.drawText(42, 58, f"TEST CAMERA · {label}")
+
+            font.setBold(False)
+            font.setPointSize(9)
+            painter.setFont(font)
+            painter.setPen(QColor("#b9c2d3"))
+            painter.drawText(42, 94, "Физическая камера не требуется для test/mock")
+
+            painter.end()
+            return pixmap
+
+        stage.set_camera_pixmap("wide_90", _pix("90°"))
+        stage.set_camera_pixmap("narrow_50", _pix("50°"))
 
         if hasattr(self, "lbl_real_agent_status"):
-            self.lbl_real_agent_status.setText("Агент: мок-камеры активны · физические камеры не требуются")
+            self.lbl_real_agent_status.setText("Агент: test/mock камеры активны · физические камеры не требуются")
 
-        self._mitsu_v9_mock_cameras_active = True
         return True
 
-
-    def _mitsu_v9_tick(self):
-        try:
-            if _mitsu_v9_is_realish_mode(self):
-                _mitsu_v9_sanitize_real_mission_ui(self)
-            if _mitsu_v9_is_mock_mode(self):
-                _mitsu_v9_enable_mock_cameras(self)
-        except Exception as exc:
-            print(f"UI REAL MODE PATCH V9: tick failed: {exc}")
-
-
-    MainWindow._mitsu_v9_get_mode_text = _mitsu_v9_get_mode_text
-    MainWindow._mitsu_v9_is_realish_mode = _mitsu_v9_is_realish_mode
-    MainWindow._mitsu_v9_is_mock_mode = _mitsu_v9_is_mock_mode
-    MainWindow._mitsu_v9_enable_mock_cameras = _mitsu_v9_enable_mock_cameras
-    MainWindow._mitsu_v9_sanitize_real_mission_ui = _mitsu_v9_sanitize_real_mission_ui
-
-    MainWindow._mitsu_v8_get_mode_text = _mitsu_v9_get_mode_text
-    MainWindow._mitsu_v8_enable_mock_cameras = _mitsu_v9_enable_mock_cameras
-
-    if not hasattr(MainWindow, "_mitsu_v9_original_init"):
-        MainWindow._mitsu_v9_original_init = MainWindow.__init__
-
-        def _mitsu_v9_init(self, *args, **kwargs):
-            MainWindow._mitsu_v9_original_init(self, *args, **kwargs)
-
-            self._mitsu_v9_mock_cameras_active = False
-
-            self._mitsu_v9_timer = QTimer(self)
-            self._mitsu_v9_timer.setInterval(350)
-            self._mitsu_v9_timer.timeout.connect(lambda: _mitsu_v9_tick(self))
-            self._mitsu_v9_timer.start()
-
-            QTimer.singleShot(100, lambda: _mitsu_v9_tick(self))
-
-        MainWindow.__init__ = _mitsu_v9_init
-
-
-    if hasattr(MainWindow, "_append_log") and not hasattr(MainWindow, "_mitsu_v9_original_append_log"):
-        MainWindow._mitsu_v9_original_append_log = MainWindow._append_log
-
-        def _mitsu_v9_append_log(self, message):
-            text = str(message or "")
-            if _mitsu_v9_is_realish_mode(self):
-                low = text.lower()
-                is_real_line = "real " in low or "real_" in low or "mission" in low or "мисс" in low or "control" in low
-                is_carla_line = any(token in low for token in ("carla", "route_", "town", "accident", "ui routes", "ui route state"))
-                if is_carla_line and not is_real_line:
-                    return
-            return MainWindow._mitsu_v9_original_append_log(self, message)
-
-        MainWindow._append_log = _mitsu_v9_append_log
+    MainWindow._mitsu_v12_enable_test_camera_frames = _mitsu_v12_enable_test_camera_frames
 
 else:
-    print("WARNING: MainWindow is not defined; real/mock UI patch V9 was not installed.")
-# --- MITSU_REAL_MODE_MISSION_MOCK_CAMERA_V9_END ---
+    print("WARNING: MainWindow is not defined; V12 real mission UI restore was not installed.")
+# --- MITSU_REAL_MISSION_UI_RESTORE_V12_END ---
