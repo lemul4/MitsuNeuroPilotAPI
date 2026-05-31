@@ -213,3 +213,8 @@ telemetry_*
 .mnp_runtime/
 .idea/
 .agents/
+# Local patch / generated backup files
+*.bak
+*.bak_*
+*.orig
+*.rej
