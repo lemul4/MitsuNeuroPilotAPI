@@ -102,7 +102,7 @@ class LeadAgentThread(QThread):
                 # MITSU_SUBPROCESS_ENCODING_PATCH
                 
                 
-bufsize=0,
+bufsize=1,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
 
