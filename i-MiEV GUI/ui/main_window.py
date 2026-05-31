@@ -4243,56 +4243,319 @@ else:
     print("WARNING: BusinessCameraStage is not defined. Apply camera business UI patch first.")
 # --- MITSU_CAMERA_MODE_BUTTON_FIX_V7_END ---
 
-# --- MITSU_REAL_MISSION_UI_RESTORE_V12_BEGIN ---
-# Explicit real/mock mission-card update.
+# --- MITSU_REAL_TAKEOVER_UI_SINGLE_SOURCE_V18_BEGIN ---
+# RoutePreview single authority owner for real/mock mode.
 #
-# This avoids the previous generic QLabel rewrite approach. Only known right-panel
-# widgets are updated.
+# This block removes the previous dependency on short-lived locks. Mission
+# refreshes may update route metadata, but they cannot change the visual state
+# while authority is active.
+
+if "RoutePreviewWidget" in globals():
+    if not hasattr(RoutePreviewWidget, "_mitsu_v18_original_set_route_state"):
+        RoutePreviewWidget._mitsu_v18_original_set_route_state = RoutePreviewWidget.set_route_state
+    if not hasattr(RoutePreviewWidget, "_mitsu_v18_original_update_vehicle_state"):
+        RoutePreviewWidget._mitsu_v18_original_update_vehicle_state = RoutePreviewWidget.update_vehicle_state
+    if not hasattr(RoutePreviewWidget, "_mitsu_v18_original_status_text"):
+        RoutePreviewWidget._mitsu_v18_original_status_text = RoutePreviewWidget._status_text
+    if not hasattr(RoutePreviewWidget, "_mitsu_v18_original_status_color"):
+        RoutePreviewWidget._mitsu_v18_original_status_color = RoutePreviewWidget._status_color
+
+
+    def _mitsu_v18_preview_override(self):
+        return str(getattr(self, "_mitsu_v18_authority_override", "") or "")
+
+
+    def _mitsu_v18_status_text(self):
+        if _mitsu_v18_preview_override(self) == "manual_takeover" or str(getattr(self, "mode", "")) == "manual_takeover":
+            return "ПЕРЕХВАТ ВОДИТЕЛЯ"
+        return RoutePreviewWidget._mitsu_v18_original_status_text(self)
+
+
+    def _mitsu_v18_status_color(self):
+        if _mitsu_v18_preview_override(self) == "manual_takeover" or str(getattr(self, "mode", "")) == "manual_takeover":
+            return QColor("#2f80ed")
+        return RoutePreviewWidget._mitsu_v18_original_status_color(self)
+
+
+    def _mitsu_v18_stable_title(self):
+        title = str(getattr(self, "_mitsu_v18_stable_title", "") or self.title or "Маршрут A → B")
+        if title.lower().startswith("маршрут маршрут"):
+            title = title.replace("Маршрут Маршрут", "Маршрут", 1)
+        if not title.startswith("Маршрут"):
+            title = f"Маршрут {title}"
+        return title
+
+
+    def _mitsu_v18_apply_override(self):
+        override = _mitsu_v18_preview_override(self)
+        if override == "manual_takeover":
+            self.title = _mitsu_v18_stable_title(self)
+            self.subtitle = "Перехват ИИ: ручное управление активно"
+            self.mode = "manual_takeover"
+            return True
+        if override == "manual":
+            self.title = _mitsu_v18_stable_title(self)
+            self.subtitle = "Ручное управление активно"
+            self.mode = "manual"
+            return True
+        if override == "ai":
+            self.title = _mitsu_v18_stable_title(self)
+            self.subtitle = "Автономное управление активно"
+            self.mode = "running"
+            return True
+        return False
+
+
+    def _mitsu_v18_is_release(mode, subtitle=""):
+        text = f"{mode} {subtitle}".lower()
+        return str(mode or "").lower() in {"off"} or "управление отключено" in text or "control disabled" in text
+
+
+    def _mitsu_v18_is_error(mode, subtitle=""):
+        text = f"{mode} {subtitle}".lower()
+        return str(mode or "").lower() == "error" or "ошиб" in text or "заблок" in text or "blocked" in text
+
+
+    def _mitsu_v18_set_route_state(self, title, subtitle="", percent=0.0, mode="idle", route=None):
+        override = _mitsu_v18_preview_override(self)
+
+        if title:
+            self._mitsu_v18_stable_title = str(title)
+
+        if route:
+            try:
+                self.city = str(route.get("city", route.get("town", self.city)) or self.city)
+                self.scenario = str(route.get("scenario", route.get("scenario_name", self.scenario)) or self.scenario)
+                self.split = str(route.get("split", self.split) or self.split)
+            except Exception:
+                pass
+
+        if override in {"manual_takeover", "manual", "ai"}:
+            if _mitsu_v18_is_error(mode, subtitle):
+                self._mitsu_v18_authority_override = ""
+                return RoutePreviewWidget._mitsu_v18_original_set_route_state(self, title, subtitle, percent, mode, route)
+
+            if _mitsu_v18_is_release(mode, subtitle):
+                self._mitsu_v18_authority_override = ""
+                return RoutePreviewWidget._mitsu_v18_original_set_route_state(self, title, subtitle, percent, "prepared", route)
+
+            _mitsu_v18_apply_override(self)
+            self.update()
+            return
+
+        return RoutePreviewWidget._mitsu_v18_original_set_route_state(self, title, subtitle, percent, mode, route)
+
+
+    def _mitsu_v18_update_vehicle_state(self, vehicle_state, control_active=False, ai_active=False):
+        if _mitsu_v18_preview_override(self) in {"manual_takeover", "manual", "ai"}:
+            self.speed = float(getattr(vehicle_state, "speed", 0.0) or 0.0)
+            self.accel = float(getattr(vehicle_state, "accel", 0.0) or 0.0)
+            self.brake = float(getattr(vehicle_state, "brake", 0.0) or 0.0)
+            self.angle = float(getattr(vehicle_state, "angle", 0.0) or 0.0)
+            self.target_angle = float(getattr(vehicle_state, "target_angle", 0.0) or 0.0)
+            self.control_active = bool(control_active)
+            self.ai_active = bool(ai_active)
+            # Important: telemetry must not release the visual authority state.
+            # Only set_real_authority_mode("off") / release route-state can do it.
+            _mitsu_v18_apply_override(self)
+            self.update()
+            return
+
+        return RoutePreviewWidget._mitsu_v18_original_update_vehicle_state(self, vehicle_state, control_active, ai_active)
+
+
+    RoutePreviewWidget.set_route_state = _mitsu_v18_set_route_state
+    RoutePreviewWidget.update_vehicle_state = _mitsu_v18_update_vehicle_state
+    RoutePreviewWidget._status_text = _mitsu_v18_status_text
+    RoutePreviewWidget._status_color = _mitsu_v18_status_color
+
 
 if "MainWindow" in globals():
-    def _mitsu_v12_contour_label_from_text(text):
-        up = str(text or "").upper()
-        if "MOCK" in up:
-            return "Мок-контур"
-        if "REPLAY" in up:
-            return "Replay-контур"
-        if "LOOPBACK" in up:
-            return "Loopback-контур"
-        return "Реальный контур"
-
-
-    def _mitsu_v12_mission_title_from_objects(service_mission=None, raw_mission=None):
-        if service_mission is not None:
-            name = str(getattr(service_mission, "name", "") or "").strip()
-            if name:
-                return name
-
-        raw = dict(raw_mission or {})
-        for key in ("name", "mission_id", "goal_label", "route_name"):
-            value = str(raw.get(key) or "").strip()
-            if value:
-                return value
-
-        return "A → B"
-
-
-    def _mitsu_v12_waypoint_count(service_mission=None, raw_mission=None):
+    def _mitsu_v18_checkbox_silent(checkbox, checked):
+        if checkbox is None:
+            return
         try:
-            waypoints = getattr(service_mission, "waypoints", None)
-            if waypoints is not None:
-                return len(waypoints)
-        except Exception:
-            pass
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(checked))
+        finally:
+            try:
+                checkbox.blockSignals(False)
+            except Exception:
+                pass
+
+
+    def _mitsu_v18_clean_title(title):
+        title = str(title or "A → B").strip()
+        if title.lower().startswith("маршрут "):
+            title = title[8:].strip()
+        return title or "A → B"
+
+
+    def _mitsu_v18_title(self):
+        return _mitsu_v18_clean_title(
+            getattr(self, "_mitsu_v18_real_mission_title", None)
+            or getattr(self, "_mitsu_v12_real_mission_title", None)
+            or "A → B"
+        )
+
+
+    def _mitsu_v18_route_payload(self):
+        return {
+            "name": _mitsu_v18_title(self),
+            "city": getattr(self, "_mitsu_v18_real_mission_contour", getattr(self, "_mitsu_v12_real_mission_contour", "Реальный контур")),
+            "scenario": getattr(self, "_mitsu_v18_real_mission_scenario", getattr(self, "_mitsu_v12_real_mission_scenario", "Маршрут по координатам")),
+        }
+
+
+    def set_ai_checkbox(self, checked):
+        _mitsu_v18_checkbox_silent(getattr(self, "chk_ai", None), checked)
+
+
+    def set_manual_checkbox(self, checked):
+        _mitsu_v18_checkbox_silent(getattr(self, "chk_manual", None), checked)
+        self.manual_control_enabled = bool(checked)
+
+
+    def set_control_button_silent(self, checked, text=None):
+        btn = getattr(self, "btn_control", None)
+        if btn is None:
+            return
         try:
-            return len((raw_mission or {}).get("waypoints") or [])
-        except Exception:
-            return 0
+            btn.blockSignals(True)
+            btn.setChecked(bool(checked))
+            if text is not None:
+                btn.setText(str(text))
+            btn.setStyleSheet(
+                "background-color: #11823a; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
+                if checked
+                else
+                "background-color: #8a1f2d; color: white; padding: 10px; border-radius: 8px; font-weight: 800;"
+            )
+        finally:
+            try:
+                btn.blockSignals(False)
+            except Exception:
+                pass
+
+
+    def _mitsu_v18_apply_preview_override(self, override, subtitle):
+        if not hasattr(self, "route_preview"):
+            return
+        title = f"Маршрут {_mitsu_v18_title(self)}"
+        self.route_preview._mitsu_v18_authority_override = str(override or "")
+        self.route_preview._mitsu_v18_stable_title = title
+        mode = "manual_takeover" if override == "manual_takeover" else ("manual" if override == "manual" else ("running" if override == "ai" else "prepared"))
+        self.route_preview.set_route_state(title, subtitle, 0, mode, route=_mitsu_v18_route_payload(self))
+
+
+    def set_real_authority_mode(self, authority, message=""):
+        authority = str(authority or "").lower()
+
+        if authority == "ai":
+            self._mitsu_v18_authority_mode = "ai"
+            self.set_manual_checkbox(False)
+            self.set_ai_checkbox(True)
+            self.set_control_button_silent(True, "Отключить ИИ / ручное")
+            _mitsu_v18_apply_preview_override(self, "ai", message or "Автономное управление активно")
+            return
+
+        if authority == "manual_takeover":
+            self._mitsu_v18_authority_mode = "manual_takeover"
+            self.set_ai_checkbox(False)
+            self.set_manual_checkbox(True)
+            self.set_control_button_silent(True, "Ручное управление активно")
+            _mitsu_v18_apply_preview_override(self, "manual_takeover", message or "Перехват ИИ: ручное управление активно")
+            return
+
+        if authority == "manual":
+            self._mitsu_v18_authority_mode = "manual"
+            self.set_ai_checkbox(False)
+            self.set_manual_checkbox(True)
+            self.set_control_button_silent(True, "Ручное управление активно")
+            _mitsu_v18_apply_preview_override(self, "manual", message or "Ручное управление активно")
+            return
+
+        if authority == "off":
+            self._mitsu_v18_authority_mode = "off"
+            self.set_ai_checkbox(False)
+            self.set_manual_checkbox(False)
+            self.set_control_button_silent(False, "Активировать управление")
+            if hasattr(self, "route_preview"):
+                self.route_preview._mitsu_v18_authority_override = ""
+            _mitsu_v18_apply_preview_override(self, "", message or "Миссия подготовлена")
+            return
+
+        if authority == "error":
+            self._mitsu_v18_authority_mode = "error"
+            if hasattr(self, "route_preview"):
+                self.route_preview._mitsu_v18_authority_override = ""
+                self.route_preview.set_route_state(
+                    f"Маршрут {_mitsu_v18_title(self)}",
+                    message or "Управление заблокировано",
+                    0,
+                    "error",
+                    route=_mitsu_v18_route_payload(self),
+                )
+
+
+    def set_real_vehicle_state(self, state, message=""):
+        state_text = str(state or "")
+        message = str(message or "")
+
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_runtime_status"):
+            try:
+                self.real_mission_panel.set_runtime_status(state_text, message)
+            except Exception:
+                pass
+
+        if message:
+            try:
+                self._append_log(f"REAL VEHICLE: {state_text}: {message}")
+            except Exception:
+                pass
+
+        if getattr(self, "current_ui_mode", "") != "real":
+            return
+
+        if state_text in {"ARMING", "DISENGAGING", "READY", "MANUAL_READY"}:
+            return
+
+        if state_text == "AI_ACTIVE":
+            self.set_real_authority_mode("ai", message or "Автономное управление активно")
+        elif state_text == "MANUAL_ACTIVE":
+            current = str(getattr(self, "_mitsu_v18_authority_mode", "") or "")
+            self.set_real_authority_mode(
+                "manual_takeover" if current == "manual_takeover" else "manual",
+                "Перехват ИИ: ручное управление активно" if current == "manual_takeover" else "Ручное управление активно",
+            )
+        elif state_text in {"BLOCKED", "FAULT"}:
+            self.set_real_authority_mode("error", message or "Управление заблокировано")
+        elif state_text in {"IDLE", "DISCONNECTED"}:
+            btn = getattr(self, "btn_control", None)
+            try:
+                active = bool(btn is not None and btn.isChecked())
+            except Exception:
+                active = False
+            if active and str(getattr(self, "_mitsu_v18_authority_mode", "")) in {"ai", "manual", "manual_takeover"}:
+                return
+            self.set_real_authority_mode("off", message or "Миссия подготовлена")
 
 
     def set_real_mission_card(self, service_mission=None, raw_mission=None, mode_text=""):
-        title = _mitsu_v12_mission_title_from_objects(service_mission, raw_mission)
-        contour = _mitsu_v12_contour_label_from_text(mode_text)
-        waypoint_count = _mitsu_v12_waypoint_count(service_mission, raw_mission)
+        raw = dict(raw_mission or {})
+        title = ""
+        if service_mission is not None:
+            title = str(getattr(service_mission, "name", "") or "").strip()
+        if not title:
+            for key in ("name", "mission_id", "goal_label", "route_name"):
+                value = str(raw.get(key) or "").strip()
+                if value:
+                    title = value
+                    break
+
+        title = _mitsu_v18_clean_title(title or "A → B")
+        up = str(mode_text or "").upper()
+        contour = "Мок-контур" if "MOCK" in up else ("Replay-контур" if "REPLAY" in up else ("Loopback-контур" if "LOOPBACK" in up else "Реальный контур"))
         scenario = "Маршрут по координатам"
 
         if hasattr(self, "right_panel_title"):
@@ -4301,7 +4564,6 @@ if "MainWindow" in globals():
             self.queue_state_badge.setText("● Готово")
         if hasattr(self, "queue_empty_label"):
             self.queue_empty_label.setText("Миссия подготовлена")
-
         if hasattr(self, "lbl_queue_route"):
             self.lbl_queue_route.value_label.setText(title)
         if hasattr(self, "lbl_queue_count"):
@@ -4311,106 +4573,29 @@ if "MainWindow" in globals():
         if hasattr(self, "lbl_queue_scenario"):
             self.lbl_queue_scenario.value_label.setText(scenario)
 
-        subtitle = "Миссия проверена. Включите предпросмотр ИИ или ручное управление"
-        if hasattr(self, "chk_ai") and self.chk_ai.isChecked():
-            subtitle = "Предпросмотр ИИ включен. Нажмите Activate Control"
-        if hasattr(self, "chk_manual") and self.chk_manual.isChecked():
-            subtitle = "Ручное управление выбрано. Нажмите Activate Control"
-
-        if hasattr(self, "route_preview"):
-            try:
-                self.route_preview.set_route_state(
-                    f"Маршрут {title}",
-                    subtitle,
-                    0,
-                    "prepared",
-                    route={
-                        "name": title,
-                        "city": contour,
-                        "scenario": scenario,
-                        "waypoints": waypoint_count,
-                    },
-                )
-            except TypeError:
-                self.route_preview.set_route_state(f"Маршрут {title}", subtitle, 0, "prepared")
-
+        self._mitsu_v18_real_mission_title = title
+        self._mitsu_v18_real_mission_contour = contour
+        self._mitsu_v18_real_mission_scenario = scenario
         self._mitsu_v12_real_mission_title = title
         self._mitsu_v12_real_mission_contour = contour
         self._mitsu_v12_real_mission_scenario = scenario
 
+        authority = str(getattr(self, "_mitsu_v18_authority_mode", "") or "")
+        if authority in {"ai", "manual", "manual_takeover"}:
+            self.set_real_authority_mode(authority, "")
+            return
 
-    MainWindow.set_real_mission_card = set_real_mission_card
-
-
-    if hasattr(MainWindow, "set_real_mission_summary") and not hasattr(MainWindow, "_mitsu_v12_original_set_real_mission_summary"):
-        MainWindow._mitsu_v12_original_set_real_mission_summary = MainWindow.set_real_mission_summary
-
-        def _mitsu_v12_set_real_mission_summary(self, mission):
-            MainWindow._mitsu_v12_original_set_real_mission_summary(self, mission)
-            mode_text = ""
-            combo = getattr(self, "combo_ports", None)
-            if combo is not None and hasattr(combo, "currentText"):
-                try:
-                    mode_text = str(combo.currentText())
-                except Exception:
-                    mode_text = ""
-            self.set_real_mission_card(mission, {}, mode_text=mode_text)
-
-        MainWindow.set_real_mission_summary = _mitsu_v12_set_real_mission_summary
+        if hasattr(self, "route_preview"):
+            self.route_preview.set_route_state(f"Маршрут {title}", "Миссия подготовлена", 0, "prepared", route=_mitsu_v18_route_payload(self))
 
 
-    if hasattr(MainWindow, "set_real_vehicle_state") and not hasattr(MainWindow, "_mitsu_v12_original_set_real_vehicle_state"):
-        MainWindow._mitsu_v12_original_set_real_vehicle_state = MainWindow.set_real_vehicle_state
-
-        def _mitsu_v12_set_real_vehicle_state(self, state, message=""):
-            MainWindow._mitsu_v12_original_set_real_vehicle_state(self, state, message)
-
-            if getattr(self, "current_ui_mode", "") != "real" or not hasattr(self, "route_preview"):
-                return
-
-            title = getattr(self, "_mitsu_v12_real_mission_title", "A → B")
-            contour = getattr(self, "_mitsu_v12_real_mission_contour", "Реальный контур")
-            scenario = getattr(self, "_mitsu_v12_real_mission_scenario", "Маршрут по координатам")
-
-            state_text = str(state or "")
-            message = str(message or "")
-
-            mode = "prepared"
-            subtitle = "Миссия подготовлена"
-            if state_text == "AI_ACTIVE":
-                mode = "running"
-                subtitle = "Автономное управление активно"
-            elif state_text == "MANUAL_ACTIVE":
-                mode = "manual"
-                subtitle = "Ручное управление активно"
-            elif state_text in {"BLOCKED", "FAULT"}:
-                mode = "error"
-                subtitle = message or "Управление заблокировано"
-            elif state_text in {"DISCONNECTED", "IDLE"}:
-                mode = "prepared"
-                subtitle = "Миссия подготовлена"
-
-            try:
-                self.route_preview.set_route_state(
-                    f"Маршрут {title}",
-                    subtitle,
-                    0,
-                    mode,
-                    route={"name": title, "city": contour, "scenario": scenario},
-                )
-            except TypeError:
-                self.route_preview.set_route_state(f"Маршрут {title}", subtitle, 0, mode)
-
-        MainWindow.set_real_vehicle_state = _mitsu_v12_set_real_vehicle_state
-
-
-    def _mitsu_v12_enable_test_camera_frames(self, force=False):
+    def _mitsu_v18_enable_test_camera_frames(self, force=False):
         stage = getattr(self, "real_camera_stage", None)
         if stage is None:
             return False
 
-        import time as _mitsu_v12_time
-        now = _mitsu_v12_time.monotonic()
+        import time as _mitsu_v18_time
+        now = _mitsu_v18_time.monotonic()
         wide_ts = getattr(stage, "_wide_ts", 0.0)
         narrow_ts = getattr(stage, "_narrow_ts", 0.0)
         fresh = bool(wide_ts and now - wide_ts < 1.5) and bool(narrow_ts and now - narrow_ts < 1.5)
@@ -4434,11 +4619,6 @@ if "MainWindow" in globals():
             for y in range(0, 540, 60):
                 painter.drawLine(0, y, 960, y)
 
-            horizon = 250
-            painter.setPen(QPen(QColor("#536177"), 3))
-            painter.drawLine(390, horizon, 250, 540)
-            painter.drawLine(570, horizon, 710, 540)
-
             painter.setBrush(QColor(255, 193, 7, 42))
             painter.setPen(QPen(QColor("#ffc107"), 2))
             painter.drawRoundedRect(24, 24, 270, 58, 12, 12)
@@ -4455,7 +4635,6 @@ if "MainWindow" in globals():
             painter.setFont(font)
             painter.setPen(QColor("#b9c2d3"))
             painter.drawText(42, 94, "Физическая камера не требуется для test/mock")
-
             painter.end()
             return pixmap
 
@@ -4464,11 +4643,27 @@ if "MainWindow" in globals():
 
         if hasattr(self, "lbl_real_agent_status"):
             self.lbl_real_agent_status.setText("Агент: test/mock камеры активны · физические камеры не требуются")
-
         return True
 
-    MainWindow._mitsu_v12_enable_test_camera_frames = _mitsu_v12_enable_test_camera_frames
+
+    if not hasattr(MainWindow, "_mitsu_v18_original_init"):
+        MainWindow._mitsu_v18_original_init = MainWindow.__init__
+
+        def _mitsu_v18_init(self, *args, **kwargs):
+            MainWindow._mitsu_v18_original_init(self, *args, **kwargs)
+            self._mitsu_v18_authority_mode = ""
+
+        MainWindow.__init__ = _mitsu_v18_init
+
+
+    MainWindow.set_ai_checkbox = set_ai_checkbox
+    MainWindow.set_manual_checkbox = set_manual_checkbox
+    MainWindow.set_control_button_silent = set_control_button_silent
+    MainWindow.set_real_authority_mode = set_real_authority_mode
+    MainWindow.set_real_vehicle_state = set_real_vehicle_state
+    MainWindow.set_real_mission_card = set_real_mission_card
+    MainWindow._mitsu_v18_enable_test_camera_frames = _mitsu_v18_enable_test_camera_frames
 
 else:
-    print("WARNING: MainWindow is not defined; V12 real mission UI restore was not installed.")
-# --- MITSU_REAL_MISSION_UI_RESTORE_V12_END ---
+    print("WARNING: MainWindow is not defined; V18 real authority UI patch was not installed.")
+# --- MITSU_REAL_TAKEOVER_UI_SINGLE_SOURCE_V18_END ---

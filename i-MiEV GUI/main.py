@@ -2620,74 +2620,52 @@ AppController._finish_route_queue = _mitsu_v4_finish_route_queue
 AppController.handle_agent_finished = _mitsu_v4_handle_agent_finished
 # --- MITSU_ROUTE_COMPLETION_STATUS_V4_END ---
 
-# --- MITSU_REAL_CONTROL_RESTORE_V12_BEGIN ---
-# Narrow real/mock control restore.
+# --- MITSU_REAL_TAKEOVER_SINGLE_SOURCE_V18_BEGIN ---
+# Single source of truth for real/mock authority state.
 #
-# The core VehicleControlService already has the correct policy:
-# - TEST_MOCK / TEST_REPLAY / TEST_SERIAL_LOOPBACK can run without physical cameras;
-# - real serial mode must prove fresh physical camera streams;
-# - second Activate Control press while AI_ACTIVE transfers to MANUAL_ACTIVE.
+# This block replaces the previous V12/V17 takeover UI patches. It fixes the
+# core race:
+#   AI_ACTIVE + clicked checked button => Qt emits False.
+#   Service correctly transfers to MANUAL_ACTIVE.
+#   UI must keep control button checked and set authority=manual_takeover.
 #
-# This patch keeps that policy and only fixes GUI/controller glue.
+# CAN/service behavior is not bypassed. The service remains source of truth for
+# gear, brake, Drive/Park and command submission.
 
-def _mitsu_v12_descriptor_text(controller):
-    vc = getattr(controller, "vehicle_control", None)
-    descriptor = getattr(vc, "descriptor", None)
-    if descriptor is not None:
-        parts = [
-            str(getattr(descriptor, "label", "") or ""),
-            str(getattr(getattr(descriptor, "kind", None), "name", getattr(descriptor, "kind", "")) or ""),
-        ]
-        return " ".join(parts)
-
-    view = getattr(controller, "view", None)
-    combo = getattr(view, "combo_ports", None)
-    if combo is not None and hasattr(combo, "currentText"):
-        try:
-            return str(combo.currentText())
-        except Exception:
-            pass
-    return ""
-
-
-def _mitsu_v12_is_test_cameraless(controller):
-    text = _mitsu_v12_descriptor_text(controller).upper()
-    return any(token in text for token in ("MOCK", "REPLAY", "LOOPBACK"))
-
-
-def _mitsu_v12_real_state(controller):
+def _mitsu_v18_state(controller):
     vc = getattr(controller, "vehicle_control", None)
     state = getattr(getattr(vc, "state_machine", None), "state", None)
     return str(getattr(state, "value", state) or "")
 
 
-def _mitsu_v12_is_ai_active(controller):
-    return _mitsu_v12_real_state(controller) == "AI_ACTIVE"
+def _mitsu_v18_is_test_cameraless(controller):
+    vc = getattr(controller, "vehicle_control", None)
+    descriptor = getattr(vc, "descriptor", None)
+    text = ""
+    if descriptor is not None:
+        text = " ".join([
+            str(getattr(descriptor, "label", "") or ""),
+            str(getattr(getattr(descriptor, "kind", None), "name", getattr(descriptor, "kind", "")) or ""),
+        ]).upper()
+    return any(token in text for token in ("MOCK", "REPLAY", "LOOPBACK"))
 
 
-def _mitsu_v12_is_manual_active(controller):
-    return _mitsu_v12_real_state(controller) == "MANUAL_ACTIVE"
+def _mitsu_v18_seed_test_cameras(controller):
+    if not _mitsu_v18_is_test_cameraless(controller):
+        return False
 
-
-def _mitsu_v12_seed_test_camera_frames(controller):
     view = getattr(controller, "view", None)
-    if view is None:
-        return
-
-    helper = getattr(view, "_mitsu_v12_enable_test_camera_frames", None)
+    helper = getattr(view, "_mitsu_v18_enable_test_camera_frames", None) if view is not None else None
     if callable(helper):
         try:
             helper(force=True)
         except Exception:
             pass
 
-
-def _mitsu_v12_set_test_cameras_ready(controller, reason="test mode"):
-    if not _mitsu_v12_is_test_cameraless(controller):
-        return False
-
-    _mitsu_v12_seed_test_camera_frames(controller)
-    controller.real_camera_status = {"wide_90": True, "narrow_50": True}
+    try:
+        controller.real_camera_status = {"wide_90": True, "narrow_50": True}
+    except Exception:
+        pass
 
     vc = getattr(controller, "vehicle_control", None)
     if vc is not None:
@@ -2701,221 +2679,237 @@ def _mitsu_v12_set_test_cameras_ready(controller, reason="test mode"):
             except Exception:
                 pass
 
-    if not bool(getattr(controller, "_mitsu_v12_test_camera_ready_logged", False)):
-        controller._mitsu_v12_test_camera_ready_logged = True
-        print(f"TEST CAMERA: physical cameras bypassed for {reason}")
+    if not bool(getattr(controller, "_mitsu_v18_test_camera_logged", False)):
+        controller._mitsu_v18_test_camera_logged = True
+        print("TEST CAMERA: physical cameras bypassed for test/mock contour")
 
     return True
 
 
-if not hasattr(AppController, "_mitsu_v12_original_init"):
-    AppController._mitsu_v12_original_init = AppController.__init__
+def _mitsu_v18_set_button(controller, checked, text=None):
+    view = getattr(controller, "view", None)
+    helper = getattr(view, "set_control_button_silent", None) if view is not None else None
+    if callable(helper):
+        try:
+            helper(bool(checked), text=text)
+            return
+        except Exception:
+            pass
 
-    def _mitsu_v12_init(self, *args, **kwargs):
-        AppController._mitsu_v12_original_init(self, *args, **kwargs)
-
-        self.manual_control_requested = False
-
-        signal = getattr(self.view, "manual_toggled", None)
-        if signal is not None and not bool(getattr(self, "_mitsu_v12_manual_signal_connected", False)):
-            try:
-                signal.connect(self.handle_real_manual_toggle)
-                self._mitsu_v12_manual_signal_connected = True
-            except Exception as exc:
-                print(f"REAL CONTROL: manual_toggled connect skipped: {exc}")
-
-    AppController.__init__ = _mitsu_v12_init
-
-
-def handle_real_manual_toggle(self, is_active):
-    self.manual_control_requested = bool(is_active)
-
-    if self.runtime_mode != "real" or self.vehicle_control is None:
+    btn = getattr(view, "btn_control", None) if view is not None else None
+    if btn is None:
         return
 
     try:
-        self.vehicle_control.set_manual_mode_enabled(bool(is_active))
-    except Exception as exc:
-        print(f"REAL CONTROL: manual mode toggle failed: {exc}")
-
-    if bool(is_active):
-        self.ai_control_requested = False
+        btn.blockSignals(True)
+        btn.setChecked(bool(checked))
+        if text is not None:
+            btn.setText(str(text))
+    finally:
         try:
-            self.vehicle_control.set_ai_preview_enabled(False)
+            btn.blockSignals(False)
         except Exception:
             pass
-        if hasattr(self.view, "set_ai_checkbox"):
-            try:
-                self.view.set_ai_checkbox(False)
-            except Exception:
-                pass
-        self.view.statusBar().showMessage("Ручное управление включено: Activate Control подготовит Drive")
-    else:
-        self.view.statusBar().showMessage("Ручное управление выключено")
 
 
-AppController.handle_real_manual_toggle = handle_real_manual_toggle
+def _mitsu_v18_set_authority(controller, authority, message=""):
+    view = getattr(controller, "view", None)
+    if view is None:
+        return
 
-
-if hasattr(AppController, "_start_real_camera_stack") and not hasattr(AppController, "_mitsu_v12_original_start_real_camera_stack"):
-    AppController._mitsu_v12_original_start_real_camera_stack = AppController._start_real_camera_stack
-
-    def _mitsu_v12_start_real_camera_stack(self):
-        if _mitsu_v12_is_test_cameraless(self):
-            _mitsu_v12_set_test_cameras_ready(self, "test contour")
-            view = getattr(self, "view", None)
-            if view is not None and hasattr(view, "set_real_camera_status"):
-                try:
-                    view.set_real_camera_status("wide_90", True, "test camera bypass")
-                    view.set_real_camera_status("narrow_50", True, "test camera bypass")
-                except Exception:
-                    pass
+    helper = getattr(view, "set_real_authority_mode", None)
+    if callable(helper):
+        try:
+            helper(authority, message)
             return
-
-        return AppController._mitsu_v12_original_start_real_camera_stack(self)
-
-    AppController._start_real_camera_stack = _mitsu_v12_start_real_camera_stack
+        except Exception as exc:
+            print(f"REAL UI: authority update failed: {exc}")
 
 
-if hasattr(AppController, "handle_real_camera_cell_status") and not hasattr(AppController, "_mitsu_v12_original_handle_real_camera_cell_status"):
-    AppController._mitsu_v12_original_handle_real_camera_cell_status = AppController.handle_real_camera_cell_status
+def _mitsu_v18_apply_state_to_ui(controller, previous_state=""):
+    state = _mitsu_v18_state(controller)
 
-    def _mitsu_v12_handle_real_camera_cell_status(self, camera_name, ok, message):
-        if _mitsu_v12_is_test_cameraless(self):
-            _mitsu_v12_set_test_cameras_ready(self, f"ignore physical camera status {camera_name}")
+    if state == "AI_ACTIVE":
+        controller.control_active = True
+        controller.manual_control_requested = False
+        _mitsu_v18_set_button(controller, True, "Отключить ИИ / ручное")
+        _mitsu_v18_set_authority(controller, "ai", "Автономное управление активно")
+        return
+
+    if state == "MANUAL_ACTIVE":
+        controller.control_active = True
+        controller.ai_control_requested = False
+        controller.manual_control_requested = True
+
+        takeover = bool(getattr(controller, "_mitsu_v18_takeover_latched", False)) or previous_state == "AI_ACTIVE"
+        _mitsu_v18_set_button(controller, True, "Ручное управление активно")
+        _mitsu_v18_set_authority(
+            controller,
+            "manual_takeover" if takeover else "manual",
+            "Перехват ИИ: ручное управление активно" if takeover else "Ручное управление активно",
+        )
+        return
+
+    if state in {"IDLE", "DISCONNECTED"}:
+        if bool(getattr(controller, "control_active", False)):
+            # If service says IDLE after a real full deactivation, release UI. If
+            # a delayed IDLE leaks during takeover, it will be overwritten by the
+            # next service state; this is still safer than using toggle-requested.
+            controller.control_active = False
+            controller.ai_control_requested = False
+            controller.manual_control_requested = False
+            controller._mitsu_v18_takeover_latched = False
+            _mitsu_v18_set_button(controller, False, "Активировать управление")
+            _mitsu_v18_set_authority(controller, "off", "Миссия подготовлена")
+
+
+if hasattr(AppController, "_start_real_camera_stack") and not hasattr(AppController, "_mitsu_v18_original_start_real_camera_stack"):
+    AppController._mitsu_v18_original_start_real_camera_stack = AppController._start_real_camera_stack
+
+    def _mitsu_v18_start_real_camera_stack(self):
+        if _mitsu_v18_seed_test_cameras(self):
             return
-        return AppController._mitsu_v12_original_handle_real_camera_cell_status(self, camera_name, ok, message)
+        return AppController._mitsu_v18_original_start_real_camera_stack(self)
 
-    AppController.handle_real_camera_cell_status = _mitsu_v12_handle_real_camera_cell_status
+    AppController._start_real_camera_stack = _mitsu_v18_start_real_camera_stack
 
 
-if hasattr(AppController, "handle_real_agent_camera_status") and not hasattr(AppController, "_mitsu_v12_original_handle_real_agent_camera_status"):
-    AppController._mitsu_v12_original_handle_real_agent_camera_status = AppController.handle_real_agent_camera_status
+if hasattr(AppController, "handle_real_camera_cell_status") and not hasattr(AppController, "_mitsu_v18_original_handle_real_camera_cell_status"):
+    AppController._mitsu_v18_original_handle_real_camera_cell_status = AppController.handle_real_camera_cell_status
 
-    def _mitsu_v12_handle_real_agent_camera_status(self, ok, message):
-        if _mitsu_v12_is_test_cameraless(self):
-            _mitsu_v12_set_test_cameras_ready(self, "ignore analyzer camera status")
+    def _mitsu_v18_handle_real_camera_cell_status(self, camera_name, ok, message):
+        if _mitsu_v18_seed_test_cameras(self):
             return
-        return AppController._mitsu_v12_original_handle_real_agent_camera_status(self, ok, message)
+        return AppController._mitsu_v18_original_handle_real_camera_cell_status(self, camera_name, ok, message)
 
-    AppController.handle_real_agent_camera_status = _mitsu_v12_handle_real_agent_camera_status
+    AppController.handle_real_camera_cell_status = _mitsu_v18_handle_real_camera_cell_status
 
 
-if hasattr(AppController, "handle_ai_toggle") and not hasattr(AppController, "_mitsu_v12_original_handle_ai_toggle"):
-    AppController._mitsu_v12_original_handle_ai_toggle = AppController.handle_ai_toggle
+if hasattr(AppController, "handle_real_agent_camera_status") and not hasattr(AppController, "_mitsu_v18_original_handle_real_agent_camera_status"):
+    AppController._mitsu_v18_original_handle_real_agent_camera_status = AppController.handle_real_agent_camera_status
 
-    def _mitsu_v12_handle_ai_toggle(self, is_active):
+    def _mitsu_v18_handle_real_agent_camera_status(self, ok, message):
+        if _mitsu_v18_seed_test_cameras(self):
+            return
+        return AppController._mitsu_v18_original_handle_real_agent_camera_status(self, ok, message)
+
+    AppController.handle_real_agent_camera_status = _mitsu_v18_handle_real_agent_camera_status
+
+
+if hasattr(AppController, "_handle_real_control_toggle") and not hasattr(AppController, "_mitsu_v18_original_handle_real_control_toggle"):
+    AppController._mitsu_v18_original_handle_real_control_toggle = AppController._handle_real_control_toggle
+
+    async def _mitsu_v18_handle_real_control_toggle(self, is_active):
+        before_state = _mitsu_v18_state(self)
+        takeover = self.runtime_mode == "real" and not bool(is_active) and before_state == "AI_ACTIVE"
+
         if self.runtime_mode == "real":
-            if bool(getattr(self, "manual_control_requested", False)) and bool(is_active):
-                self.manual_control_requested = False
-                if self.vehicle_control is not None:
+            _mitsu_v18_seed_test_cameras(self)
+
+        if takeover:
+            self._mitsu_v18_takeover_latched = True
+            _mitsu_v18_set_authority(self, "manual_takeover", "Перехват ИИ: ручное управление активно")
+            _mitsu_v18_set_button(self, True, "Переход в ручное")
+
+        result = await AppController._mitsu_v18_original_handle_real_control_toggle(self, is_active)
+        if not isinstance(result, dict):
+            result = {}
+
+        after_state = _mitsu_v18_state(self)
+
+        if self.runtime_mode == "real":
+            if takeover and after_state == "MANUAL_ACTIVE":
+                # Normalize result so async completion cannot turn the button off
+                # just because the original Qt toggle value was False.
+                result["requested"] = True
+                result["active"] = True
+                result["authority"] = "manual_takeover"
+                result["message"] = "Перехват ИИ: ручное управление активно"
+                self.control_active = True
+                self.ai_control_requested = False
+                self.manual_control_requested = True
+
+                vc = getattr(self, "vehicle_control", None)
+                if vc is not None:
                     try:
-                        self.vehicle_control.set_manual_mode_enabled(False)
+                        vc.set_ai_preview_enabled(False)
                     except Exception:
                         pass
-                if hasattr(self.view, "set_manual_checkbox"):
                     try:
-                        self.view.set_manual_checkbox(False)
+                        vc.set_manual_mode_enabled(True)
                     except Exception:
                         pass
 
-            if bool(is_active) and _mitsu_v12_is_test_cameraless(self):
-                _mitsu_v12_set_test_cameras_ready(self, "AI Preview")
+                analyzer = getattr(self, "real_agent_analyzer", None)
+                if analyzer is not None:
+                    try:
+                        analyzer.set_ai_enabled(False)
+                    except Exception:
+                        pass
 
-        return AppController._mitsu_v12_original_handle_ai_toggle(self, is_active)
-
-    AppController.handle_ai_toggle = _mitsu_v12_handle_ai_toggle
-
-
-if hasattr(AppController, "_handle_real_control_toggle") and not hasattr(AppController, "_mitsu_v12_original_handle_real_control_toggle"):
-    AppController._mitsu_v12_original_handle_real_control_toggle = AppController._handle_real_control_toggle
-
-    async def _mitsu_v12_handle_real_control_toggle(self, is_active):
-        if bool(is_active) and _mitsu_v12_is_test_cameraless(self):
-            _mitsu_v12_set_test_cameras_ready(self, "before Activate Control")
-
-        result = await AppController._mitsu_v12_original_handle_real_control_toggle(self, is_active)
-
-        if self.runtime_mode == "real" and not bool(is_active) and _mitsu_v12_is_manual_active(self):
-            self.manual_control_requested = True
-            if hasattr(self.view, "set_manual_checkbox"):
-                try:
-                    self.view.set_manual_checkbox(True)
-                except Exception:
-                    pass
-            if hasattr(self.view, "set_real_vehicle_state"):
-                try:
-                    self.view.set_real_vehicle_state("MANUAL_ACTIVE", "Ручное управление активно")
-                except Exception:
-                    pass
+            _mitsu_v18_apply_state_to_ui(self, previous_state=before_state)
 
         return result
 
-    AppController._handle_real_control_toggle = _mitsu_v12_handle_real_control_toggle
+    AppController._handle_real_control_toggle = _mitsu_v18_handle_real_control_toggle
 
 
-if hasattr(AppController, "handle_manual_input") and not hasattr(AppController, "_mitsu_v12_original_handle_manual_input"):
-    AppController._mitsu_v12_original_handle_manual_input = AppController.handle_manual_input
+if hasattr(AppController, "_handle_async_task_completed") and not hasattr(AppController, "_mitsu_v18_original_handle_async_task_completed"):
+    AppController._mitsu_v18_original_handle_async_task_completed = AppController._handle_async_task_completed
 
-    def _mitsu_v12_handle_manual_input(self, angle, accel, brake):
-        if self.runtime_mode == "real":
-            if self.vehicle_control is None or not self.is_connected:
-                return
-            if _mitsu_v12_is_ai_active(self):
-                return
-            self._schedule_async(self.vehicle_control.submit_manual_command(angle, accel, brake), "real_manual_command")
+    @Slot(str, object, str)
+    def _mitsu_v18_handle_async_task_completed(self, label, result, error):
+        if label != "real_control_toggle":
+            return AppController._mitsu_v18_original_handle_async_task_completed(self, label, result, error)
+
+        result = result or {}
+        error = str(error or "")
+        if error and error != "cancelled":
+            print(f"ASYNC WORKER: {label} failed: {error}")
+
+        # Service state wins over requested toggle value.
+        state = _mitsu_v18_state(self)
+        if state in {"AI_ACTIVE", "MANUAL_ACTIVE"} and not error:
+            result = dict(result)
+            result["active"] = True
+            result["requested"] = True
+            if state == "MANUAL_ACTIVE" and bool(getattr(self, "_mitsu_v18_takeover_latched", False)):
+                result["authority"] = "manual_takeover"
+
+        # Let the original handler process non-active failures and normal off.
+        if not bool(result.get("active")):
+            return AppController._mitsu_v18_original_handle_async_task_completed(self, label, result, error)
+
+        self.control_active = True
+        _mitsu_v18_apply_state_to_ui(self)
+
+        message = result.get("message")
+        if message:
+            self.view.statusBar().showMessage(str(message))
+        return
+
+    AppController._handle_async_task_completed = _mitsu_v18_handle_async_task_completed
+
+
+if hasattr(AppController, "handle_vehicle_control_state") and not hasattr(AppController, "_mitsu_v18_original_handle_vehicle_control_state"):
+    AppController._mitsu_v18_original_handle_vehicle_control_state = AppController.handle_vehicle_control_state
+
+    @Slot(str)
+    def _mitsu_v18_handle_vehicle_control_state(self, state):
+        AppController._mitsu_v18_original_handle_vehicle_control_state(self, state)
+
+        if self.runtime_mode != "real":
             return
 
-        return AppController._mitsu_v12_original_handle_manual_input(self, angle, accel, brake)
-
-    AppController.handle_manual_input = _mitsu_v12_handle_manual_input
-
-
-if hasattr(AppController, "handle_gear_change") and not hasattr(AppController, "_mitsu_v12_original_handle_gear_change"):
-    AppController._mitsu_v12_original_handle_gear_change = AppController.handle_gear_change
-
-    def _mitsu_v12_handle_gear_change(self, gear_idx):
-        if self.runtime_mode == "real":
-            if self.vehicle_control is None or not self.is_connected:
-                return
-
-            state = _mitsu_v12_real_state(self)
-            if state in {"AI_ACTIVE", "ARMING", "DISENGAGING"}:
-                now = time.monotonic()
-                if now - self._last_real_gear_ignore_log_at > 1.0:
-                    self._last_real_gear_ignore_log_at = now
-                    print(f"REAL CONTROL: ручная передача заблокирована: state={state}")
-                return
-
-            self._schedule_async(self.vehicle_control.request_manual_gear(gear_idx), "real_gear_request")
+        # Do not repaint route-preview for transient states.
+        if str(state or "") in {"ARMING", "DISENGAGING", "READY", "MANUAL_READY"}:
             return
 
-        return AppController._mitsu_v12_original_handle_gear_change(self, gear_idx)
+        _mitsu_v18_apply_state_to_ui(self)
 
-    AppController.handle_gear_change = _mitsu_v12_handle_gear_change
+    AppController.handle_vehicle_control_state = _mitsu_v18_handle_vehicle_control_state
 
-
-if hasattr(AppController, "handle_real_mission_validated") and not hasattr(AppController, "_mitsu_v12_original_handle_real_mission_validated"):
-    AppController._mitsu_v12_original_handle_real_mission_validated = AppController.handle_real_mission_validated
-
-    def _mitsu_v12_handle_real_mission_validated(self, mission):
-        result = AppController._mitsu_v12_original_handle_real_mission_validated(self, mission)
-
-        if _mitsu_v12_is_test_cameraless(self):
-            _mitsu_v12_set_test_cameras_ready(self, "mission validation")
-
-        if hasattr(self.view, "set_real_mission_card"):
-            try:
-                service_mission = getattr(self.vehicle_control, "mission", None) if self.vehicle_control is not None else None
-                self.view.set_real_mission_card(service_mission, dict(mission or {}), mode_text=_mitsu_v12_descriptor_text(self))
-            except Exception as exc:
-                print(f"REAL UI: mission card update failed: {exc}")
-
-        return result
-
-    AppController.handle_real_mission_validated = _mitsu_v12_handle_real_mission_validated
-
-# --- MITSU_REAL_CONTROL_RESTORE_V12_END ---
+# --- MITSU_REAL_TAKEOVER_SINGLE_SOURCE_V18_END ---
 
 if __name__ == "__main__":
     # Use the plain Qt event loop for the GUI. Async serial/real-control work
