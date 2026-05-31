@@ -75,11 +75,6 @@ class LatestFrameBuffer:
             self._frames[key] = frame
             self._timestamps[key] = time.monotonic()
 
-    def clear(self) -> None:
-        with self._lock:
-            self._frames.clear()
-            self._timestamps.clear()
-
     def get_pair(self) -> tuple[np.ndarray | None, np.ndarray | None, dict[str, float]]:
         with self._lock:
             return (
@@ -88,10 +83,6 @@ class LatestFrameBuffer:
                 dict(self._timestamps),
             )
 
-    def fresh_count(self, max_age_s: float) -> int:
-        now = time.monotonic()
-        with self._lock:
-            return sum(1 for ts in self._timestamps.values() if now - ts <= max_age_s)
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
@@ -298,19 +289,16 @@ def _listen(camera: Any, key: str, buffer: LatestFrameBuffer) -> None:
 
 
 def _tile(frame: np.ndarray | None, label: str, width: int, height: int, stale: bool = False) -> np.ndarray:
-    # Do not show a stale spawn frame as if it were live road video.
-    # When a camera stream dies, publish a diagnostic tile instead.
-    if frame is None or stale:
+    if frame is None:
         canvas = np.zeros((height, width, 3), dtype=np.uint8)
-        text = "NO LIVE FRAME" if frame is None else "STALE FRAME - RECONNECTING"
-        cv2.putText(canvas, text, (28, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (80, 80, 255), 2)
+        cv2.putText(canvas, "NO FRAME", (28, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 80, 255), 2)
     else:
         canvas = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-
     cv2.rectangle(canvas, (0, 0), (width, 34), (0, 0, 0), -1)
     color = (0, 220, 255) if not stale else (0, 120, 255)
     cv2.putText(canvas, label, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.68, color, 2)
     return canvas
+
 
 def _build_mosaic(wide: np.ndarray | None, narrow: np.ndarray | None, ages: dict[str, float], width: int, height: int) -> np.ndarray:
     now = time.monotonic()
@@ -320,72 +308,11 @@ def _build_mosaic(wide: np.ndarray | None, narrow: np.ndarray | None, ages: dict
     narrow_tile = _tile(narrow, "CARLA NARROW 50 deg / real 6 mm analog", width, height, narrow_stale)
     return np.concatenate([wide_tile, narrow_tile], axis=1)
 
-# --- MITSU_CAMERA_OPERATOR_PREVIEW_PATCH_BEGIN ---
-# Clean CARLA operator preview:
-# - wide_90 fills the frame;
-# - narrow_50 is picture-in-picture;
-# - no debug side-by-side labels during normal operation.
-
-def _mitsu_fit_cover(frame: np.ndarray, width: int, height: int) -> np.ndarray:
-    src_h, src_w = frame.shape[:2]
-    if src_w <= 0 or src_h <= 0:
-        return np.zeros((height, width, 3), dtype=np.uint8)
-
-    scale = max(width / src_w, height / src_h)
-    resized_w = max(1, int(round(src_w * scale)))
-    resized_h = max(1, int(round(src_h * scale)))
-    resized = cv2.resize(frame, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
-
-    x0 = max(0, (resized_w - width) // 2)
-    y0 = max(0, (resized_h - height) // 2)
-    return resized[y0:y0 + height, x0:x0 + width].copy()
-
-
-def _mitsu_draw_status_overlay(canvas: np.ndarray, text: str, color=(80, 80, 255)) -> None:
-    h, w = canvas.shape[:2]
-    cv2.rectangle(canvas, (0, 0), (w, 38), (0, 0, 0), -1)
-    cv2.putText(canvas, text, (16, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.72, color, 2, cv2.LINE_AA)
-
-
-def _mitsu_build_operator_preview(wide: np.ndarray | None, narrow: np.ndarray | None, ages: dict[str, float], width: int, height: int) -> np.ndarray:
-    now = time.monotonic()
-    wide_stale = wide is None or (now - ages.get("wide_90", 0.0)) > 1.0
-    narrow_stale = narrow is None or (now - ages.get("narrow_50", 0.0)) > 1.0
-
-    if wide_stale:
-        canvas = np.zeros((height, width, 3), dtype=np.uint8)
-        _mitsu_draw_status_overlay(canvas, "CARLA preview: waiting for live wide camera")
-    else:
-        canvas = _mitsu_fit_cover(wide, width, height)
-
-    if not narrow_stale:
-        inset_w = max(220, int(width * 0.34))
-        inset_h = max(120, int(inset_w * height / max(width, 1)))
-        inset = _mitsu_fit_cover(narrow, inset_w, inset_h)
-
-        margin = max(12, int(width * 0.018))
-        x1 = width - margin
-        y1 = height - margin
-        x0 = x1 - inset_w
-        y0 = y1 - inset_h
-
-        cv2.rectangle(canvas, (x0 - 3, y0 - 3), (x1 + 3, y1 + 3), (0, 0, 0), -1)
-        canvas[y0:y1, x0:x1] = inset
-        cv2.rectangle(canvas, (x0, y0), (x1, y1), (72, 76, 88), 2)
-    elif not wide_stale:
-        _mitsu_draw_status_overlay(canvas, "CARLA preview: narrow camera reconnecting", color=(0, 160, 255))
-
-    return canvas
-
-
-_build_mosaic = _mitsu_build_operator_preview
-# --- MITSU_CAMERA_OPERATOR_PREVIEW_PATCH_END ---
 
 class CarlaDualFrontCameraService:
     def __init__(self) -> None:
         if carla is None:  # pragma: no cover - depends on runtime
             raise RuntimeError(f"CARLA Python API import failed: {_CARLA_IMPORT_ERROR}")
-
         self.host = os.environ.get("MITSU_CARLA_HOST", "127.0.0.1")
         self.port = _env_int("MITSU_CARLA_PORT", 2000)
         self.zmq_bind = os.environ.get("MITSU_CARLA_ZMQ_BIND", "tcp://*:5555")
@@ -397,12 +324,6 @@ class CarlaDualFrontCameraService:
         self.prefer_existing = _env_bool("MITSU_CARLA_PREVIEW_PREFER_EXISTING", False)
         self.spawn_if_missing = _env_bool("MITSU_CARLA_PREVIEW_SPAWN_IF_MISSING", True)
         self.wait_timeout_s = _env_float("MITSU_CARLA_PREVIEW_WAIT_TIMEOUT_S", 0.0)
-
-        # MITSU_REALTIME_CAMERA_REACQUIRE_PATCH
-        # If CARLA reloads the world or Leaderboard respawns the hero actor,
-        # sensor callbacks can stop. Re-acquire instead of publishing old frames forever.
-        self.reacquire_after_stale_s = _env_float("MITSU_CARLA_PREVIEW_REACQUIRE_AFTER_STALE_S", 2.5)
-
         self._stop = threading.Event()
         self._spawned: list[Any] = []
         self.buffer = LatestFrameBuffer()
@@ -410,126 +331,70 @@ class CarlaDualFrontCameraService:
     def stop(self) -> None:
         self._stop.set()
 
-    def _safe_stop_camera(self, camera: Any, destroy: bool = False) -> None:
-        if camera is None:
-            return
-        try:
-            camera.stop()
-        except Exception:
-            pass
-        if destroy:
-            try:
-                camera.destroy()
-            except Exception:
-                pass
-
-    def _release_preview_cameras(self, wide: Any, narrow: Any) -> None:
-        spawned_ids = {getattr(camera, "id", None) for camera in self._spawned}
-
-        for camera in (wide, narrow):
-            if camera is None:
-                continue
-            self._safe_stop_camera(camera, destroy=getattr(camera, "id", None) in spawned_ids)
-
-        self._spawned.clear()
-
-    def _acquire_preview_cameras(self, client: Any) -> tuple[Any, Any]:
-        world, vehicle = _find_hero_vehicle(client, timeout_s=self.wait_timeout_s)
-
-        existing_wide = existing_narrow = None
-        if self.use_existing:
-            existing_wide, existing_narrow = _select_existing_dual_front_cameras(world, vehicle)
-
-        # Default: spawn GUI-only preview copies. This does not interfere with
-        # model sensors that Leaderboard/agent may already listen to.
-        if self.prefer_existing and existing_wide is not None and existing_narrow is not None:
-            print("[CAMERA_SERVICE] Preview читает существующие модельные камеры 90/50", flush=True)
-            return existing_wide, existing_narrow
-
-        if self.spawn_if_missing:
-            print("[CAMERA_SERVICE] Спавним две GUI-preview камеры с layout i-MiEV: wide_90 + narrow_50", flush=True)
-            wide = _spawn_preview_camera(world, vehicle, WIDE_90, self.tile_width, self.tile_height, self.fps)
-            narrow = _spawn_preview_camera(world, vehicle, NARROW_50, self.tile_width, self.tile_height, self.fps)
-            self._spawned.extend([wide, narrow])
-            return wide, narrow
-
-        wide, narrow = existing_wide, existing_narrow
-        if wide is None or narrow is None:
-            raise RuntimeError("Cannot start dual-front preview: wide/narrow cameras are missing")
-
-        return wide, narrow
-
-    def _publish_diagnostic_frame(self, socket: Any) -> None:
-        mosaic = _build_mosaic(None, None, {}, self.tile_width, self.tile_height)
-        ok, encoded = cv2.imencode(".jpg", mosaic, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
-        if ok:
-            socket.send(encoded.tobytes())
-
     def run(self) -> int:
         context = zmq.Context.instance()
         socket = context.socket(zmq.PUB)
-        socket.setsockopt(zmq.LINGER, 0)
-        socket.setsockopt(zmq.SNDHWM, 1)
         socket.bind(self.zmq_bind)
         print(f"[CAMERA_SERVICE] ZMQ preview bind: {self.zmq_bind}", flush=True)
 
         client = carla.Client(self.host, self.port)
         client.set_timeout(10.0)
+        world, vehicle = _find_hero_vehicle(client, timeout_s=self.wait_timeout_s)
 
-        wide = None
-        narrow = None
+        wide = narrow = None
+        existing_wide = existing_narrow = None
+        if self.use_existing:
+            existing_wide, existing_narrow = _select_existing_dual_front_cameras(world, vehicle)
+
+        # By default we spawn two GUI-only cameras with the same i-MiEV dual-front
+        # geometry.  This avoids interfering with model sensors that Leaderboard
+        # is already listening to, while the operator preview still matches the
+        # real vehicle layout.  Set MITSU_CARLA_PREVIEW_PREFER_EXISTING=1 to reuse
+        # the already attached model cameras directly.
+        if self.prefer_existing and existing_wide is not None and existing_narrow is not None:
+            wide, narrow = existing_wide, existing_narrow
+            print("[CAMERA_SERVICE] Preview читает существующие модельные камеры 90/50", flush=True)
+        elif self.spawn_if_missing:
+            print("[CAMERA_SERVICE] Спавним две GUI-preview камеры с layout i-MiEV: wide_90 + narrow_50", flush=True)
+            wide = _spawn_preview_camera(world, vehicle, WIDE_90, self.tile_width, self.tile_height, self.fps)
+            narrow = _spawn_preview_camera(world, vehicle, NARROW_50, self.tile_width, self.tile_height, self.fps)
+            self._spawned.extend([wide, narrow])
+        else:
+            wide, narrow = existing_wide, existing_narrow
+
+        if wide is None or narrow is None:
+            raise RuntimeError("Cannot start dual-front preview: wide/narrow cameras are missing")
+
+        _listen(wide, "wide_90", self.buffer)
+        _listen(narrow, "narrow_50", self.buffer)
+        print("[CAMERA_SERVICE] Двухкамерный поток видео запущен: wide_90 + narrow_50", flush=True)
+
         frame_period = 1.0 / max(self.fps, 1)
-        last_reacquire_at = 0.0
-
         try:
             while not self._stop.is_set():
-                now = time.monotonic()
-
-                need_acquire = wide is None or narrow is None
-
-                if not need_acquire and self.buffer.fresh_count(self.reacquire_after_stale_s) == 0:
-                    if now - last_reacquire_at >= self.reacquire_after_stale_s:
-                        print(
-                            "[CAMERA_SERVICE] Нет свежих CARLA-кадров; "
-                            "переподключаем preview-камеры к текущему hero actor",
-                            flush=True,
-                        )
-                        need_acquire = True
-
-                if need_acquire:
-                    last_reacquire_at = now
-                    self._release_preview_cameras(wide, narrow)
-                    self.buffer.clear()
-                    wide = None
-                    narrow = None
-
-                    try:
-                        wide, narrow = self._acquire_preview_cameras(client)
-                        _listen(wide, "wide_90", self.buffer)
-                        _listen(narrow, "narrow_50", self.buffer)
-                        print("[CAMERA_SERVICE] Realtime preview подключён: wide_90 + narrow_50", flush=True)
-                    except Exception as exc:
-                        print(f"[CAMERA_SERVICE] Realtime preview ждёт hero/cameras: {exc}", flush=True)
-                        self._publish_diagnostic_frame(socket)
-                        time.sleep(min(1.0, frame_period))
-                        continue
-
                 wide_frame, narrow_frame, stamps = self.buffer.get_pair()
                 mosaic = _build_mosaic(wide_frame, narrow_frame, stamps, self.tile_width, self.tile_height)
                 ok, encoded = cv2.imencode(".jpg", mosaic, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
                 if ok:
                     socket.send(encoded.tobytes())
-
                 time.sleep(frame_period)
-
         finally:
-            self._release_preview_cameras(wide, narrow)
+            for camera in [wide, narrow]:
+                try:
+                    camera.stop()
+                except Exception:
+                    pass
+            for camera in self._spawned:
+                try:
+                    camera.destroy()
+                except Exception:
+                    pass
             try:
                 socket.close(0)
             except Exception:
                 pass
-
         return 0
+
 
 # Compatibility aliases for code that imports the old service by a class name.
 CarlaCameraService = CarlaDualFrontCameraService

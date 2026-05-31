@@ -321,10 +321,10 @@ def _build_mosaic(wide: np.ndarray | None, narrow: np.ndarray | None, ages: dict
     return np.concatenate([wide_tile, narrow_tile], axis=1)
 
 # --- MITSU_CAMERA_OPERATOR_PREVIEW_PATCH_BEGIN ---
-# Clean CARLA operator preview:
-# - wide_90 fills the frame;
-# - narrow_50 is picture-in-picture;
-# - no debug side-by-side labels during normal operation.
+# Clean operator preview:
+# - wide_90 fills the video block;
+# - narrow_50 is a small picture-in-picture;
+# - debug side-by-side labels are not shown in normal operation.
 
 def _mitsu_fit_cover(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     src_h, src_w = frame.shape[:2]
