@@ -539,7 +539,7 @@ sensor configuration
 
 ```python
 import torch
-ckpt = torch.load("model_2.pth", map_location="cpu")
+ckpt = torch.load("model_0011.pth", map_location="cpu")
 print(type(ckpt))
 print(ckpt.keys() if isinstance(ckpt, dict) else "not dict")
 ```

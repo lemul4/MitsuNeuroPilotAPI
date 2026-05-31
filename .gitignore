@@ -1,5 +1,6 @@
 carla_fix.pth
 model_2.pth
+model_0011.pth
 # Byte-compiled / optimized / DLL files
 **/__pycache__/
 *.py[cod]

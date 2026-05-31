@@ -1631,7 +1631,7 @@ class AppController(QObject):
         config = {
             "project_root": project_root,
             "routes": selected_route_path,
-            "checkpoint_path": os.path.join(project_root, "model_2.pth"),
+            "checkpoint_path": os.path.join(project_root, "model_0011.pth"),
             "telemetry_file": telemetry_file,
             "expert_mode": True,
             "host": "localhost"
