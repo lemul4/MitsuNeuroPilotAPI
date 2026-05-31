@@ -20,13 +20,12 @@ from lead.inference.config_open_loop import OpenLoopConfig
 from lead.inference.open_loop_inference import OpenLoopInference
 from lead.training.config_training import TrainingConfig
 from lead.training.mixed_training_utils import mixed_data_collate_fn
-from lead.visualization.visualizer import Visualizer
 
 
 LOG = logging.getLogger(__name__)
 
 
-DEFAULT_CONFIG = "outputs/model1/config_dual_front_camera.json"
+DEFAULT_CONFIG = "outputs/model1/planning_only/config_planning_only.json"
 DEFAULT_DATA_DIR = (
     "data/carla_leaderboard2_dual_cameras_val/data/DynamicObjectCrossing/"
     "Town13_Rep0_1355_0_route0_05_18_23_40_37"
@@ -37,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run a dual-front-camera LEAD model over one CARLA route, save "
-            "prediction visualizations, and report model forward speed."
+            "prediction visualizations, or benchmark model inference speed."
         )
     )
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="Training config JSON.")
@@ -60,6 +59,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
     parser.add_argument("--save-workers", type=int, default=4, help="PNG writer threads.")
     parser.add_argument(
+        "--autocast-dtype",
+        choices=("auto", "fp32", "fp16", "bf16"),
+        default="bf16",
+        help=(
+            "Autocast precision for inference. auto uses the training config, "
+            "fp32 disables autocast."
+        ),
+    )
+    parser.add_argument(
+        "--speedtest",
+        action="store_true",
+        help=(
+            "Run as inference speed test only: no visualization, no saving, "
+            "only model forward timing."
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=-1,
@@ -68,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warmup",
         type=int,
-        default=5,
+        default=10,
         help="Warmup forwards excluded from speed stats.",
     )
     return parser.parse_args()
@@ -190,9 +206,29 @@ def make_inference(
         prefix=checkpoint.stem,
     )
     for net in inference.nets:
-        if getattr(net, "_compiled_forward_core", None) is None:
+        if config.channel_last:
+            net.to(memory_format=torch.channels_last)
+        compile_strategy = str(getattr(config, "compile_strategy", "core")).lower()
+        if not config.compile or compile_strategy == "none":
             net._compiled_forward_core = net._forward_core
             net._compiled_forward_core_is_dual_static = False
+            continue
+        if compile_strategy == "core":
+            net.prepare_compile(
+                fullgraph=False,
+                dynamic=False,
+                backend="inductor",
+                mode=str(config.compile_mode).lower(),
+            )
+            LOG.info(
+                "Using torch.compile on TFv6 forward core, mode=%s",
+                str(config.compile_mode).lower(),
+            )
+        elif compile_strategy != "none":
+            raise ValueError(
+                f"Unsupported inference compile_strategy={compile_strategy!r}. "
+                "Use 'core' or 'none'."
+            )
     return inference
 
 
@@ -201,6 +237,10 @@ def prepare_viz_data(config: TrainingConfig, data: dict) -> dict:
     if viz_data.get("rgb") is None and viz_data.get(config.left_camera_key) is not None:
         viz_data["rgb"] = viz_data[config.left_camera_key]
     return viz_data
+
+
+def prepare_inference_data(data: dict) -> dict[str, torch.Tensor]:
+    return {key: value for key, value in data.items() if torch.is_tensor(value)}
 
 
 def frame_name(data: dict, fallback_idx: int) -> str:
@@ -222,11 +262,29 @@ def synchronize_if_cuda(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
-def autocast_context(config: TrainingConfig, device: torch.device):
-    enabled = device.type == "cuda" and config.torch_float_type != torch.float32
+def resolve_autocast_dtype(
+    config: TrainingConfig, autocast_dtype_arg: str
+) -> torch.dtype | None:
+    if autocast_dtype_arg == "auto":
+        return (
+            None
+            if config.torch_float_type == torch.float32
+            else config.torch_float_type
+        )
+    if autocast_dtype_arg == "fp32":
+        return None
+    if autocast_dtype_arg == "fp16":
+        return torch.float16
+    if autocast_dtype_arg == "bf16":
+        return torch.bfloat16
+    raise ValueError(f"Unsupported autocast dtype: {autocast_dtype_arg}")
+
+
+def autocast_context(device: torch.device, autocast_dtype: torch.dtype | None):
+    enabled = device.type == "cuda" and autocast_dtype is not None
     return torch.amp.autocast(
         device_type=device.type,
-        dtype=config.torch_float_type,
+        dtype=autocast_dtype or torch.float32,
         enabled=enabled,
     )
 
@@ -250,10 +308,13 @@ def main() -> None:
 
     dataloader = make_dataloader(config, route_dir, args.num_workers)
     inference = make_inference(config, checkpoint, device)
+    autocast_dtype = resolve_autocast_dtype(config, args.autocast_dtype)
+    autocast_label = (
+        str(autocast_dtype).replace("torch.", "") if autocast_dtype else "fp32"
+    )
+    LOG.info("Autocast dtype: %s", autocast_label)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     forward_times: list[float] = []
-    futures = []
     processed = 0
 
     total = len(dataloader.dataset)
@@ -261,53 +322,84 @@ def main() -> None:
         total = min(total, args.limit)
 
     iterable = islice(dataloader, args.limit) if args.limit > 0 else dataloader
-    with ThreadPoolExecutor(max_workers=max(1, args.save_workers)) as executor:
-        for idx, data in enumerate(tqdm(iterable, total=total, desc="Visualizing")):
+    if args.speedtest:
+        for idx, data in enumerate(tqdm(iterable, total=total, desc="Speedtest")):
             if data is None:
                 continue
 
             synchronize_if_cuda(device)
             start = time.perf_counter()
-            with autocast_context(config, device):
-                prediction = inference.forward(data)
+            with autocast_context(device, autocast_dtype):
+                inference.forward(prepare_inference_data(data))
             synchronize_if_cuda(device)
             elapsed = time.perf_counter() - start
             if idx >= args.warmup:
                 forward_times.append(elapsed)
-
-            viz_data = prepare_viz_data(config, data)
-            image = Visualizer(
-                config=config,
-                data=viz_data,
-                prediction=prediction,
-                training=False,
-            ).visualize_inference_prediction()
-            out_path = output_dir / f"{frame_name(data, idx)}.png"
-            futures.append(executor.submit(save_png, out_path, image))
-
-            if len(futures) >= args.save_workers * 4:
-                futures.pop(0).result()
             processed += 1
+    else:
+        from lead.visualization.visualizer import Visualizer
 
-        for future in futures:
-            future.result()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        futures = []
+        with ThreadPoolExecutor(max_workers=max(1, args.save_workers)) as executor:
+            for idx, data in enumerate(tqdm(iterable, total=total, desc="Visualizing")):
+                if data is None:
+                    continue
+
+                synchronize_if_cuda(device)
+                start = time.perf_counter()
+                with autocast_context(device, autocast_dtype):
+                    prediction = inference.forward(prepare_inference_data(data))
+                synchronize_if_cuda(device)
+                elapsed = time.perf_counter() - start
+                if idx >= args.warmup:
+                    forward_times.append(elapsed)
+
+                viz_data = prepare_viz_data(config, data)
+                image = Visualizer(
+                    config=config,
+                    data=viz_data,
+                    prediction=prediction,
+                    training=False,
+                ).visualize_inference_prediction()
+                out_path = output_dir / f"{frame_name(data, idx)}.png"
+                futures.append(executor.submit(save_png, out_path, image))
+
+                if len(futures) >= args.save_workers * 4:
+                    futures.pop(0).result()
+                processed += 1
+
+            for future in futures:
+                future.result()
 
     measured = len(forward_times)
+    saved_visualizations_line = (
+        "" if args.speedtest else f"Saved visualizations: {output_dir}\n"
+    )
     if measured:
         avg = sum(forward_times) / measured
         fps = 1.0 / avg
+        sorted_times = sorted(forward_times)
+        median = sorted_times[measured // 2]
+        p95 = sorted_times[min(measured - 1, int(measured * 0.95))]
         print(
             f"Processed frames: {processed}\n"
-            f"Saved visualizations: {output_dir}\n"
+            f"Mode: {'speedtest' if args.speedtest else 'visualization'}\n"
+            f"{saved_visualizations_line}"
+            f"Autocast dtype: {autocast_label}\n"
             f"Model batch size: 1\n"
             f"Measured forwards: {measured} (warmup skipped: {min(args.warmup, processed)})\n"
             f"Average model forward time: {avg * 1000:.2f} ms/frame\n"
+            f"Median model forward time: {median * 1000:.2f} ms/frame\n"
+            f"P95 model forward time: {p95 * 1000:.2f} ms/frame\n"
             f"Model throughput: {fps:.2f} FPS"
         )
     else:
         print(
             f"Processed frames: {processed}\n"
-            f"Saved visualizations: {output_dir}\n"
+            f"Mode: {'speedtest' if args.speedtest else 'visualization'}\n"
+            f"{saved_visualizations_line}"
+            f"Autocast dtype: {autocast_label}\n"
             "Not enough frames after warmup to report speed."
         )
 

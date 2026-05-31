@@ -163,7 +163,8 @@ class TFv6(nn.Module):
         else:
             forward_core = (
                 self._compiled_forward_core
-                if not self._compiled_forward_core_is_dual_static
+                if self._compiled_forward_core is not None
+                and not self._compiled_forward_core_is_dual_static
                 else self._forward_core
             )
             core_data = self._prepare_forward_data(data)
