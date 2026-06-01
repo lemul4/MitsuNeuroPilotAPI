@@ -415,6 +415,21 @@ class TrainingConfig(BaseConfig):
         """Torch compile mode. Avoid CUDA graphs by default for local stability."""
         return "max-autotune-no-cudagraphs"
 
+    jit_compile = False
+    jit_compile_mode = None
+    jit_compile_warmup_steps = 0
+    reset_route_timer_after_first_agent_tick = False
+    model_inference_timing = False
+    model_inference_timing_warmup_steps = 0
+    save_inference_dataset = False
+    save_inference_dataset_rgb = True
+    save_inference_dataset_metas = True
+    save_inference_dataset_frequency = 1
+    save_inference_dataset_as_panorama = False
+    save_inference_dataset_in_subfolders = True
+    save_inference_dataset_jpeg_quality = 95
+    save_inference_dataset_route_logs = True
+
     @overridable_property
     def channel_last(self):
         """If true use channel last memory format for input tensors."""
@@ -901,6 +916,13 @@ class TrainingConfig(BaseConfig):
     # --- Dual front camera backbone ---
     # Optional mode used by CARLA_LEADERBOARD2_ONLY2CAMERAS. These fields are
     # class attributes so JSON configs can override them through BaseConfig.
+    use_lidar = True
+    use_radars = False
+    disable_visual_artifacts = False
+    camera_lidar_sensor_tick_from_data_save_freq = False
+    sync_sensor_processing_with_save_freq = False
+    sync_sensor_processing_with_data_save_freq = False
+    use_min_speed_infractions_in_score = False
     backbone_sensor_mode = "lidar_rgb"
     left_camera_key = "rgb_left"
     right_camera_key = "rgb_right"

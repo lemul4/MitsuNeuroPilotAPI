@@ -13,7 +13,6 @@
     "mixed_data_training": false,
     "visualize_dataset": false,
     "load_bev_3rd_person_images": false,
-
     "_topic_2": "КАМЕРЫ И СЕНСОРЫ",
     "num_available_cameras": 2,
     "used_cameras": [
@@ -21,6 +20,17 @@
         true
     ],
     "num_used_cameras": 2,
+    "rgb_camera_ids": [
+        1,
+        2
+    ],
+    "use_lidar": false,
+    "use_radars": false,
+    "disable_visual_artifacts": false,
+    "camera_lidar_sensor_tick_from_data_save_freq": false,
+    "sync_sensor_processing_with_save_freq": false,
+    "sync_sensor_processing_with_data_save_freq": false,
+    "use_min_speed_infractions_in_score": false,
     "backbone_sensor_mode": "dual_front_camera",
     "left_camera_key": "rgb_left",
     "right_camera_key": "rgb_right",
@@ -41,7 +51,6 @@
     "left_camera_horz_anchors": 20,
     "right_camera_vert_anchors": 16,
     "right_camera_horz_anchors": 16,
-
     "_topic_3": "ГЕОМЕТРИЯ КАМЕР",
     "left_camera_fov_deg": 90.0,
     "right_camera_fov_deg": 50.03,
@@ -81,7 +90,6 @@
     "dual_camera_right_pitch_deg": 0.0,
     "dual_camera_left_roll_deg": 0.0,
     "dual_camera_right_roll_deg": 0.0,
-
     "_topic_4": "BEV И LIDAR СЕТКА",
     "pixels_per_meter": 4.0,
     "min_x_meter": -32,
@@ -107,7 +115,6 @@
     "dual_camera_bev_use_batch_norm": true,
     "dual_camera_bev_reverse_x": false,
     "dual_camera_bev_reverse_y": false,
-
     "_topic_5": "КЭШИРОВАНИЕ И ПУТИ",
     "carla_cache_path": [
         "384",
@@ -129,17 +136,15 @@
     "use_persistent_cache": true,
     "force_rebuild_data_cache": false,
     "force_rebuild_bucket": true,
-
     "_topic_6": "ЭКСПЕРИМЕНТ И ВОСПРОИЗВОДИМОСТЬ",
     "seed": 0,
     "id": "dual_front_camera_geometry_bev",
     "description": "dual_front_camera_geometry_bev",
-    "load_file": "outputs/local_training/posttrain/model_0011.pth",
+    "load_file": "outputs/model1/model_0011.pth",
     "continue_failed_training": false,
     "epoch_checkpoints_keep": [],
     "logdir": "outputs/training/803_radarless_tf/010_postrain32_0/251108_142128",
     "slurm_job_id": "1895310",
-
     "_topic_7": "ВАЛИДАЦИЯ",
     "use_validation": true,
     "validation_carla_root": "data/carla_leaderboard2_dual_cameras_val",
@@ -151,11 +156,10 @@
     "validation_num_workers": 4,
     "validation_prefetch_factor": 4,
     "validation_batch_size": 10,
-
     "_topic_8": "ОБУЧЕНИЕ",
     "epochs": 31,
     "batch_size": 10,
-    "lr": 0.00003,
+    "lr": 3e-05,
     "cosine_annealing_restart_peak_decay": 0.8,
     "weight_decay": 0.01,
     "augment": true,
@@ -176,10 +180,23 @@
     "train_drop_last": true,
     "validation_drop_last": true,
     "dataloader_start_method": "fork",
+    "jit_compile": true,
+    "jit_compile_mode": "reduce-overhead",
+    "jit_compile_warmup_steps": 1,
+    "reset_route_timer_after_first_agent_tick": true,
+    "model_inference_timing": true,
+    "model_inference_timing_warmup_steps": 1,
+    "save_inference_dataset": true,
+    "save_inference_dataset_rgb": true,
+    "save_inference_dataset_metas": true,
+    "save_inference_dataset_frequency": 1,
+    "save_inference_dataset_as_panorama": false,
+    "save_inference_dataset_in_subfolders": true,
+    "save_inference_dataset_jpeg_quality": 95,
+    "save_inference_dataset_route_logs": true,
     "randomize_route_order": false,
     "subsample_data": false,
     "hold_out_town13_routes": false,
-
     "_topic_9": "GRADSCALER И ГРАДИЕНТЫ",
     "grad_scaler_init_scale": 1024,
     "grad_scaler_growth_factor": 2,
@@ -189,14 +206,12 @@
     "use_grad_clip": false,
     "grad_quantile": 0.975,
     "grad_history_length": 5000,
-
     "_topic_10": "АУГМЕНТАЦИИ",
     "use_sensor_perburtation": false,
     "use_sensor_perburtation_prob": 0.0,
     "use_extreme_sensor_perburtation_prob": 0.0,
     "use_color_aug": true,
     "use_color_aug_prob": 0.25,
-
     "_topic_11": "РАДАР",
     "radar_detection": false,
     "use_radar_detection": false,
@@ -218,7 +233,6 @@
     "num_radar_forecast_steps": 8,
     "radar_waypoints_spacing": 3,
     "max_distance_future_waypoint": 10.0,
-
     "_topic_12": "ОБЪЕКТЫ И BOUNDING BOXES",
     "vehicle_min_num_lidar_points": 1,
     "vehicle_min_num_visible_pixels": 1,
@@ -245,7 +259,6 @@
     "center_net_walker_loss_weight": 6.0,
     "center_net_biker_loss_weight": 6.0,
     "center_net_traffic_light_loss_weight": 4.0,
-
     "_topic_13": "НАВИГАЦИЯ И ПЛАНИРОВАНИЕ",
     "use_discrete_command": true,
     "discrete_command_dim": 6,
@@ -283,7 +296,6 @@
     "num_route_points_prediction": 10,
     "num_way_points_prediction": 8,
     "waypoints_spacing": 3,
-
     "_topic_14": "АРХИТЕКТУРА МОДЕЛИ",
     "transfuser_num_bev_cross_attention_layers": 6,
     "transfuser_num_bev_cross_attention_heads": 8,
@@ -307,7 +319,6 @@
     "gpt_layer_norm_init_weight": 1.0,
     "use_optimizer_groups": false,
     "use_depth": false,
-
     "_topic_15": "СЕМАНТИКА И ДЕКОДЕРЫ",
     "use_semantic": true,
     "semantic_loss_type": "focal",
@@ -340,7 +351,6 @@
     "bev_features_chanels": 64,
     "bev_down_sample_factor": 4,
     "bev_upsample_factor": 2,
-
     "_topic_16": "ЛОГИРОВАНИЕ И МЕТРИКИ",
     "visualize_failed_scenarios": false,
     "visualize_training": false,
@@ -358,7 +368,6 @@
     "additional_metrics_map_iou_mode": "aabb",
     "additional_metrics_dtype": "float16",
     "additional_metrics_map_matching": "max_iou",
-    
     "_topic_17": "ОКРУЖЕНИЕ ВЫПОЛНЕНИЯ",
     "gpu_name": "rtx3060",
     "rank": 0,

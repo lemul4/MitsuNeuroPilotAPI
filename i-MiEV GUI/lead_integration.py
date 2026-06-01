@@ -54,6 +54,15 @@ class LeadAgentThread(QThread):
         env["LEAD_TELEMETRY_FILE"] = telemetry_file
         env["LEAD_EXPERT_MODE"] = "true" if expert_mode else "false"
 
+        carla_host = str(self.config.get("host") or env.get("MITSU_CARLA_HOST") or env.get("CARLA_HOST") or "127.0.0.1").strip()
+        if carla_host:
+            env["MITSU_CARLA_HOST"] = carla_host
+            env["CARLA_HOST"] = carla_host
+        carla_port = self.config.get("port") or env.get("MITSU_CARLA_PORT") or env.get("CARLA_PORT")
+        if carla_port:
+            env["MITSU_CARLA_PORT"] = str(carla_port)
+            env["CARLA_PORT"] = str(carla_port)
+
         # 3. Настройка PYTHONPATH
         third_party = os.path.join(project_root, "3rd_party")
         carla_api_path = os.path.normpath(
@@ -88,6 +97,25 @@ class LeadAgentThread(QThread):
             "--routes", str(self.config.get("routes")),
             "--host", str(self.config.get("host", "localhost")),
         ])
+
+        port = self.config.get("port")
+        if port is not None:
+            cmd.extend(["--port", str(port)])
+        tm_port = self.config.get("traffic_manager_port")
+        if tm_port is not None:
+            cmd.extend(["--traffic-manager-port", str(tm_port)])
+
+        log_path = self.config.get("stdout_log_path")
+        log_file = None
+        if log_path:
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                log_file = open(log_path, "w", encoding="utf-8")
+                log_file.write(f"[LEAD] stdout log: {log_path}\n")
+                log_file.flush()
+            except Exception as exc:
+                log_file = None
+                print(f"[DEBUG] Failed to open route stdout log: {exc}")
 
         try:
             # --- ЗАПУСК 1: Основной агент CARLA ---
@@ -134,6 +162,12 @@ bufsize=0,
                             line = raw_line.decode("utf-8", errors="replace")
                         else:
                             line = str(raw_line)
+                        if log_file is not None:
+                            try:
+                                log_file.write(line)
+                                log_file.flush()
+                            except Exception:
+                                pass
                         self.log_received.emit(line.strip())
                     elif not raw_line and self.process.poll() is not None:
                         break
@@ -141,6 +175,11 @@ bufsize=0,
         except Exception as e:
             self.error_occurred.emit(f"Failed to start agent: {str(e)}")
         finally:
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
             self.stop_subprocesses()
             self._is_running = False
             self.status_changed.emit("Autopilot: IDLE")

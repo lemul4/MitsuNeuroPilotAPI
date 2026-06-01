@@ -11,6 +11,7 @@ It must not be modified and is for reference only!
 """
 
 from __future__ import print_function
+import os
 import signal
 import sys
 import time
@@ -67,6 +68,10 @@ class ScenarioManager(object):
         self.start_game_time = 0.0
         self.end_system_time = 0.0
         self.end_game_time = 0.0
+        self._reset_timer_after_first_agent_tick = os.getenv(
+            "LEAD_RESET_ROUTE_TIMER_AFTER_FIRST_AGENT_TICK", "0"
+        ).lower() in {"1", "true", "yes", "on"}
+        self._route_timer_reset_done = False
 
         self._watchdog = None
         self._agent_watchdog = None
@@ -97,6 +102,7 @@ class ScenarioManager(object):
         self.start_game_time = 0.0
         self.end_system_time = 0.0
         self.end_game_time = 0.0
+        self._route_timer_reset_done = False
 
         self._spectator = None
         self._watchdog = None
@@ -180,6 +186,13 @@ class ScenarioManager(object):
                 self._agent_watchdog.update()
                 ego_action = self._agent_wrapper()
                 self._agent_watchdog.pause()
+                if (
+                    self._reset_timer_after_first_agent_tick
+                    and not self._route_timer_reset_done
+                ):
+                    self.start_system_time = time.time()
+                    self.start_game_time = GameTime.get_time()
+                    self._route_timer_reset_done = True
 
             # Special exception inside the agent that isn't caused by the agent
             except SensorReceivedNoData as e:

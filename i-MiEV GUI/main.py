@@ -1,4 +1,5 @@
 import sys
+import argparse
 import asyncio
 import concurrent.futures
 import threading
@@ -6,6 +7,7 @@ import subprocess
 import json
 import os
 import time
+import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer, QObject, Slot, QThread, Signal 
 from datetime import datetime
@@ -1637,6 +1639,37 @@ class AppController(QObject):
             )
         return getattr(route, "path", None) or getattr(route, "xml_path", None) or getattr(route, "file_path", None)
 
+    def _parse_route_metadata(self, route_path):
+        scenario_type = "unknown"
+        route_id = "route"
+        if route_path:
+            route_id = os.path.splitext(os.path.basename(route_path))[0] or route_id
+        try:
+            if route_path and os.path.exists(route_path):
+                tree = ET.parse(route_path)
+                root = tree.getroot()
+                scenario_node = root.find(".//scenario")
+                if scenario_node is not None:
+                    scenario_type = scenario_node.get("type") or scenario_type
+                route_node = root.find(".//route")
+                if route_node is not None:
+                    route_id = route_node.get("id") or route_id
+        except Exception as exc:
+            print(f"AI ROUTES: не удалось разобрать метаданные маршрута: {exc}")
+        return scenario_type, route_id
+
+    def _build_route_stdout_log_path(self, project_root, route_path):
+        scenario_type, route_id = self._parse_route_metadata(route_path)
+        scenario_tag = str(scenario_type or "unknown").replace(" ", "").strip() or "unknown"
+        route_tag = str(route_id or "route").replace(" ", "").strip() or "route"
+        host = (self.carla_watchdog_host or "127.0.0.1").strip()
+        port = int(self.carla_watchdog_port or 2000)
+        tm_port = int(os.environ.get("MITSU_CARLA_TM_PORT", "8000"))
+        log_tag = f"{scenario_tag}_{route_tag}_Rep0_attempt0_{host}_{port}_{tm_port}"
+        stdout_root = os.path.join(project_root, "data", "carla_leaderboard2_dual_cameras", "stdout")
+        os.makedirs(stdout_root, exist_ok=True)
+        return os.path.join(stdout_root, f"{log_tag}.log")
+
     def _fallback_route_queue_from_view(self):
         if hasattr(self.view, "get_route_queue"):
             queue = self.view.get_route_queue()
@@ -1760,7 +1793,10 @@ class AppController(QObject):
             "checkpoint_path": os.path.join(project_root, "model_0011.pth"),
             "telemetry_file": telemetry_file,
             "expert_mode": True,
-            "host": "localhost"
+            "host": self.carla_watchdog_host or "localhost",
+            "port": self.carla_watchdog_port or 2000,
+            "traffic_manager_port": int(os.environ.get("MITSU_CARLA_TM_PORT", "8000")),
+            "stdout_log_path": self._build_route_stdout_log_path(project_root, selected_route_path),
         }
 
         try:
@@ -2916,9 +2952,20 @@ if __name__ == "__main__":
     # runs in AppController.async_runtime on a dedicated standard asyncio loop.
     # This avoids qasync QTimer assertion failures on Windows while preserving
     # the existing CARLA/QThread simulation flow.
-    app = QApplication(sys.argv)
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--carla-host",
+        default="127.0.0.1",
+        help="CARLA host/IP for watchdog (default: 127.0.0.1)",
+    )
+    args, qt_args = parser.parse_known_args()
+
+    app = QApplication([sys.argv[0], *qt_args])
     main_window = MainWindow()
     controller = AppController(main_window)
+    host = str(getattr(args, "carla_host", "") or "").strip()
+    if host:
+        controller.carla_watchdog_host = host
     app.aboutToQuit.connect(controller.shutdown)
     main_window.show()
     sys.exit(app.exec())

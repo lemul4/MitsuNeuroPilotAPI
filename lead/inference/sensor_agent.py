@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import pathlib
 import shutil
 import time
 from collections import deque
@@ -23,7 +24,6 @@ from lead.common.constants import TransfuserBoundingBoxClass
 from lead.common.logging_config import setup_logging
 from lead.common.route_planner import RoutePlanner
 from lead.common.sensor_setup import av_sensor_setup
-from lead.common.carla_vehicle_sensor_profile import apply_camera_sensor_profile
 from lead.data_loader import carla_dataset_utils, training_cache
 from lead.data_loader.carla_dataset_utils import rasterize_lidar
 from lead.expert import expert_utils
@@ -52,6 +52,23 @@ def get_entry_point():  # dead: disable
     return "SensorAgent"
 
 
+def resolve_checkpoint_config_path(checkpoint_path: str | os.PathLike) -> pathlib.Path:
+    checkpoint_path = pathlib.Path(checkpoint_path)
+    if checkpoint_path.is_file():
+        return checkpoint_path
+
+    config_path = checkpoint_path / "config.json"
+    if config_path.exists():
+        return config_path
+
+    candidates = sorted(checkpoint_path.glob("*.json"))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No JSON config file found in checkpoint directory: {checkpoint_path}"
+        )
+    return candidates[0]
+
+
 class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
     @beartype
     def setup(self, path_to_conf_file: str, _=None, __=None):
@@ -62,18 +79,20 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self.step = -1
         self.initialized = False
         self.device = torch.device("cuda:0")
+        self._sensors_cache = None
 
         # Load the config saved during training
         if self.config_closed_loop.is_bench2drive:
             path_to_conf_file = path_to_conf_file.split("+")[0]
-        with open(
-            os.path.join(path_to_conf_file, "config.json"), encoding="utf-8"
-        ) as f:
+        config_path = resolve_checkpoint_config_path(path_to_conf_file)
+        LOG.info("[SensorAgent] Loading model config from %s", config_path)
+        with open(config_path, encoding="utf-8") as f:
             json_config = f.read()
             json_config = json.loads(json_config)
 
         # Generate new config for the case that it has new variables.
         self.training_config = TrainingConfig(json_config)
+        self._apply_model_runtime_overrides()
 
         # Store training config in base class for Kalman filter decision
         # This is accessed by BaseAgent._use_kalman_filter()
@@ -102,6 +121,20 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         )
         self.metric_info = {}
         self.meters_travelled = 0.0
+        self._model_inference_timing_enabled = bool(
+            getattr(self.training_config, "model_inference_timing", False)
+        )
+        self._model_inference_timing_warmup_steps = int(
+            getattr(self.training_config, "model_inference_timing_warmup_steps", 0)
+        )
+        self._model_inference_timing_samples: list[float] = []
+        self._model_inference_timing_seen = 0
+        self._inference_dataset_save_enabled = bool(
+            getattr(self.training_config, "save_inference_dataset", False)
+        )
+        self._inference_dataset_frame = 0
+        self._inference_dataset_root: pathlib.Path | None = None
+        self._setup_inference_dataset_saving()
 
         # Infraction tracking
         self.infractions_log = []  # List of {"step": int, "infraction": str}
@@ -112,7 +145,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
         self.track = autonomous_agent.Track.SENSORS
 
-        if not shutil.which("ffmpeg"):
+        if self._uses_video_output() and not shutil.which("ffmpeg"):
             raise RuntimeError(
                 "ffmpeg is not installed or not found in PATH. Please install ffmpeg to use video compression."
             )
@@ -120,6 +153,330 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self._telemetry_file = None
         self._telemetry_enabled = False
         self._setup_raw_telemetry()
+
+    def _setup_inference_dataset_saving(self) -> None:
+        if not self._inference_dataset_save_enabled:
+            return
+        if self.config_closed_loop.save_path is None:
+            LOG.warning(
+                "[InferenceDataset] save_inference_dataset is enabled, but SAVE_PATH is not set."
+            )
+            self._inference_dataset_save_enabled = False
+            return
+
+        scenario_type = os.environ.get("SCENARIO_TYPE", "noScenarios")
+        route_name = (
+            os.environ.get("ROUTE_INDEX")
+            or os.environ.get("BENCHMARK_ROUTE_ID")
+            or os.environ.get("ROUTE_NUMBER")
+            or "route"
+        )
+        route_name = str(route_name).replace(os.sep, "_")
+        self._inference_dataset_root = (
+            self.config_closed_loop.save_path
+            / "inference_dataset"
+            / scenario_type
+            / route_name
+        )
+        self._inference_dataset_root.mkdir(parents=True, exist_ok=True)
+
+        if bool(getattr(self.training_config, "save_inference_dataset_rgb", True)):
+            rgb_dir = self._inference_dataset_root / "rgb"
+            rgb_dir.mkdir(exist_ok=True)
+            if bool(
+                getattr(
+                    self.training_config,
+                    "save_inference_dataset_in_subfolders",
+                    True,
+                )
+            ):
+                for camera_id in self._inference_dataset_camera_ids():
+                    (rgb_dir / f"cam{camera_id}").mkdir(exist_ok=True)
+
+        if bool(getattr(self.training_config, "save_inference_dataset_metas", True)):
+            (self._inference_dataset_root / "metas").mkdir(exist_ok=True)
+
+        LOG.info(
+            "[InferenceDataset] Saving inference dataset to %s",
+            self._inference_dataset_root,
+        )
+
+    def _inference_dataset_camera_ids(self) -> tuple[int, ...]:
+        camera_ids = tuple(
+            int(camera_id)
+            for camera_id in getattr(
+                self.training_config,
+                "rgb_camera_ids",
+                tuple(range(1, self.training_config.num_cameras + 1)),
+            )
+        )
+        if len(camera_ids) == 0:
+            camera_ids = tuple(range(1, self.training_config.num_cameras + 1))
+        return camera_ids
+
+    def _tensor_to_list(self, value):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().float().numpy().tolist()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    def _prediction_field(self, prediction, *names):
+        for name in names:
+            if hasattr(prediction, name):
+                return getattr(prediction, name)
+        return None
+
+    def _build_inference_dataset_meta(
+        self,
+        input_data: dict,
+        closed_loop_prediction: ClosedLoopPrediction | None,
+        frame: int,
+    ) -> dict:
+        control = getattr(self, "control", carla.VehicleControl())
+        meta = {
+            "frame": int(frame),
+            "step": int(self.step),
+            "route_index": os.environ.get("ROUTE_INDEX"),
+            "benchmark_route_id": os.environ.get("BENCHMARK_ROUTE_ID"),
+            "scenario_type": os.environ.get("SCENARIO_TYPE"),
+            "town": self._world.get_map().name.split("/")[-1],
+            "speed": float(np.asarray(input_data.get("speed", 0.0)).item()),
+            "steer": float(control.steer),
+            "throttle": float(control.throttle),
+            "brake": float(control.brake),
+            "theta": float(np.asarray(input_data.get("theta", 0.0)).item()),
+            "pos_global": self._tensor_to_list(input_data.get("noisy_state")),
+            "noisy_pos_global": self._tensor_to_list(input_data.get("noisy_state")),
+            "filtered_pos_global": self._tensor_to_list(
+                input_data.get("filtered_state")
+            ),
+            "target_point_previous": self._tensor_to_list(
+                input_data.get("target_point_previous")
+            ),
+            "target_point": self._tensor_to_list(input_data.get("target_point")),
+            "target_point_next": self._tensor_to_list(
+                input_data.get("target_point_next")
+            ),
+            "command": self._tensor_to_list(input_data.get("command")),
+            "next_command": self._tensor_to_list(input_data.get("next_command")),
+            "gps": self._tensor_to_list(input_data.get("gps")),
+            "compass": self._tensor_to_list(input_data.get("compass")),
+            "accel": self._tensor_to_list(input_data.get("accel")),
+            "angular_velocity": self._tensor_to_list(
+                input_data.get("angular_velocity")
+            ),
+            "meters_travelled": float(self.meters_travelled),
+            "camera_ids": list(self._inference_dataset_camera_ids()),
+            "left_camera_key": str(
+                getattr(self.training_config, "left_camera_key", "rgb_left")
+            ),
+            "right_camera_key": str(
+                getattr(self.training_config, "right_camera_key", "rgb_right")
+            ),
+        }
+
+        if closed_loop_prediction is not None:
+            meta.update(
+                {
+                    "pred_route": self._tensor_to_list(
+                        self._prediction_field(closed_loop_prediction, "pred_route")
+                    ),
+                    "pred_future_waypoints": self._tensor_to_list(
+                        self._prediction_field(
+                            closed_loop_prediction,
+                            "pred_future_waypoints",
+                        )
+                    ),
+                    "pred_target_speed": self._tensor_to_list(
+                        self._prediction_field(
+                            closed_loop_prediction,
+                            "pred_target_speed",
+                            "pred_target_speed_scalar",
+                        )
+                    ),
+                    "pred_target_speed_distribution": self._tensor_to_list(
+                        self._prediction_field(
+                            closed_loop_prediction,
+                            "pred_target_speed_distribution",
+                        )
+                    ),
+                    "model_steer": float(closed_loop_prediction.steer),
+                    "model_throttle": float(closed_loop_prediction.throttle),
+                    "model_brake": float(closed_loop_prediction.brake),
+                }
+            )
+
+        return meta
+
+    def _save_inference_dataset_frame(
+        self,
+        input_data: dict,
+        closed_loop_prediction: ClosedLoopPrediction | None = None,
+    ) -> None:
+        if (
+            not self._inference_dataset_save_enabled
+            or self._inference_dataset_root is None
+        ):
+            return
+
+        frequency = max(
+            1,
+            int(getattr(self.training_config, "save_inference_dataset_frequency", 1)),
+        )
+        if self.step % frequency != 0:
+            return
+
+        frame = self._inference_dataset_frame
+        self._inference_dataset_frame += 1
+
+        if bool(getattr(self.training_config, "save_inference_dataset_rgb", True)):
+            rgb_dir = self._inference_dataset_root / "rgb"
+            quality = int(
+                getattr(self.training_config, "save_inference_dataset_jpeg_quality", 95)
+            )
+            params = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+            camera_ids = self._inference_dataset_camera_ids()
+            images = []
+            for camera_id in camera_ids:
+                sensor_key = f"rgb_{camera_id}"
+                if sensor_key not in input_data:
+                    LOG.warning(
+                        "[InferenceDataset] Missing %s while saving frame %04d.",
+                        sensor_key,
+                        frame,
+                    )
+                    continue
+                image = input_data[sensor_key]
+                images.append(image)
+                if bool(
+                    getattr(
+                        self.training_config,
+                        "save_inference_dataset_in_subfolders",
+                        True,
+                    )
+                ):
+                    cv2.imwrite(
+                        str(rgb_dir / f"cam{camera_id}" / f"{frame:04}.jpg"),
+                        image,
+                        params,
+                    )
+
+            if (
+                bool(
+                    getattr(
+                        self.training_config,
+                        "save_inference_dataset_as_panorama",
+                        False,
+                    )
+                )
+                and images
+            ):
+                cv2.imwrite(
+                    str(rgb_dir / f"{frame:04}.jpg"),
+                    np.concatenate(images, axis=1),
+                    params,
+                )
+
+        if bool(getattr(self.training_config, "save_inference_dataset_metas", True)):
+            meta = self._build_inference_dataset_meta(
+                input_data=input_data,
+                closed_loop_prediction=closed_loop_prediction,
+                frame=frame,
+            )
+            common_utils.write_pickle(
+                path=self._inference_dataset_root / "metas" / f"{frame:04}.pkl",
+                data=meta,
+            )
+
+    def _sync_inference_timer(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _record_model_inference_time(self, elapsed_s: float) -> None:
+        if not self._model_inference_timing_enabled:
+            return
+        self._model_inference_timing_seen += 1
+        if self._model_inference_timing_seen <= self._model_inference_timing_warmup_steps:
+            return
+        self._model_inference_timing_samples.append(float(elapsed_s))
+
+    def _model_inference_timing_summary(self) -> dict:
+        samples = np.array(self._model_inference_timing_samples, dtype=np.float64)
+        summary = {
+            "enabled": bool(self._model_inference_timing_enabled),
+            "warmup_steps": int(self._model_inference_timing_warmup_steps),
+            "seen_steps": int(self._model_inference_timing_seen),
+            "measured_steps": int(samples.size),
+        }
+        if samples.size == 0:
+            return summary
+        summary.update(
+            {
+                "mean_s": float(samples.mean()),
+                "mean_ms": float(samples.mean() * 1000.0),
+                "min_ms": float(samples.min() * 1000.0),
+                "max_ms": float(samples.max() * 1000.0),
+                "median_ms": float(np.median(samples) * 1000.0),
+                "p95_ms": float(np.percentile(samples, 95) * 1000.0),
+                "fps": float(1.0 / samples.mean()) if samples.mean() > 0 else 0.0,
+            }
+        )
+        return summary
+
+    def _save_model_inference_timing_summary(self) -> None:
+        if not self._model_inference_timing_enabled:
+            return
+        summary = self._model_inference_timing_summary()
+        LOG.info(
+            "[ModelTiming] measured_steps=%s mean=%.3f ms median=%.3f ms p95=%.3f ms fps=%.2f",
+            summary.get("measured_steps", 0),
+            summary.get("mean_ms", 0.0),
+            summary.get("median_ms", 0.0),
+            summary.get("p95_ms", 0.0),
+            summary.get("fps", 0.0),
+        )
+        if self.config_closed_loop.save_path is None:
+            return
+        timing_path = self.config_closed_loop.save_path / "model_inference_timing.json"
+        with open(timing_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=4)
+
+    def _apply_model_runtime_overrides(self) -> None:
+        """Apply inference-time switches stored in the model training config."""
+        if not bool(getattr(self.training_config, "disable_visual_artifacts", False)):
+            return
+
+        disabled_outputs = {
+            "produce_demo_image": False,
+            "produce_demo_video": False,
+            "produce_debug_image": False,
+            "produce_debug_video": False,
+            "produce_input_image": False,
+            "produce_input_video": False,
+            "produce_grid_image": False,
+            "produce_grid_video": False,
+        }
+        loaded_config = getattr(self.config_closed_loop, "_loaded_config", None)
+        if loaded_config is None:
+            loaded_config = {}
+            self.config_closed_loop._loaded_config = loaded_config
+        loaded_config.update(disabled_outputs)
+
+    def _uses_video_output(self) -> bool:
+        return any(
+            bool(getattr(self.config_closed_loop, flag, False))
+            for flag in (
+                "produce_demo_video",
+                "produce_debug_video",
+                "produce_input_video",
+                "produce_grid_video",
+            )
+        )
 
     def _setup_raw_telemetry(self) -> None:
         emit_flag = os.environ.get("LEAD_EMIT_TELEMETRY", "0").lower()
@@ -247,18 +604,28 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
                 for vehicle in vehicles:
                     vehicle.set_light_state(carla.VehicleLightState.NONE)
 
+    def _uses_dual_front_camera_input(self) -> bool:
+        return bool(getattr(self.training_config, "dual_front_camera_mode", False))
+
+    def _uses_lidar_input(self) -> bool:
+        return bool(getattr(self.training_config, "use_lidar", True))
+
+    def _uses_radar_input(self) -> bool:
+        return bool(getattr(self.training_config, "use_radars", False))
+
     @beartype
     def sensors(self) -> list[dict]:
-        sensors = av_sensor_setup(
-            config=self.training_config,
-            lidar=True,
-            radar=True,
-            sensor_agent=True,
-            perturbate=False,
-            perturbation_rotation=0.0,
-            perturbation_translation=0.0,
-        )
-        return apply_camera_sensor_profile(sensors, config=self.training_config)
+        if self._sensors_cache is None:
+            self._sensors_cache = av_sensor_setup(
+                config=self.training_config,
+                lidar=self._uses_lidar_input(),
+                radar=self._uses_radar_input(),
+                sensor_agent=True,
+                perturbate=False,
+                perturbation_rotation=0.0,
+                perturbation_translation=0.0,
+            )
+        return deepcopy(self._sensors_cache)
 
     def check_infractions(self) -> None:
         """Check for infractions that occurred in the current step and log them.
@@ -409,61 +776,91 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             input_data, use_kalman_filter=self.training_config.use_kalman_filter_for_gps
         )
 
-        # Simulate JPEG compression to avoid train-test mismatch
-        rgb = input_data["rgb"]
-        input_data["original_rgb"] = rgb.copy()
-        rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-        _, rgb = cv2.imencode(
-            ".jpg",
-            rgb,
-            [int(cv2.IMWRITE_JPEG_QUALITY), self.config_closed_loop.jpeg_quality],
-        )
-        rgb = cv2.imdecode(rgb, cv2.IMREAD_UNCHANGED)
-        rgb = np.transpose(rgb, (2, 0, 1))
-        input_data["rgb"] = rgb
+        def process_rgb(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            original_rgb = rgb.copy()
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+            _, rgb = cv2.imencode(
+                ".jpg",
+                rgb,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self.config_closed_loop.jpeg_quality],
+            )
+            rgb = cv2.imdecode(rgb, cv2.IMREAD_UNCHANGED)
+            rgb = np.transpose(rgb, (2, 0, 1))
 
-        # Horizontal FOV reduction: crop left and right, then resize back
-        if self.training_config.horizontal_fov_reduction > 0:
-            crop_pixels = self.training_config.horizontal_fov_reduction
-            # rgb: (C, H, W)
-            if input_data["rgb"] is not None:
-                _, h, w = input_data["rgb"].shape
-                input_data["rgb"] = input_data["rgb"][:, :, crop_pixels:-crop_pixels]
-                input_data["rgb"] = np.transpose(
-                    input_data["rgb"], (1, 2, 0)
-                )  # -> (H, W_crop, C)
-                input_data["rgb"] = cv2.resize(
-                    input_data["rgb"], (w, h), interpolation=cv2.INTER_LINEAR
-                )
-                input_data["rgb"] = np.transpose(
-                    input_data["rgb"], (2, 0, 1)
-                )  # -> (C, H, W)
-            # original_rgb: (H, W, C)
-            if input_data["original_rgb"] is not None:
-                h, w = input_data["original_rgb"].shape[:2]
-                input_data["original_rgb"] = input_data["original_rgb"][
-                    :, crop_pixels:-crop_pixels, :
-                ]
-                input_data["original_rgb"] = cv2.resize(
-                    input_data["original_rgb"], (w, h), interpolation=cv2.INTER_LINEAR
+            if self.training_config.horizontal_fov_reduction > 0:
+                crop_pixels = self.training_config.horizontal_fov_reduction
+                _, h, w = rgb.shape
+                rgb = rgb[:, :, crop_pixels:-crop_pixels]
+                rgb = np.transpose(rgb, (1, 2, 0))
+                rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_LINEAR)
+                rgb = np.transpose(rgb, (2, 0, 1))
+
+                h, w = original_rgb.shape[:2]
+                original_rgb = original_rgb[:, crop_pixels:-crop_pixels, :]
+                original_rgb = cv2.resize(
+                    original_rgb, (w, h), interpolation=cv2.INTER_LINEAR
                 )
 
-        # Cut cameras down to only used cameras
-        for modality in ["rgb", "original_rgb"]:
-            if (
-                self.training_config.num_used_cameras
-                != self.training_config.num_available_cameras
+            return rgb, original_rgb
+
+        if self._uses_dual_front_camera_input():
+            camera_ids = tuple(
+                int(camera_id)
+                for camera_id in getattr(
+                    self.training_config,
+                    "rgb_camera_ids",
+                    tuple(range(1, self.training_config.num_cameras + 1)),
+                )
+            )
+            if len(camera_ids) != 2:
+                camera_ids = tuple(range(1, self.training_config.num_cameras + 1))
+            if len(camera_ids) != 2:
+                raise ValueError(
+                    f"Dual-front inference expects exactly 2 cameras, got {camera_ids}."
+                )
+
+            left_key = str(getattr(self.training_config, "left_camera_key", "rgb_left"))
+            right_key = str(
+                getattr(self.training_config, "right_camera_key", "rgb_right")
+            )
+            original_images = []
+            for output_key, camera_id in (
+                (left_key, camera_ids[0]),
+                (right_key, camera_ids[1]),
             ):
-                n = self.training_config.num_available_cameras
-                w = input_data[modality].shape[2] // n
+                sensor_key = f"rgb_{camera_id}"
+                if sensor_key not in input_data:
+                    raise KeyError(
+                        f"Missing camera sensor {sensor_key!r} for dual-front input "
+                        f"{output_key!r}. Available keys: {sorted(input_data.keys())}"
+                    )
+                input_data[output_key], original_rgb = process_rgb(
+                    input_data[sensor_key]
+                )
+                original_images.append(original_rgb)
 
-                rgb_slices = []
-                for i, use in enumerate(self.training_config.used_cameras):
-                    if use:
-                        s, e = i * w, (i + 1) * w
-                        rgb_slices.append(input_data[modality][:, :, s:e])
+            input_data["original_rgb"] = np.concatenate(original_images, axis=1)
+        else:
+            # Simulate JPEG compression to avoid train-test mismatch
+            rgb = input_data["rgb"]
+            input_data["rgb"], input_data["original_rgb"] = process_rgb(rgb)
 
-                input_data[modality] = np.concatenate(rgb_slices, axis=2)
+            # Cut cameras down to only used cameras
+            for modality in ["rgb", "original_rgb"]:
+                if (
+                    self.training_config.num_used_cameras
+                    != self.training_config.num_available_cameras
+                ):
+                    n = self.training_config.num_available_cameras
+                    w = input_data[modality].shape[2] // n
+
+                    rgb_slices = []
+                    for i, use in enumerate(self.training_config.used_cameras):
+                        if use:
+                            s, e = i * w, (i + 1) * w
+                            rgb_slices.append(input_data[modality][:, :, s:e])
+
+                    input_data[modality] = np.concatenate(rgb_slices, axis=2)
 
         # Plan next target point and command.
         self.set_target_points(
@@ -505,39 +902,40 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             input_data["target_point_next"] = input_data["target_point"]
 
         # Lidar input
-        lidar = self.accumulate_lidar()
-        # Use only part of the lidar history we trained on
-        lidar = lidar[lidar[:, -1] < self.training_config.training_used_lidar_steps]
+        if self._uses_lidar_input():
+            lidar = self.accumulate_lidar()
+            # Use only part of the lidar history we trained on
+            lidar = lidar[lidar[:, -1] < self.training_config.training_used_lidar_steps]
 
-        # At inference time, simulate laspy quantization to avoid train-test mismatch
-        lidar[:, 0] = (
-            np.round(lidar[:, 0] / self.config_expert.point_precision_x)
-            * self.config_expert.point_precision_x
-        )
-        lidar[:, 1] = (
-            np.round(lidar[:, 1] / self.config_expert.point_precision_y)
-            * self.config_expert.point_precision_y
-        )
-        lidar[:, 2] = (
-            np.round(lidar[:, 2] / self.config_expert.point_precision_z)
-            * self.config_expert.point_precision_z
-        )
+            # At inference time, simulate laspy quantization to avoid train-test mismatch
+            lidar[:, 0] = (
+                np.round(lidar[:, 0] / self.config_expert.point_precision_x)
+                * self.config_expert.point_precision_x
+            )
+            lidar[:, 1] = (
+                np.round(lidar[:, 1] / self.config_expert.point_precision_y)
+                * self.config_expert.point_precision_y
+            )
+            lidar[:, 2] = (
+                np.round(lidar[:, 2] / self.config_expert.point_precision_z)
+                * self.config_expert.point_precision_z
+            )
 
-        # Convert to pseudo image
-        input_data["rasterized_lidar"] = rasterize_lidar(
-            config=self.training_config, lidar=lidar[:, :3]
-        )[..., None]
+            # Convert to pseudo image
+            input_data["rasterized_lidar"] = rasterize_lidar(
+                config=self.training_config, lidar=lidar[:, :3]
+            )[..., None]
 
-        # Simulate training time compression to avoid train-test mismatch
-        input_data["rasterized_lidar"] = training_cache.compress_float_image(
-            input_data["rasterized_lidar"], self.training_config
-        )
-        input_data["rasterized_lidar"] = training_cache.decompress_float_image(
-            input_data["rasterized_lidar"]
-        ).squeeze()[None, None]
+            # Simulate training time compression to avoid train-test mismatch
+            input_data["rasterized_lidar"] = training_cache.compress_float_image(
+                input_data["rasterized_lidar"], self.training_config
+            )
+            input_data["rasterized_lidar"] = training_cache.decompress_float_image(
+                input_data["rasterized_lidar"]
+            ).squeeze()[None, None]
 
         # Radar input preprocessing
-        if self.training_config.use_radars:
+        if self._uses_radar_input():
             # Preprocess radar input using the same function as during training
             input_data["radar"] = np.concatenate(
                 carla_dataset_utils.preprocess_radar_input(
@@ -557,6 +955,8 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             self._init()
             self.control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
             input_data = self.tick(input_data)
+            input_data["meters_travelled"] = self.meters_travelled
+            self._save_inference_dataset_frame(input_data)
             self._emit_raw_telemetry(input_data)
             return self.control
 
@@ -570,12 +970,6 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
         # Transform the data into torch tensor comforting with data loader's format.
         input_data_tensors = {
-            "rgb": torch.Tensor(input_data["rgb"]).to(self.device, dtype=torch.float32)[
-                None
-            ],
-            "rasterized_lidar": torch.Tensor(input_data["rasterized_lidar"]).to(
-                self.device, dtype=torch.float32
-            ),
             "target_point_previous": torch.Tensor(input_data["target_point_previous"])
             .to(self.device, dtype=torch.float32)
             .view(1, 2),
@@ -599,8 +993,26 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             "town": np.array([self._world.get_map().name.split("/")[-1]]),
         }
 
+        if self._uses_dual_front_camera_input():
+            for key in (
+                str(getattr(self.training_config, "left_camera_key", "rgb_left")),
+                str(getattr(self.training_config, "right_camera_key", "rgb_right")),
+            ):
+                input_data_tensors[key] = torch.Tensor(input_data[key]).to(
+                    self.device, dtype=torch.float32
+                )[None]
+        else:
+            input_data_tensors["rgb"] = torch.Tensor(input_data["rgb"]).to(
+                self.device, dtype=torch.float32
+            )[None]
+
+        if self._uses_lidar_input():
+            input_data_tensors["rasterized_lidar"] = torch.Tensor(
+                input_data["rasterized_lidar"]
+            ).to(self.device, dtype=torch.float32)
+
         # Add radar data if available
-        if self.training_config.use_radars and "radar" in input_data:
+        if self._uses_radar_input() and "radar" in input_data:
             input_data_tensors["radar"] = torch.Tensor(input_data["radar"]).to(
                 self.device, dtype=torch.float32
             )[None]
@@ -622,9 +1034,18 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             )
 
         # Forward pass
-        closed_loop_prediction: ClosedLoopPrediction = (
-            self.closed_loop_inference.forward(data=input_data_tensors)
-        )
+        if self._model_inference_timing_enabled:
+            self._sync_inference_timer()
+            inference_start = time.perf_counter()
+            closed_loop_prediction: ClosedLoopPrediction = (
+                self.closed_loop_inference.forward(data=input_data_tensors)
+            )
+            self._sync_inference_timer()
+            self._record_model_inference_time(time.perf_counter() - inference_start)
+        else:
+            closed_loop_prediction: ClosedLoopPrediction = (
+                self.closed_loop_inference.forward(data=input_data_tensors)
+            )
         # Update bounding boxes
         if (
             closed_loop_prediction.pred_bounding_box_vehicle_system is not None
@@ -671,6 +1092,8 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         # CARLA will not let the car drive in the initial frames. This help the filter not get confused.
         if self.step < self.training_config.inital_frames_delay:
             self.control = carla.VehicleControl(0.0, 0.0, 1.0)
+
+        self._save_inference_dataset_frame(input_data, closed_loop_prediction)
 
         # Check for infractions at this step
         self.check_infractions()
@@ -783,6 +1206,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
     def destroy(self, _=None):
         # Clean up video recorder
+        self._save_model_inference_timing_summary()
         if hasattr(self, "video_recorder"):
             self.video_recorder.cleanup_and_compress()
         self._close_raw_telemetry()

@@ -227,7 +227,7 @@ class BaseConfig:
                     "cropped_height": 384,
                     "fov": 90,
                 },
-                3: {
+                2: {
                     "pos": [0.900, 0.0675, 1.550],
                     "rot": [0.0, 0.0, 0.0],
                     "width": 384,

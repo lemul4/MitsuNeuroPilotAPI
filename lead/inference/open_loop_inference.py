@@ -50,19 +50,7 @@ class OpenLoopInference:
 
         # Loading models
         self.nets: list[TFv6] = []
-        model_file_filter = os.environ.get("MITSU_CARLA_MODEL_FILE", "").strip()
-        if not model_file_filter and os.path.exists(os.path.join(model_path, "model_0011.pth")):
-            model_file_filter = "model_0011.pth"
-            LOG.info("[Model selector] MITSU_CARLA_MODEL_FILE not set; auto-selecting model_0011.pth from %s", model_path)
-        if model_file_filter:
-            LOG.info(
-                "[Model selector] MITSU_CARLA_MODEL_FILE=%s; loading only this file from %s",
-                model_file_filter,
-                model_path,
-            )
         for file in sorted(os.listdir(model_path)):
-            if model_file_filter and file != model_file_filter:
-                continue
             if file.startswith(prefix) and file.endswith(".pth"):
                 LOG.info(f"Loading model weight from {os.path.join(model_path, file)}")
                 net = TFv6(self.device, self.config_training)
@@ -77,16 +65,151 @@ class OpenLoopInference:
                     state_dict, strict=config_open_loop.strict_weight_load
                 )
                 net.cuda(device=self.device).eval()
+                if self.config_training.channel_last:
+                    net.to(memory_format=torch.channels_last)
+                self._prepare_jit_compile(net)
                 self.nets.append(net)
-        if not self.nets:
-            available = sorted([f for f in os.listdir(model_path) if f.endswith(".pth")])
-            raise RuntimeError(
-                f"No model weights loaded from {model_path}. "
-                f"prefix={prefix!r}, MITSU_CARLA_MODEL_FILE={model_file_filter!r}, "
-                f"available_pth={available}"
-            )
-        LOG.info("[Model selector] Loaded %d model file(s): %s", len(self.nets), [f for f in sorted(os.listdir(model_path)) if (not model_file_filter or f == model_file_filter) and f.startswith(prefix) and f.endswith(".pth")])
+        self._warmup_jit_compile()
         self.step = 4  # Constant so produced images start with 5, not really important
+
+    def _jit_compile_mode(self) -> str:
+        configured_mode = getattr(self.config_training, "jit_compile_mode", None)
+        if configured_mode is None:
+            configured_mode = getattr(
+                self.config_training,
+                "compile_mode",
+                "reduce-overhead",
+            )
+        return str(configured_mode).lower()
+
+    def _prepare_jit_compile(self, net: TFv6) -> None:
+        if not bool(getattr(self.config_training, "jit_compile", False)):
+            return
+        if self.device.type != "cuda":
+            LOG.warning("Skipping torch.compile because inference device is not CUDA.")
+            return
+        jit_compile_mode = self._jit_compile_mode()
+        net.prepare_compile(
+            fullgraph=False,
+            dynamic=False,
+            backend="inductor",
+            mode=jit_compile_mode,
+        )
+        LOG.info(
+            "Using torch.compile on TFv6 forward core for inference, mode=%s",
+            jit_compile_mode,
+        )
+
+    def _dummy_forward_data(self) -> dict[str, torch.Tensor | np.ndarray]:
+        batch_size = 1
+        data: dict[str, torch.Tensor | np.ndarray] = {
+            "target_point_previous": torch.zeros(
+                (batch_size, 2), device=self.device, dtype=torch.float32
+            ),
+            "target_point": torch.zeros(
+                (batch_size, 2), device=self.device, dtype=torch.float32
+            ),
+            "target_point_next": torch.zeros(
+                (batch_size, 2), device=self.device, dtype=torch.float32
+            ),
+            "speed": torch.zeros((batch_size,), device=self.device, dtype=torch.float32),
+            "command": torch.zeros(
+                (batch_size, self.config_training.discrete_command_dim),
+                device=self.device,
+                dtype=torch.float32,
+            ),
+            "next_command": torch.zeros(
+                (batch_size, self.config_training.discrete_command_dim),
+                device=self.device,
+                dtype=torch.float32,
+            ),
+            "town": np.array(["Town01"]),
+        }
+        data["command"][:, 3] = 1.0
+        data["next_command"][:, 3] = 1.0
+
+        if bool(getattr(self.config_training, "dual_front_camera_mode", False)):
+            for key in (
+                str(getattr(self.config_training, "left_camera_key", "rgb_left")),
+                str(getattr(self.config_training, "right_camera_key", "rgb_right")),
+            ):
+                data[key] = torch.zeros(
+                    (
+                        batch_size,
+                        3,
+                        self.config_training.final_image_height,
+                        self.config_training.final_image_width,
+                    ),
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+        else:
+            data["rgb"] = torch.zeros(
+                (
+                    batch_size,
+                    3,
+                    self.config_training.final_image_height,
+                    self.config_training.final_image_width,
+                ),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            if not self.config_training.LTF:
+                data["rasterized_lidar"] = torch.zeros(
+                    (
+                        batch_size,
+                        1,
+                        self.config_training.lidar_height_pixel,
+                        self.config_training.lidar_width_pixel,
+                    ),
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+
+        if self.config_training.use_radars:
+            data["radar"] = torch.zeros(
+                (
+                    batch_size,
+                    self.config_training.num_radar_sensors
+                    * self.config_training.num_radar_points_per_sensor,
+                    5,
+                ),
+                device=self.device,
+                dtype=torch.float32,
+            )
+        return data
+
+    def _warmup_jit_compile(self) -> None:
+        warmup_steps = int(getattr(self.config_training, "jit_compile_warmup_steps", 0))
+        if (
+            warmup_steps <= 0
+            or not bool(getattr(self.config_training, "jit_compile", False))
+            or len(self.nets) == 0
+        ):
+            return
+
+        data = self._dummy_forward_data()
+        use_autocast = self._uses_autocast()
+        LOG.info("Running %d torch.compile warmup forward(s).", warmup_steps)
+        with torch.inference_mode(), torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.config_training.torch_float_type,
+            enabled=use_autocast,
+        ):
+            for _ in range(warmup_steps):
+                for net in self.nets:
+                    net(data)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _uses_autocast(self) -> bool:
+        return (
+            self.device.type == "cuda"
+            and bool(
+                getattr(self.config_training, "use_mixed_precision_training", False)
+            )
+            and self.config_training.torch_float_type != torch.float32
+        )
 
     @beartype
     def ensemble_planning_decoder(
@@ -370,7 +493,13 @@ class OpenLoopInference:
             EnsemblePrediction object containing the aggregated predictions
         """
         self.step += 1
-        self.predictions: list[Prediction] = [net(data) for net in self.nets]
+        use_autocast = self._uses_autocast()
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.config_training.torch_float_type,
+            enabled=use_autocast,
+        ):
+            self.predictions: list[Prediction] = [net(data) for net in self.nets]
         return self.ensemble(data, self.predictions)
 
     def __getitem__(self, index):

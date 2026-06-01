@@ -27,6 +27,7 @@ To add a new evaluation mode (e.g., a different agent type):
 """
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -205,13 +206,14 @@ class LeaderboardWrapper:
                 "carla_path": self.workspace_root
                 / "3rd_party/CARLA_0915/PythonAPI/carla",
             }
-        else:  # STANDARD
+        else:  # STANDARD model evaluation uses the autopilot leaderboard fork.
             return {
-                "leaderboard_root": self.workspace_root / "3rd_party/leaderboard",
+                "leaderboard_root": self.workspace_root
+                / "3rd_party/leaderboard_autopilot",
                 "scenario_runner_root": self.workspace_root
-                / "3rd_party/scenario_runner",
+                / "3rd_party/scenario_runner_autopilot",
                 "evaluator_script": self.workspace_root
-                / "3rd_party/leaderboard/leaderboard/leaderboard_evaluator.py",
+                / "3rd_party/leaderboard_autopilot/leaderboard/leaderboard_evaluator.py",
                 "evaluator_module": "leaderboard.leaderboard_evaluator",
             }
 
@@ -363,10 +365,35 @@ class LeaderboardWrapper:
                 }
             )
         else:
+            model_config = self._load_model_config(checkpoint_dir)
+            camera_lidar_sensor_tick_from_data_save_freq = self._config_bool_string(
+                model_config,
+                "camera_lidar_sensor_tick_from_data_save_freq",
+                default=False,
+            )
+            sync_sensor_processing_with_save_freq = self._config_bool_string(
+                model_config,
+                "sync_sensor_processing_with_save_freq",
+                default=False,
+            )
+            use_min_speed_infractions_in_score = self._config_bool_string(
+                model_config,
+                "use_min_speed_infractions_in_score",
+                default=False,
+            )
+            reset_route_timer_after_first_agent_tick = self._config_bool_string(
+                model_config,
+                "reset_route_timer_after_first_agent_tick",
+                default=False,
+            )
             env_vars.update(
                 {
                     "CHECKPOINT_DIR": checkpoint_dir,
                     "SAVE_PATH": str(resolved_output_dir),
+                    "CAMERA_LIDAR_SENSOR_TICK_FROM_DATA_SAVE_FREQ": camera_lidar_sensor_tick_from_data_save_freq,
+                    "SYNC_SENSOR_PROCESSING_WITH_SAVE_FREQ": sync_sensor_processing_with_save_freq,
+                    "USE_MIN_SPEED_INFRACTIONS_IN_SCORE": use_min_speed_infractions_in_score,
+                    "LEAD_RESET_ROUTE_TIMER_AFTER_FIRST_AGENT_TICK": reset_route_timer_after_first_agent_tick,
                 }
             )
 
@@ -375,6 +402,119 @@ class LeaderboardWrapper:
             os.environ[key] = value
 
         return env_vars
+
+    def _load_model_config(self, checkpoint_dir: str | None) -> dict:
+        """Load optional model config values used by the wrapper runtime."""
+        if checkpoint_dir is None:
+            return {}
+        checkpoint_path = Path(checkpoint_dir)
+        if checkpoint_path.is_file():
+            config_path = checkpoint_path
+        else:
+            config_path = checkpoint_path / "config.json"
+            if not config_path.exists():
+                candidates = sorted(checkpoint_path.glob("*.json"))
+                if not candidates:
+                    return {}
+                config_path = candidates[0]
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            return loaded if isinstance(loaded, dict) else {}
+        except FileNotFoundError:
+            return {}
+
+    @staticmethod
+    def _config_bool_string(
+        config: dict,
+        key: str,
+        default: bool,
+    ) -> str:
+        value = config.get(key, default)
+        if isinstance(value, str):
+            value = value.lower() in {"1", "true", "yes", "on"}
+        return "True" if bool(value) else "False"
+
+    @staticmethod
+    def _config_bool(config: dict, key: str, default: bool) -> bool:
+        value = config.get(key, default)
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _inference_dataset_route_dir(
+        self,
+        output_path: Path,
+        model_config: dict,
+    ) -> Path | None:
+        if not self._config_bool(model_config, "save_inference_dataset", False):
+            return None
+        if not self._config_bool(
+            model_config,
+            "save_inference_dataset_route_logs",
+            True,
+        ):
+            return None
+        return output_path / "inference_dataset" / self.scenario_type / self.route_id
+
+    def _route_stdout_log_path(
+        self,
+        output_path: Path,
+        model_config: dict,
+    ) -> Path | None:
+        route_dir = self._inference_dataset_route_dir(output_path, model_config)
+        if route_dir is None:
+            return None
+
+        log_dir = route_dir / "stdout"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        host = str(self.args.host).replace(os.sep, "_")
+        log_name = (
+            f"{self.scenario_type}_{self.route_id}_Rep0_attempt0_"
+            f"{host}_{self.args.port}_{self.args.traffic_manager_port}.log"
+        )
+        return log_dir / log_name
+
+    def _run_process_with_optional_route_log(
+        self,
+        cmd: list[str],
+        env: dict,
+        log_path: Path | None,
+    ) -> tuple[subprocess.Popen, int]:
+        if log_path is None:
+            process = subprocess.Popen(cmd, cwd=self.workspace_root, env=env)
+            return process, process.wait()
+
+        LOG.info("Route stdout/stderr log: %s", log_path)
+        process = subprocess.Popen(
+            cmd,
+            cwd=self.workspace_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+
+        with open(log_path, "w", encoding="utf-8") as log_file:
+            log_file.write("Command: " + " ".join(cmd) + "\n")
+            log_file.write(f"Output Dir: {env.get('OUTPUT_DIR', '')}\n")
+            log_file.write(f"Routes: {env.get('ROUTES', '')}\n")
+            log_file.write(f"Scenario Type: {env.get('SCENARIO_TYPE', '')}\n")
+            log_file.write(f"Route ID: {env.get('BENCHMARK_ROUTE_ID', '')}\n")
+            log_file.write("=" * 80 + "\n")
+            log_file.flush()
+
+            assert process.stdout is not None
+            for line in process.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log_file.write(line)
+                log_file.flush()
+
+        return process, process.wait()
 
     def _prepare_checkpoint_paths(self, output_path: Path) -> tuple[Path, Path]:
         """Create checkpoint directories and return checkpoint file paths.
@@ -441,6 +581,12 @@ class LeaderboardWrapper:
         env_vars = self._setup_leaderboard_environment(root_output_dir, checkpoint_dir)
         resolved_output_path = Path(env_vars["OUTPUT_DIR"])
         paths = self._get_leaderboard_evaluator_paths()
+        model_config = self._load_model_config(checkpoint_dir)
+        route_log_path = (
+            self._route_stdout_log_path(resolved_output_path, model_config)
+            if not self.args.expert
+            else None
+        )
 
         env = os.environ.copy()
         env.update(env_vars)
@@ -508,8 +654,11 @@ class LeaderboardWrapper:
         # Use Popen for better process control
         process = None
         try:
-            process = subprocess.Popen(cmd, cwd=self.workspace_root, env=env)
-            returncode = process.wait()
+            process, returncode = self._run_process_with_optional_route_log(
+                cmd=cmd,
+                env=env,
+                log_path=route_log_path,
+            )
             return subprocess.CompletedProcess(cmd, returncode)
 
         except KeyboardInterrupt:
@@ -629,7 +778,7 @@ Examples:
 
     # CARLA settings
     parser.add_argument(
-        "--host", type=str, default="127.0.0.1", help="CARLA server host"
+        "--host", type=str, default="172.17.192.1", help="CARLA server host"
     )
     parser.add_argument("--port", type=int, default=2000, help="CARLA server port")
     parser.add_argument(

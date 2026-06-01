@@ -147,6 +147,8 @@ class BaseAgent:
 
         # --- LiDAR ---
         use_lidar = getattr(self.config_expert, "use_lidar", True)
+        if self.sensor_agent and hasattr(self, "training_config"):
+            use_lidar = bool(getattr(self.training_config, "use_lidar", use_lidar))
         input_data["lidar"] = None
         original_lidar_num_points = 0
         if use_lidar:
@@ -176,7 +178,12 @@ class BaseAgent:
             original_lidar_num_points = input_data["lidar"].shape[0]
 
         # --- Radar ---
-        if self.config_expert.use_radars:
+        use_radars = bool(getattr(self.config_expert, "use_radars", False))
+        if self.sensor_agent and hasattr(self, "training_config"):
+            use_radars = bool(
+                getattr(self.training_config, "use_radars", use_radars)
+            )
+        if use_radars:
             radar_processed = {}
             radar_points_list = []
 
@@ -223,7 +230,7 @@ class BaseAgent:
                 input_data["lidar"] = input_data["lidar"][~ground_mask]
                 # Also remove ground points from radar_pc_queue if radar points are appended to LiDAR
                 if (
-                    self.config_expert.use_radars
+                    use_radars
                     and self.config_expert.save_radar_pc_as_lidar
                     and len(self.radar_pc_queue) > 0
                 ):
@@ -262,7 +269,13 @@ class BaseAgent:
             input_data[f"rgb_{camera_idx}"] = rgb_camera  # individual camera
             rgb_cameras.append(rgb_camera)
 
-        # input_data["rgb"] = np.concatenate(rgb_cameras, axis=1)  # stitched version
+        dual_front_sensor_agent = (
+            self.sensor_agent
+            and hasattr(self, "training_config")
+            and bool(getattr(self.training_config, "dual_front_camera_mode", False))
+        )
+        if not dual_front_sensor_agent:
+            input_data["rgb"] = np.concatenate(rgb_cameras, axis=1)
         return input_data
 
     @beartype
