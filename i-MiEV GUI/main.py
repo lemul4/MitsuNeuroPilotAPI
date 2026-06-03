@@ -1790,10 +1790,13 @@ class AppController(QObject):
         config = {
             "project_root": project_root,
             "routes": selected_route_path,
-            "checkpoint_path": os.path.join(project_root, "model_0011.pth"),
+            "checkpoint_path": os.environ.get(
+                "MITSU_LEAD_CHECKPOINT",
+                os.path.join(project_root, "outputs", "model_0011"),
+            ),
             "telemetry_file": telemetry_file,
-            "expert_mode": True,
-            "host": self.carla_watchdog_host or "localhost",
+            "expert_mode": False,
+            "host": self.carla_watchdog_host or "127.0.0.1",
             "port": self.carla_watchdog_port or 2000,
             "traffic_manager_port": int(os.environ.get("MITSU_CARLA_TM_PORT", "8000")),
             "stdout_log_path": self._build_route_stdout_log_path(project_root, selected_route_path),

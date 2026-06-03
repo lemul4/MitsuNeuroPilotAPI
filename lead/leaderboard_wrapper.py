@@ -617,8 +617,6 @@ class LeaderboardWrapper:
             agent_config or "",
             "--debug",
             str(self.args.debug),
-            "--resume",
-            str(int(self.args.resume)),
             "--port",
             str(self.args.port),
             "--traffic-manager-port",
@@ -630,6 +628,11 @@ class LeaderboardWrapper:
             "--timeout",
             str(self.args.timeout),
         ]
+        if self.args.resume:
+            cmd.extend(["--resume", "True"])
+
+        if self.args.resume:
+            cmd.append("--resume")
 
         # Add debug checkpoint if not autopilot
         if leaderboard_type != LeaderboardType.AUTOPILOT:
@@ -778,7 +781,7 @@ Examples:
 
     # CARLA settings
     parser.add_argument(
-        "--host", type=str, default="172.17.192.1", help="CARLA server host"
+        "--host", type=str, default="127.0.0.1", help="CARLA server host"
     )
     parser.add_argument("--port", type=int, default=2000, help="CARLA server port")
     parser.add_argument(
