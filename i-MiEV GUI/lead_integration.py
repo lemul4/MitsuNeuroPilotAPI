@@ -86,7 +86,7 @@ class LeadAgentThread(QThread):
 
         # 5. Команда запуска агента
         wrapper_path = os.path.join(project_root, "lead", "leaderboard_wrapper.py")
-                cmd = [python_exe, "-u", wrapper_path]
+        cmd = [python_exe, "-u", wrapper_path]
         launch_mode = "EXPERT" if expert_mode else "MODEL"
         if expert_mode:
             cmd.append("--expert")
@@ -124,12 +124,12 @@ class LeadAgentThread(QThread):
         print(f"[LEAD_START] expert_mode={expert_mode}")
         if not expert_mode:
             print(f"[LEAD_START] checkpoint={checkpoint_path}")
-cmd.extend(["--checkpoint", checkpoint_path])
+        cmd.extend(["--checkpoint", checkpoint_path])
         print(f"[LEAD_START] mode={launch_mode}")
         print(f"[LEAD_START] expert_mode={expert_mode}")
         if not expert_mode:
             print(f"[LEAD_START] checkpoint={checkpoint_path}")
-cmd.extend([
+        cmd.extend([
             "--routes", str(self.config.get("routes")),
             "--host", str(self.config.get("host", "127.0.0.1")),
         ])
@@ -155,8 +155,8 @@ cmd.extend([
 
         try:
             # --- ЗАПУСК 1: Основной агент CARLA ---
-                        print(f"[LEAD_START] command={' '.join(cmd)}")
-self.process = subprocess.Popen(
+            print(f"[LEAD_START] command={' '.join(cmd)}")
+            self.process = subprocess.Popen(
                 cmd,
                 cwd=project_root,
                 env=env,
@@ -167,7 +167,7 @@ self.process = subprocess.Popen(
                 # MITSU_SUBPROCESS_ENCODING_PATCH
                 
                 
-bufsize=0,
+            bufsize=0,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
 

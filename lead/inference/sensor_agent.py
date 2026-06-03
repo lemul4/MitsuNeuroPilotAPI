@@ -1224,9 +1224,9 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             self.video_recorder.cleanup_and_compress()
         if hasattr(self, "_close_raw_telemetry"):
             try:
-            self._close_raw_telemetry()
-        except Exception as exc:
-            LOG.warning("[SensorAgent] Skipping raw telemetry cleanup during destroy: %s", exc)
+                self._close_raw_telemetry()
+            except Exception as exc:
+                LOG.warning("[SensorAgent] Skipping raw telemetry cleanup during destroy: %s", exc)
 
 
 class StopSignPostProcessor:
