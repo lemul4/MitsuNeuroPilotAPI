@@ -64,7 +64,7 @@ class OpenLoopInference:
                 net.load_state_dict(
                     state_dict, strict=config_open_loop.strict_weight_load
                 )
-                net.cuda(device=self.device).eval()
+                net.to(device=self.device).eval()
                 if self.config_training.channel_last:
                     net.to(memory_format=torch.channels_last)
                 self._prepare_jit_compile(net)

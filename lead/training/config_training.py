@@ -419,6 +419,9 @@ class TrainingConfig(BaseConfig):
     jit_compile_mode = None
     jit_compile_warmup_steps = 0
     reset_route_timer_after_first_agent_tick = False
+    # Inference device for CARLA simulation: "cuda", "cuda:0", "cpu", or "auto".
+    # Training still uses the device property below.
+    inference_device = "cuda"
     model_inference_timing = False
     model_inference_timing_warmup_steps = 0
     save_inference_dataset = False
@@ -932,6 +935,8 @@ class TrainingConfig(BaseConfig):
     use_lidar = True
     use_radars = False
     disable_visual_artifacts = False
+    debug_boxes_visualization = True
+    preserve_scenario_weather = False
     camera_lidar_sensor_tick_from_data_save_freq = False
     sync_sensor_processing_with_save_freq = False
     sync_sensor_processing_with_data_save_freq = False
