@@ -1792,7 +1792,7 @@ class AppController(QObject):
             "routes": selected_route_path,
             "checkpoint_path": os.environ.get(
                 "MITSU_LEAD_CHECKPOINT",
-                os.path.join(project_root, "outputs", "model1"),
+                os.path.join(project_root, "outputs", "model_0011"),
             ),
             "telemetry_file": telemetry_file,
             "expert_mode": False,
