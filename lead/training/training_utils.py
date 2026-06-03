@@ -67,6 +67,7 @@ class DecayingPeakCosineAnnealingWarmRestarts(CosineAnnealingWarmRestarts):
                 "To get the last learning rate computed by the scheduler, "
                 "please use `get_last_lr()`.",
                 UserWarning,
+                stacklevel=2,
             )
 
         peak_multiplier = self.peak_decay ** self._restart_index()
@@ -489,6 +490,7 @@ def initialize_validation_dataloader(
         "use_persistent_cache": True,
         "force_rebuild_data_cache": False,
         "visualize_dataset": False,
+        "hard_sample_oversampling": False,
     }
     loaded_config.update(validation_overrides)
     validation_config = TrainingConfig(

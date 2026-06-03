@@ -322,7 +322,7 @@ def build_route_jobs(
     data_save_directory: Path,
 ) -> list[RouteJob]:
     jobs: list[RouteJob] = []
-    seed_counter = 1010010 * repetition_start - 1
+    seed_counter = 10101110 * repetition_start - 1
 
     for repetition in range(repetition_start, repetitions):
         for route in routes:
@@ -802,8 +802,8 @@ if __name__ == "__main__":
 
     # Keep existing scenario filtering behavior
     # scenario_white_lists ="RedLightWithoutLeadVehicle", "ParkingExit","VehicleTurningRoutePedestrian", "VehicleTurningRoute", "StaticCutIn", "PedestrianCrossing", 
-    scenario_white_lists = ["RedLightWithoutLeadVehicle", "ParkingExit", "VehicleTurningRoutePedestrian", "VehicleTurningRoute", "StaticCutIn", "PedestrianCrossing", "BlockedIntersection", "DynamicObjectCrossing", "ParkedObstacle", "Accident", "ConstructionObstacle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss", "SignalizedJunctionLeftTurn", "InvadingTurn", "ParkingCutIn", "HardBreakRoute", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios"]
-    # scenario_white_lists = ["DynamicObjectCrossing", "ParkingExit", "noScenarios", "ParkingCrossingPedestrian", "BlockedIntersection"]
+    # scenario_white_lists = ["RedLightWithoutLeadVehicle", "ParkingExit", "VehicleTurningRoutePedestrian", "VehicleTurningRoute", "StaticCutIn", "PedestrianCrossing", "BlockedIntersection", "DynamicObjectCrossing", "ParkedObstacle", "Accident", "ConstructionObstacle", "NonSignalizedJunctionRightTurn", "NonSignalizedJunctionLeftTurn", "ControlLoss", "SignalizedJunctionLeftTurn", "InvadingTurn", "ParkingCutIn", "HardBreakRoute", "CrossingBicycleFlow", "ParkingCrossingPedestrian", "noScenarios"]
+    scenario_white_lists = ["DynamicObjectCrossing", "RedLightWithoutLeadVehicle", "ParkingCrossingPedestrian", "VehicleTurningRoutePedestrian", "PedestrianCrossing", "SignalizedJunctionLeftTurn", "HardBreakRoute", "SignalizedJunctionRightTurn",]
     scenario_blacklist = ["YieldToEmergencyVehicle", ]
 
     root_folder = Path(args.root_folder).expanduser()
