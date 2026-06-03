@@ -78,6 +78,15 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self.config_path = path_to_conf_file
         self.step = -1
         self.initialized = False
+        # Defaults for optional runtime features. These are intentionally set
+        # before config/model loading so cleanup is safe after partial setup.
+        self._model_inference_timing_enabled = False
+        self._model_inference_timing_warmup_steps = 0
+        self._model_inference_timing_samples: list[float] = []
+        self._model_inference_timing_seen = 0
+        self._inference_dataset_save_enabled = False
+        self._inference_dataset_frame = 0
+        self._inference_dataset_root = None
         self.device = torch.device("cuda:0")
         self._sensors_cache = None
 
@@ -398,7 +407,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             torch.cuda.synchronize(self.device)
 
     def _record_model_inference_time(self, elapsed_s: float) -> None:
-        if not self._model_inference_timing_enabled:
+        if not getattr(self, "_model_inference_timing_enabled", False):
             return
         self._model_inference_timing_seen += 1
         if self._model_inference_timing_seen <= self._model_inference_timing_warmup_steps:
@@ -406,11 +415,11 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self._model_inference_timing_samples.append(float(elapsed_s))
 
     def _model_inference_timing_summary(self) -> dict:
-        samples = np.array(self._model_inference_timing_samples, dtype=np.float64)
+        samples = np.array(getattr(self, "_model_inference_timing_samples", []), dtype=np.float64)
         summary = {
-            "enabled": bool(self._model_inference_timing_enabled),
-            "warmup_steps": int(self._model_inference_timing_warmup_steps),
-            "seen_steps": int(self._model_inference_timing_seen),
+            "enabled": bool(getattr(self, "_model_inference_timing_enabled", False)),
+            "warmup_steps": int(getattr(self, "_model_inference_timing_warmup_steps", 0)),
+            "seen_steps": int(getattr(self, "_model_inference_timing_seen", 0)),
             "measured_steps": int(samples.size),
         }
         if samples.size == 0:
@@ -429,7 +438,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         return summary
 
     def _save_model_inference_timing_summary(self) -> None:
-        if not self._model_inference_timing_enabled:
+        if not getattr(self, "_model_inference_timing_enabled", False):
             return
         summary = self._model_inference_timing_summary()
         LOG.info(
@@ -1205,11 +1214,19 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         return self.control
 
     def destroy(self, _=None):
-        # Clean up video recorder
-        self._save_model_inference_timing_summary()
+        # Clean up video recorder. The leaderboard may call destroy() even if
+        # setup() failed before all optional runtime attributes were created.
+        try:
+            self._save_model_inference_timing_summary()
+        except Exception as exc:
+            LOG.warning("[SensorAgent] Skipping model inference timing summary during cleanup: %s", exc)
         if hasattr(self, "video_recorder"):
             self.video_recorder.cleanup_and_compress()
-        self._close_raw_telemetry()
+        if hasattr(self, "_close_raw_telemetry"):
+            try:
+            self._close_raw_telemetry()
+        except Exception as exc:
+            LOG.warning("[SensorAgent] Skipping raw telemetry cleanup during destroy: %s", exc)
 
 
 class StopSignPostProcessor:

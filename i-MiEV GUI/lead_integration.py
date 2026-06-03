@@ -43,7 +43,7 @@ class LeadAgentThread(QThread):
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8:replace"
 
-        expert_mode = bool(self.config.get("expert_mode", True))
+        expert_mode = bool(self.config.get("expert_mode", False))
         telemetry_file = self.config.get("telemetry_file")
         if not telemetry_file:
             telemetry_dir = os.path.join(project_root, "outputs", "logs")
@@ -86,16 +86,52 @@ class LeadAgentThread(QThread):
 
         # 5. Команда запуска агента
         wrapper_path = os.path.join(project_root, "lead", "leaderboard_wrapper.py")
-        cmd = [python_exe, "-u", wrapper_path]
-        
+                cmd = [python_exe, "-u", wrapper_path]
+        launch_mode = "EXPERT" if expert_mode else "MODEL"
         if expert_mode:
             cmd.append("--expert")
         else:
-            cmd.extend(["--checkpoint", str(self.config.get("checkpoint_path", ""))])
-
-        cmd.extend([
+            checkpoint_path = str(
+                self.config.get("checkpoint_path")
+                or os.environ.get("MITSU_LEAD_CHECKPOINT")
+                or os.path.join(project_root, "outputs", "model_0011")
+            ).strip()
+            checkpoint_path = os.path.normpath(checkpoint_path)
+            if not os.path.isdir(checkpoint_path):
+                raise RuntimeError(f"checkpoint_path must be a directory: {checkpoint_path}")
+            checkpoint_files = os.listdir(checkpoint_path)
+            has_config = any(name.endswith(".json") for name in checkpoint_files)
+            has_weights = any(name.startswith("model") and name.endswith(".pth") for name in checkpoint_files)
+            if not has_config:
+                raise RuntimeError(f"No *.json model config found in checkpoint directory: {checkpoint_path}")
+            if not has_weights:
+                raise RuntimeError(f"No model*.pth weights found in checkpoint directory: {checkpoint_path}")
+            if os.environ.get("MITSU_LEAD_SKIP_CUDA_PREFLIGHT", "").lower() not in {"1", "true", "yes", "on"}:
+                try:
+                    import torch
+                    cuda_ok = bool(torch.cuda.is_available())
+                    cuda_name = torch.cuda.get_device_name(0) if cuda_ok else "unavailable"
+                except Exception as exc:
+                    raise RuntimeError(f"PyTorch CUDA preflight failed: {exc}") from exc
+                if not cuda_ok:
+                    raise RuntimeError(
+                        "PyTorch CUDA is not available. The current model inference path requires CUDA. "
+                        "Run on an NVIDIA/CUDA machine, or set MITSU_LEAD_SKIP_CUDA_PREFLIGHT=1 only for debugging."
+                    )
+                print(f"[LEAD_START] cuda={cuda_name}")
+            cmd.extend(["--checkpoint", checkpoint_path])
+        print(f"[LEAD_START] mode={launch_mode}")
+        print(f"[LEAD_START] expert_mode={expert_mode}")
+        if not expert_mode:
+            print(f"[LEAD_START] checkpoint={checkpoint_path}")
+cmd.extend(["--checkpoint", checkpoint_path])
+        print(f"[LEAD_START] mode={launch_mode}")
+        print(f"[LEAD_START] expert_mode={expert_mode}")
+        if not expert_mode:
+            print(f"[LEAD_START] checkpoint={checkpoint_path}")
+cmd.extend([
             "--routes", str(self.config.get("routes")),
-            "--host", str(self.config.get("host", "localhost")),
+            "--host", str(self.config.get("host", "127.0.0.1")),
         ])
 
         port = self.config.get("port")
@@ -119,7 +155,8 @@ class LeadAgentThread(QThread):
 
         try:
             # --- ЗАПУСК 1: Основной агент CARLA ---
-            self.process = subprocess.Popen(
+                        print(f"[LEAD_START] command={' '.join(cmd)}")
+self.process = subprocess.Popen(
                 cmd,
                 cwd=project_root,
                 env=env,
