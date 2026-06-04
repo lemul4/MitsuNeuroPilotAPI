@@ -87,7 +87,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self._inference_dataset_save_enabled = False
         self._inference_dataset_frame = 0
         self._inference_dataset_root = None
-        self.device = torch.device("cuda:0")
+        self.device = torch.device("cpu")
         self._sensors_cache = None
 
         # Load the config saved during training
@@ -101,7 +101,10 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
         # Generate new config for the case that it has new variables.
         self.training_config = TrainingConfig(json_config)
+        self.device = self._resolve_inference_device()
+        self._apply_inference_device_runtime_overrides()
         self._apply_model_runtime_overrides()
+        LOG.info("[SensorAgent] Using inference device: %s", self.device)
 
         # Store training config in base class for Kalman filter decision
         # This is accessed by BaseAgent._use_kalman_filter()
@@ -457,24 +460,60 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
     def _apply_model_runtime_overrides(self) -> None:
         """Apply inference-time switches stored in the model training config."""
-        if not bool(getattr(self.training_config, "disable_visual_artifacts", False)):
-            return
-
-        disabled_outputs = {
-            "produce_demo_image": False,
-            "produce_demo_video": False,
-            "produce_debug_image": False,
-            "produce_debug_video": False,
-            "produce_input_image": False,
-            "produce_input_video": False,
-            "produce_grid_image": False,
-            "produce_grid_video": False,
-        }
         loaded_config = getattr(self.config_closed_loop, "_loaded_config", None)
         if loaded_config is None:
             loaded_config = {}
             self.config_closed_loop._loaded_config = loaded_config
-        loaded_config.update(disabled_outputs)
+
+        if bool(getattr(self.training_config, "preserve_scenario_weather", False)):
+            loaded_config.update(
+                {
+                    "random_weather": False,
+                    "custom_weather": None,
+                }
+            )
+
+        if bool(getattr(self.training_config, "disable_visual_artifacts", False)):
+            loaded_config.update(
+                {
+                    "produce_demo_image": False,
+                    "produce_demo_video": False,
+                    "produce_debug_image": False,
+                    "produce_debug_video": False,
+                    "produce_input_image": False,
+                    "produce_input_video": False,
+                    "produce_grid_image": False,
+                    "produce_grid_video": False,
+                }
+            )
+
+    def _resolve_inference_device(self) -> torch.device:
+        configured_device = str(
+            getattr(self.training_config, "inference_device", "cuda")
+        ).strip().lower()
+        if configured_device in {"", "auto"}:
+            configured_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if configured_device == "cuda":
+            configured_device = "cuda:0"
+        if configured_device.startswith("cuda") and not torch.cuda.is_available():
+            LOG.warning(
+                "[SensorAgent] inference_device=%s requested, but CUDA is not available. Falling back to CPU.",
+                configured_device,
+            )
+            configured_device = "cpu"
+        return torch.device(configured_device)
+
+    def _apply_inference_device_runtime_overrides(self) -> None:
+        if self.device.type != "cpu":
+            return
+        loaded_config = getattr(self.training_config, "_loaded_config", None)
+        if loaded_config is None:
+            loaded_config = {}
+            self.training_config._loaded_config = loaded_config
+        loaded_config["compile"] = False
+        loaded_config["jit_compile"] = False
+        loaded_config["jit_compile_warmup_steps"] = 0
+        loaded_config["use_mixed_precision_training"] = False
 
     def _uses_video_output(self) -> bool:
         return any(
@@ -584,6 +623,10 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self.initialized = True
 
     def set_weather(self):
+        if bool(getattr(self.training_config, "preserve_scenario_weather", False)):
+            LOG.info("[SensorAgent] Preserving weather from route/scenario XML.")
+            return
+
         weather_name = None
 
         if self.config_closed_loop.random_weather:

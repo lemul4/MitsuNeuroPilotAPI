@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import copy
+import heapq
 import logging
 import lzma
 import numbers
 import os
 import random
 import time
+from collections import defaultdict
 
 import cv2
 import diskcache
@@ -99,6 +102,8 @@ class CARLAData(Dataset):
             list(constants.SIM2REAL_BEV_OCCUPANCY_CLASS_CONVERTER.values())
         )
         self.bucket_collection = self.config.carla_bucket_collection(root, config)
+        self._hard_sample_cache: dict[str, bool] = {}
+        self.current_epoch = 0
         self.shuffle(0)
         if self.rank == 0:
             LOG.info(f"All routes: {self.bucket_collection.total_routes}")
@@ -200,6 +205,26 @@ class CARLAData(Dataset):
 
         raise FileNotFoundError(f"RGB image not found: {image_path}")
 
+    def _image_augmenter_for_sample(self, index: int, deterministic: bool = False):
+        if not self.config.use_color_aug:
+            return None
+
+        copy_id = int(self.hard_sample_oversample_copy_ids[index])
+        if copy_id > 0:
+            augmenter = copy.deepcopy(self.image_augmenter_func)
+            seed = (
+                int(self.config.seed)
+                + int(self.current_epoch) * 1_000_003
+                + int(self.global_indices[index]) * 9_176
+                + copy_id * 101
+            ) % (2**31 - 1)
+            augmenter.seed_(seed, deterministic_too=True)
+            return augmenter.to_deterministic()
+
+        if deterministic:
+            return self.image_augmenter_func.to_deterministic()
+        return self.image_augmenter_func
+
     def __getitem__(self, index):
 
         # ----------------------------------------------------------------------------------------
@@ -237,7 +262,6 @@ class CARLAData(Dataset):
         future_waypoint_indices = [
             waypoints_spacing * (i + 1) for i in range(num_way_points_prediction)
         ]
-        past_waypoint_indices = list(future_waypoint_indices)
 
         # Determine files of index
         global_index = self.global_indices[index]  # Index in dataset
@@ -279,6 +303,12 @@ class CARLAData(Dataset):
                 "bucket_identity": self.bucket_identity[index],
                 "route_number": measurement_file.split("/")[-3],
                 "frame_number": measurement_file.split("/")[-1].split(".")[0],
+                "hard_sample_oversample_copy_id": int(
+                    self.hard_sample_oversample_copy_ids[index]
+                ),
+                "hard_sample_oversampled": bool(
+                    self.hard_sample_oversample_copy_ids[index] > 0
+                ),
             }
         )
 
@@ -679,10 +709,8 @@ class CARLAData(Dataset):
         if self.config.dual_front_camera_mode:
             left_key = str(getattr(self.config, "left_camera_key", "rgb_left"))
             right_key = str(getattr(self.config, "right_camera_key", "rgb_right"))
-            image_augmenter_func = (
-                self.image_augmenter_func.to_deterministic()
-                if self.config.use_color_aug
-                else None
+            image_augmenter_func = self._image_augmenter_for_sample(
+                index, deterministic=True
             )
             for key, image in (
                 (left_key, sensor_data.image_left),
@@ -694,8 +722,9 @@ class CARLAData(Dataset):
                     image = image_augmenter_func(image=image)
                 data[key] = np.transpose(image, (2, 0, 1))
         else:
-            if self.config.use_color_aug:
-                processed_image = self.image_augmenter_func(image=sensor_data.image)
+            image_augmenter_func = self._image_augmenter_for_sample(index)
+            if image_augmenter_func is not None:
+                processed_image = image_augmenter_func(image=sensor_data.image)
             else:
                 processed_image = sensor_data.image
             data["rgb"] = (
@@ -1257,7 +1286,176 @@ class CARLAData(Dataset):
 
         return sensor_data
 
+    def _apply_sample_indices(self, indices: npt.NDArray[np.integer]) -> None:
+        self.bev_3rd_person_images = self.bev_3rd_person_images[indices]
+        self.images = self.images[indices]
+        self.images_perturbated = self.images_perturbated[indices]
+        self.semantics = self.semantics[indices]
+        self.semantics_perturbated = self.semantics_perturbated[indices]
+        self.bev_semantics = self.bev_semantics[indices]
+        self.bev_semantics_perturbated = self.bev_semantics_perturbated[indices]
+        self.depth = self.depth[indices]
+        self.depth_perturbated = self.depth_perturbated[indices]
+        self.lidars = self.lidars[indices]
+        self.radars = self.radars[indices]
+        self.radars_perturbated = self.radars_perturbated[indices]
+        self.bboxes = self.bboxes[indices]
+        self.metas = self.metas[indices]
+        self.route_dirs = self.route_dirs[indices]
+        self.route_indices = self.route_indices[indices]
+        self.sample_start = self.sample_start[indices]
+        self.bucket_identity = self.bucket_identity[indices]
+        self.global_indices = self.global_indices[indices]
+        self.hard_sample_oversample_copy_ids = self.hard_sample_oversample_copy_ids[
+            indices
+        ]
+
+    def _hard_sample_current_command(self, meta: dict) -> int | None:
+        noisy_version = "_gps" if self.config.use_noisy_tp else ""
+        command_key = f"next{noisy_version}_commands_{self.config.tp_pop_distance}"
+        command_list = meta.get(command_key)
+        if command_list is None and not self.config.use_noisy_tp:
+            command_list = meta.get("next_commands")
+        if not command_list:
+            return None
+        # The training and inference pipelines use next_commands[0] as the current
+        # route command; following entries are future route commands.
+        try:
+            return int(command_list[0])
+        except (TypeError, ValueError):
+            return None
+
+    def _hard_sample_excluded_commands(self) -> set[int]:
+        excluded_commands = getattr(self.config, "hard_sample_excluded_commands", None)
+        if excluded_commands is None:
+            excluded_commands = [self.config.hard_sample_straight_command]
+        return {int(command) for command in excluded_commands}
+
+    def _is_hard_sample(self, meta_path: str) -> bool:
+        cached = self._hard_sample_cache.get(meta_path)
+        if cached is not None:
+            return cached
+
+        meta = common_utils.read_pickle(meta_path)
+        is_light_hazard = bool(meta.get("light_hazard", False)) and bool(
+            self.config.hard_sample_oversample_light_hazard
+        )
+
+        is_non_straight_command = False
+        if self.config.hard_sample_oversample_non_straight_command:
+            command = self._hard_sample_current_command(meta)
+            is_non_straight_command = (
+                command is not None
+                and command not in self._hard_sample_excluded_commands()
+            )
+
+        is_hard = is_light_hazard or is_non_straight_command
+        self._hard_sample_cache[meta_path] = is_hard
+        return is_hard
+
+    @staticmethod
+    def _shuffle_without_adjacent_equal_base(
+        base_indices: npt.NDArray[np.integer], rng: np.random.Generator
+    ) -> npt.NDArray[np.integer]:
+        if len(base_indices) <= 1:
+            return np.arange(len(base_indices))
+
+        for _ in range(20):
+            order = np.arange(len(base_indices))
+            rng.shuffle(order)
+            shuffled = base_indices[order]
+            if not np.any(shuffled[1:] == shuffled[:-1]):
+                return order
+
+        positions_by_base: dict[int, list[int]] = defaultdict(list)
+        for position, base_index in enumerate(base_indices):
+            positions_by_base[int(base_index)].append(position)
+        for positions in positions_by_base.values():
+            rng.shuffle(positions)
+
+        heap = [
+            (-len(positions), rng.random(), base_index)
+            for base_index, positions in positions_by_base.items()
+        ]
+        heapq.heapify(heap)
+
+        order: list[int] = []
+        last_base_index: int | None = None
+        while heap:
+            count, tie_breaker, base_index = heapq.heappop(heap)
+            if base_index == last_base_index:
+                if not heap:
+                    break
+                next_count, next_tie_breaker, next_base_index = heapq.heappop(heap)
+                order.append(positions_by_base[next_base_index].pop())
+                last_base_index = next_base_index
+                next_count += 1
+                if next_count < 0:
+                    heapq.heappush(
+                        heap, (next_count, rng.random(), next_base_index)
+                    )
+                heapq.heappush(heap, (count, tie_breaker, base_index))
+                continue
+
+            order.append(positions_by_base[base_index].pop())
+            last_base_index = base_index
+            count += 1
+            if count < 0:
+                heapq.heappush(heap, (count, rng.random(), base_index))
+
+        if len(order) != len(base_indices):
+            order = list(np.arange(len(base_indices)))
+            rng.shuffle(order)
+        return np.array(order, dtype=int)
+
+    def _apply_hard_sample_oversampling(self, rng: np.random.Generator) -> None:
+        multiplier = int(self.config.hard_sample_oversample_multiplier)
+        if (
+            not self.config.hard_sample_oversampling
+            or multiplier <= 1
+            or self.build_cache
+            or self.build_buckets
+            or self.config.visualize_dataset
+            or len(self.metas) == 0
+        ):
+            return
+
+        hard_mask = np.array(
+            [
+                self._is_hard_sample(str(meta_path, encoding="utf-8"))
+                for meta_path in self.metas
+            ],
+            dtype=bool,
+        )
+        if not np.any(hard_mask):
+            return
+
+        base_indices = np.arange(len(self.metas))
+        hard_indices = base_indices[hard_mask]
+        expanded_indices = [base_indices]
+        copy_ids = [np.zeros(len(base_indices), dtype=np.int16)]
+        for copy_id in range(1, multiplier):
+            expanded_indices.append(hard_indices)
+            copy_ids.append(np.full(len(hard_indices), copy_id, dtype=np.int16))
+
+        expanded_indices = np.concatenate(expanded_indices)
+        copy_ids = np.concatenate(copy_ids)
+        order = self._shuffle_without_adjacent_equal_base(expanded_indices, rng)
+        selected_copy_ids = copy_ids[order]
+        self._apply_sample_indices(expanded_indices[order])
+        self.hard_sample_oversample_copy_ids = selected_copy_ids
+
+        if self.rank == 0:
+            LOG.info(
+                "Hard sample oversampling: %d hard samples x%d, epoch size %d -> %d.",
+                int(hard_mask.sum()),
+                multiplier,
+                len(base_indices),
+                len(expanded_indices),
+            )
+
     def shuffle(self, epoch):
+        self.current_epoch = epoch
         rng = default_rng(seed=self.config.seed + epoch)
         np.random.seed(self.config.seed + epoch)
         random.seed(self.config.seed + epoch)
@@ -1282,6 +1480,7 @@ class CARLAData(Dataset):
         self.sample_start = []
         self.bucket_identity = []
         self.global_indices = []
+        self.hard_sample_oversample_copy_ids = []
 
         mixture_ratios = self.bucket_collection.buckets_mixture_per_epoch(epoch)
         for bucket_idx, bucket in enumerate(self.bucket_collection.buckets):
@@ -1326,6 +1525,7 @@ class CARLAData(Dataset):
                     self.sample_start.extend(bucket.sample_start[indices])
                     self.bucket_identity.extend([bucket_idx] * len(indices))
                     self.global_indices.extend(bucket.global_indices[indices])
+                    self.hard_sample_oversample_copy_ids.extend([0] * len(indices))
 
         if self.rank == 0:
             LOG.info(
@@ -1354,6 +1554,9 @@ class CARLAData(Dataset):
         self.sample_start = np.array(self.sample_start)
         self.bucket_identity = np.array(self.bucket_identity)
         self.global_indices = np.array(self.global_indices)
+        self.hard_sample_oversample_copy_ids = np.array(
+            self.hard_sample_oversample_copy_ids, dtype=np.int16
+        )
 
         if self.random:
             # Shuffle all arrays together
@@ -1392,25 +1595,9 @@ class CARLAData(Dataset):
                     f"Got {carla_dataset_fraction}."
                 )
 
-            self.bev_3rd_person_images = self.bev_3rd_person_images[indices]
-            self.images = self.images[indices]
-            self.images_perturbated = self.images_perturbated[indices]
-            self.semantics = self.semantics[indices]
-            self.semantics_perturbated = self.semantics_perturbated[indices]
-            self.bev_semantics = self.bev_semantics[indices]
-            self.bev_semantics_perturbated = self.bev_semantics_perturbated[indices]
-            self.depth = self.depth[indices]
-            self.depth_perturbated = self.depth_perturbated[indices]
-            self.lidars = self.lidars[indices]
-            self.radars = self.radars[indices]
-            self.radars_perturbated = self.radars_perturbated[indices]
-            self.bboxes = self.bboxes[indices]
-            self.metas = self.metas[indices]
-            self.route_dirs = self.route_dirs[indices]
-            self.route_indices = self.route_indices[indices]
-            self.sample_start = self.sample_start[indices]
-            self.bucket_identity = self.bucket_identity[indices]
-            self.global_indices = self.global_indices[indices]
+            self._apply_sample_indices(indices)
+
+        self._apply_hard_sample_oversampling(rng)
 
     def __len__(self):
         return self.lidars.shape[0]

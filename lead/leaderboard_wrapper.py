@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -366,6 +367,7 @@ class LeaderboardWrapper:
             )
         else:
             model_config = self._load_model_config(checkpoint_dir)
+            inference_device = str(model_config.get("inference_device", "")).lower()
             camera_lidar_sensor_tick_from_data_save_freq = self._config_bool_string(
                 model_config,
                 "camera_lidar_sensor_tick_from_data_save_freq",
@@ -378,7 +380,11 @@ class LeaderboardWrapper:
             )
             use_min_speed_infractions_in_score = self._config_bool_string(
                 model_config,
-                "use_min_speed_infractions_in_score",
+                (
+                    "USE_MIN_SPEED_INFRACTIONS_IN_SCORE"
+                    if "USE_MIN_SPEED_INFRACTIONS_IN_SCORE" in model_config
+                    else "use_min_speed_infractions_in_score"
+                ),
                 default=False,
             )
             reset_route_timer_after_first_agent_tick = self._config_bool_string(
@@ -396,6 +402,8 @@ class LeaderboardWrapper:
                     "LEAD_RESET_ROUTE_TIMER_AFTER_FIRST_AGENT_TICK": reset_route_timer_after_first_agent_tick,
                 }
             )
+            if inference_device == "cpu":
+                env_vars["CUDA_VISIBLE_DEVICES"] = ""
 
         # Apply to os.environ
         for key, value in env_vars.items():
@@ -474,6 +482,27 @@ class LeaderboardWrapper:
             f"{host}_{self.args.port}_{self.args.traffic_manager_port}.log"
         )
         return log_dir / log_name
+
+    @staticmethod
+    def _find_free_tcp_port() -> int:
+        """Ask the OS for an available local TCP port."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("", 0))
+            return int(sock.getsockname()[1])
+
+    def _resolve_traffic_manager_port(self) -> int:
+        """Resolve Traffic Manager port.
+
+        Port 0 means auto-select a free local port. This avoids crashes when the
+        default 8000 is still held by another CARLA/leaderboard process.
+        """
+        if self.args.traffic_manager_port != 0:
+            return self.args.traffic_manager_port
+
+        port = self._find_free_tcp_port()
+        LOG.info("Auto-selected Traffic Manager port: %s", port)
+        self.args.traffic_manager_port = port
+        return port
 
     def _run_process_with_optional_route_log(
         self,
@@ -575,6 +604,7 @@ class LeaderboardWrapper:
             )
         )
         self.leaderboard_type = leaderboard_type
+        traffic_manager_port = self._resolve_traffic_manager_port()
 
         # Setup environment
         root_output_dir = Path(self.args.output_dir) if self.args.output_dir else None
@@ -620,7 +650,7 @@ class LeaderboardWrapper:
             "--port",
             str(self.args.port),
             "--traffic-manager-port",
-            str(self.args.traffic_manager_port),
+            str(traffic_manager_port),
             "--traffic-manager-seed",
             str(self.args.traffic_manager_seed),
             "--repetitions",
@@ -785,7 +815,10 @@ Examples:
     )
     parser.add_argument("--port", type=int, default=2000, help="CARLA server port")
     parser.add_argument(
-        "--traffic-manager-port", type=int, default=8000, help="Traffic manager port"
+        "--traffic-manager-port",
+        type=int,
+        default=0,
+        help="Traffic manager port. Use 0 to auto-select a free local port.",
     )
     parser.add_argument(
         "--traffic-manager-seed", type=int, default=0, help="Traffic manager seed"

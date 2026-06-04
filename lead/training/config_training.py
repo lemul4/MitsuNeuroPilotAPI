@@ -419,6 +419,9 @@ class TrainingConfig(BaseConfig):
     jit_compile_mode = None
     jit_compile_warmup_steps = 0
     reset_route_timer_after_first_agent_tick = False
+    # Inference device for CARLA simulation: "cuda", "cuda:0", "cpu", or "auto".
+    # Training still uses the device property below.
+    inference_device = "cuda"
     model_inference_timing = False
     model_inference_timing_warmup_steps = 0
     save_inference_dataset = False
@@ -586,6 +589,19 @@ class TrainingConfig(BaseConfig):
         if self.carla_leaderboard_mode:
             return 0.2
         return 0.1
+
+    # If true, repeat hard CARLA samples in the training epoch.
+    hard_sample_oversampling = False
+    # Total number of times each hard sample appears in an epoch.
+    hard_sample_oversample_multiplier = 3
+    # Mark samples with light_hazard == True as hard.
+    hard_sample_oversample_light_hazard = True
+    # Mark samples whose raw CARLA command is not straight as hard.
+    hard_sample_oversample_non_straight_command = True
+    # Raw CARLA command value for Straight.
+    hard_sample_straight_command = 3
+    # Raw CARLA command values excluded from command-based hard oversampling.
+    hard_sample_excluded_commands = [3, 4]
 
     # Weight decay for regularization.
     weight_decay = 0.01
@@ -919,6 +935,8 @@ class TrainingConfig(BaseConfig):
     use_lidar = True
     use_radars = False
     disable_visual_artifacts = False
+    debug_boxes_visualization = True
+    preserve_scenario_weather = False
     camera_lidar_sensor_tick_from_data_save_freq = False
     sync_sensor_processing_with_save_freq = False
     sync_sensor_processing_with_data_save_freq = False
