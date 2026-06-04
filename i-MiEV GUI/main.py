@@ -9,7 +9,7 @@ import os
 import time
 import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer, QObject, Slot, QThread, Signal 
+from PySide6.QtCore import QTimer, QObject, Slot, QThread, Signal, qInstallMessageHandler 
 from datetime import datetime
 from config import PHYSICS_UPDATE_RATE_MS
 from ui.main_window import MainWindow
@@ -38,7 +38,20 @@ from core.telemetry import TelemetryRecorder, RawTelemetryJsonlReader
 from lead_integration import LeadAgentThread
 from PySide6.QtGui import QPixmap, QImage
 
-import zmq 
+import zmq
+# --- MITSU_QT_FONT_WARNING_FILTER_BEGIN ---
+def _mitsu_qt_message_handler(mode, context, message):
+    msg = str(message)
+    if msg.startswith("QFont::setPointSize: Point size <= 0"):
+        return
+    try:
+        sys.__stderr__.write(msg + "\\n")
+    except Exception:
+        pass
+
+qInstallMessageHandler(_mitsu_qt_message_handler)
+# --- MITSU_QT_FONT_WARNING_FILTER_END ---
+ 
 
 try:
     from hardware.camera_zmq import (
