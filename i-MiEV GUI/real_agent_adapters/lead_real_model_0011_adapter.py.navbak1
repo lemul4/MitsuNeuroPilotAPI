@@ -288,41 +288,25 @@ class RealModel0011InputBuilder:
         telemetry = context.get("telemetry")
         goal = context.get("goal")
 
-        def _as_pair(value, default):
-            try:
-                return [float(value[0]), float(value[1])]
-            except Exception:
-                return list(default)
-
-        # Preferred path: main.py already converted navigator prev/target/next
-        # into ego-local points. Keep all three points in the same frame:
-        # ego vehicle == [0, 0], x forward, y lateral.
-        if context.get("target_point_ego") is not None:
-            previous = _as_pair(context.get("target_point_previous_ego"), [0.0, 0.0])
-            target = _as_pair(context.get("target_point_ego"), [0.0, 0.0])
-            next_point = _as_pair(context.get("target_point_next_ego"), target)
-
-        elif goal is not None:
+        if goal is not None:
             ego_x = _as_float(_read_attr_or_key(telemetry, "x_m", 0.0))
             ego_y = _as_float(_read_attr_or_key(telemetry, "y_m", 0.0))
             ego_yaw = _as_float(_read_attr_or_key(telemetry, "yaw_deg", 0.0))
 
-            target_x = _as_float(_read_attr_or_key(goal, "target_x_m", 0.0))
-            target_y = _as_float(_read_attr_or_key(goal, "target_y_m", 0.0))
+            target = _world_to_ego_local(
+                _as_float(_read_attr_or_key(goal, "target_x_m", 0.0)),
+                _as_float(_read_attr_or_key(goal, "target_y_m", 0.0)),
+                ego_x,
+                ego_y,
+                ego_yaw,
+            )
 
-            previous_x = _as_float(_read_attr_or_key(goal, "previous_x_m", ego_x))
-            previous_y = _as_float(_read_attr_or_key(goal, "previous_y_m", ego_y))
-            next_x = _as_float(_read_attr_or_key(goal, "next_x_m", target_x))
-            next_y = _as_float(_read_attr_or_key(goal, "next_y_m", target_y))
-
-            previous = _world_to_ego_local(previous_x, previous_y, ego_x, ego_y, ego_yaw)
-            target = _world_to_ego_local(target_x, target_y, ego_x, ego_y, ego_yaw)
-            next_point = _world_to_ego_local(next_x, next_y, ego_x, ego_y, ego_yaw)
-
+            previous = context.get("target_point_previous_ego", [0.0, 0.0])
+            next_point = context.get("target_point_next_ego", target)
         else:
-            previous = _as_pair(context.get("target_point_previous"), [0.0, 0.0])
-            target = _as_pair(context.get("target_point"), [0.0, 0.0])
-            next_point = _as_pair(context.get("target_point_next"), target)
+            previous = context.get("target_point_previous", [0.0, 0.0])
+            target = context.get("target_point", [0.0, 0.0])
+            next_point = context.get("target_point_next", target)
 
         previous = np.asarray(previous, dtype=np.float32).reshape(2)
         target = np.asarray(target, dtype=np.float32).reshape(2)

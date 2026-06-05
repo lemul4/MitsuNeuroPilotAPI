@@ -744,101 +744,26 @@ class AppController(QObject):
     def _build_real_agent_context(self):
         if self.vehicle_control is None or RealAgentBridge is None:
             return {}
-
         telemetry = self.vehicle_control.get_telemetry()
         goal = self.vehicle_control.get_current_goal() if hasattr(self.vehicle_control, "get_current_goal") else None
         payload = RealAgentBridge.build_model_command_payload(goal)
-
-        def _as_float(value, default=0.0):
-            try:
-                return float(value)
-            except Exception:
-                return float(default)
-
-        def _world_to_ego(point_x, point_y):
-            # Model input convention:
-            #   ego/current vehicle position == [0, 0]
-            #   x = forward from vehicle
-            #   y = lateral from vehicle
-            import math
-
-            ego_x = _as_float(getattr(telemetry, "x_m", 0.0))
-            ego_y = _as_float(getattr(telemetry, "y_m", 0.0))
-            ego_yaw = math.radians(_as_float(getattr(telemetry, "yaw_deg", 0.0)))
-
-            dx = _as_float(point_x) - ego_x
-            dy = _as_float(point_y) - ego_y
-            cos_yaw = math.cos(ego_yaw)
-            sin_yaw = math.sin(ego_yaw)
-
-            forward = cos_yaw * dx + sin_yaw * dy
-            lateral = -sin_yaw * dx + cos_yaw * dy
-            return [float(forward), float(lateral)]
-
-        target_point_previous = [0.0, 0.0]
         target_point = [0.0, 0.0]
         target_point_next = [0.0, 0.0]
-
-        previous_world = None
-        target_world = None
-        next_world = None
-
+        target_point_previous = [0.0, 0.0]
         if goal is not None and getattr(goal, "is_valid", lambda: False)():
-            target_world = [
-                _as_float(getattr(goal, "target_x_m", 0.0)),
-                _as_float(getattr(goal, "target_y_m", 0.0)),
-            ]
-
-            previous_world = [
-                _as_float(getattr(goal, "previous_x_m", getattr(telemetry, "x_m", target_world[0]))),
-                _as_float(getattr(goal, "previous_y_m", getattr(telemetry, "y_m", target_world[1]))),
-            ]
-
-            next_world = [
-                _as_float(getattr(goal, "next_x_m", target_world[0])),
-                _as_float(getattr(goal, "next_y_m", target_world[1])),
-            ]
-
-            target_point_previous = _world_to_ego(previous_world[0], previous_world[1])
-            target_point = _world_to_ego(target_world[0], target_world[1])
-            target_point_next = _world_to_ego(next_world[0], next_world[1])
-
-            if os.environ.get("MITSU_DEBUG_NAV_EGO", "0").lower() in {"1", "true", "yes", "on"}:
-                now = time.monotonic()
-                last = float(getattr(self, "_last_nav_ego_debug_ts", 0.0) or 0.0)
-                if now - last >= 1.0:
-                    self._last_nav_ego_debug_ts = now
-                    print(
-                        "REAL AGENT NAV EGO: "
-                        f"pose=({getattr(telemetry, 'x_m', 0.0):.2f},"
-                        f"{getattr(telemetry, 'y_m', 0.0):.2f},"
-                        f"{getattr(telemetry, 'yaw_deg', 0.0):.1f}) "
-                        f"prev={target_point_previous} "
-                        f"target={target_point} "
-                        f"next={target_point_next}"
-                    )
-
+            # target_* are already in the real local route frame. A concrete model
+            # adapter may rotate them into ego coordinates if its checkpoint requires it.
+            target_point = [float(goal.target_x_m), float(goal.target_y_m)]
+            target_point_next = target_point
+            target_point_previous = [float(telemetry.x_m), float(telemetry.y_m)]
         return {
             "telemetry": telemetry,
             "goal": goal,
             "speed_kmh": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0),
             "speed_mps": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0) / 3.6,
-
-            # Ego-local model inputs.
-            "target_point_previous": target_point_previous,
             "target_point": target_point,
             "target_point_next": target_point_next,
-
-            # Explicit aliases used by lead_real_model_0011_adapter.
-            "target_point_previous_ego": target_point_previous,
-            "target_point_ego": target_point,
-            "target_point_next_ego": target_point_next,
-
-            # Raw route/world points for debugging only.
-            "target_point_previous_world": previous_world,
-            "target_point_world": target_world,
-            "target_point_next_world": next_world,
-
+            "target_point_previous": target_point_previous,
             **payload,
         }
 
