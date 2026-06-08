@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
+
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "protocol_whitelist;file,rtp,udp,crypto,data")
 
 import cv2
 import numpy as np
@@ -23,6 +28,9 @@ class CameraSpec:
     width: int = 1280
     height: int = 720
     fps: float = 30.0
+    udp_port: Optional[int] = None
+    zmq_port: Optional[int] = None
+    relay_port: Optional[int] = None
     enabled: bool = True
 
     @classmethod
@@ -37,6 +45,9 @@ class CameraSpec:
             width=int(d.get("width", 1280) or 1280),
             height=int(d.get("height", 720) or 720),
             fps=float(d.get("fps", 30.0) or 30.0),
+            udp_port=int(d["udp_port"]) if d.get("udp_port") is not None else None,
+            zmq_port=int(d["zmq_port"]) if d.get("zmq_port") is not None else None,
+            relay_port=int(d["relay_port"]) if d.get("relay_port") is not None else None,
             enabled=bool(d.get("enabled", True)),
         )
 
@@ -49,6 +60,9 @@ class CameraWorker(threading.Thread):
         self.lock = lock
         self.running = False
         self.capture = None
+        self.ffmpeg_process = None
+        self.relay_thread = None
+        self.relay_running = False
         self.frame_count = 0
         self.last_error = ""
 
@@ -56,6 +70,8 @@ class CameraWorker(threading.Thread):
         source = self.spec.source
         if isinstance(source, str) and source.isdigit():
             source = int(source)
+        if isinstance(source, str) and source.lower().endswith(".sdp"):
+            os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "protocol_whitelist;file,rtp,udp,crypto,data")
         cap = cv2.VideoCapture(source)
         try:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.spec.width)
@@ -66,10 +82,148 @@ class CameraWorker(threading.Thread):
             pass
         return cap
 
+    def start_udp_relay(self):
+        relay_port = self.spec.relay_port
+        if relay_port is None or not isinstance(self.spec.source, str):
+            return
+        if self.relay_thread is not None:
+            return
+
+        listen_port = None
+        try:
+            listen_port = int(getattr(self.spec, "udp_port", 0))
+        except Exception:
+            listen_port = None
+        if not listen_port:
+            return
+
+        self.relay_running = True
+
+        def _relay():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SIO_UDP_CONNRESET"):
+                try:
+                    sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+                except Exception:
+                    pass
+            sock.bind(("0.0.0.0", int(listen_port)))
+            sock.settimeout(0.5)
+            target = ("127.0.0.1", int(relay_port))
+            print(f"[REAL_CAMERA] {self.spec.name}: UDP relay :{listen_port} -> 127.0.0.1:{relay_port}", flush=True)
+            count = 0
+            last_report = time.monotonic()
+            try:
+                while self.relay_running:
+                    try:
+                        data, _addr = sock.recvfrom(65535)
+                    except socket.timeout:
+                        continue
+                    except ConnectionResetError:
+                        continue
+                    sock.sendto(data, target)
+                    count += 1
+                    now = time.monotonic()
+                    if now - last_report >= 5.0:
+                        last_report = now
+                        print(f"[REAL_CAMERA] {self.spec.name}: relayed UDP packets={count}", flush=True)
+            finally:
+                sock.close()
+
+        self.relay_thread = threading.Thread(target=_relay, daemon=True)
+        self.relay_thread.start()
+
+    def open_ffmpeg(self):
+        try:
+            import imageio_ffmpeg
+        except Exception as exc:
+            self.last_error = f"imageio-ffmpeg unavailable: {exc}"
+            return None
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        command = [
+            exe,
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-protocol_whitelist",
+            "file,rtp,udp,crypto,data",
+            "-analyzeduration",
+            "30000000",
+            "-probesize",
+            "30000000",
+            "-reorder_queue_size",
+            "500",
+            "-i",
+            str(self.spec.source),
+            "-an",
+            "-vf",
+            f"scale={int(self.spec.width)}:{int(self.spec.height)}",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+        try:
+            log_path = Path(f"camera_service.{self.spec.name}.ffmpeg.log")
+            log_file = open(log_path, "ab", buffering=0)
+            return subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=log_file,
+                cwd=str(Path.cwd()),
+                bufsize=10**7,
+            )
+        except Exception as exc:
+            self.last_error = f"cannot start ffmpeg: {exc}"
+            return None
+
+    def read_ffmpeg_frame(self):
+        process = self.ffmpeg_process
+        if process is None or process.stdout is None:
+            return None
+        frame_size = int(self.spec.width) * int(self.spec.height) * 3
+        data = process.stdout.read(frame_size)
+        if len(data) != frame_size:
+            return None
+        return np.frombuffer(data, dtype=np.uint8).reshape((int(self.spec.height), int(self.spec.width), 3)).copy()
+
     def run(self):
         self.running = True
         reconnect_delay = 1.0
+        use_ffmpeg = isinstance(self.spec.source, str) and self.spec.source.lower().endswith(".sdp")
+        if use_ffmpeg:
+            self.start_udp_relay()
         while self.running:
+            if use_ffmpeg:
+                if self.ffmpeg_process is None or self.ffmpeg_process.poll() is not None:
+                    self.ffmpeg_process = self.open_ffmpeg()
+                    if self.ffmpeg_process is None:
+                        time.sleep(reconnect_delay)
+                        continue
+                    print(f"[REAL_CAMERA] {self.spec.name}: opened {self.spec.source} with ffmpeg", flush=True)
+
+                frame = self.read_ffmpeg_frame()
+                if frame is None:
+                    self.last_error = "ffmpeg read failed"
+                    try:
+                        self.ffmpeg_process.kill()
+                    except Exception:
+                        pass
+                    self.ffmpeg_process = None
+                    time.sleep(reconnect_delay)
+                    continue
+
+                with self.lock:
+                    self.latest_frames[self.spec.name] = {
+                        "frame": frame,
+                        "ts": time.monotonic(),
+                        "spec": self.spec,
+                    }
+                self.frame_count += 1
+                continue
+
             if self.capture is None or not self.capture.isOpened():
                 self.capture = self.open_capture()
                 if not self.capture.isOpened():
@@ -102,9 +256,16 @@ class CameraWorker(threading.Thread):
                 self.capture.release()
             except Exception:
                 pass
+        if self.ffmpeg_process is not None:
+            try:
+                self.ffmpeg_process.kill()
+            except Exception:
+                pass
+        self.relay_running = False
 
     def stop(self):
         self.running = False
+        self.relay_running = False
 
 
 class DualRealCameraService:
@@ -130,6 +291,7 @@ class DualRealCameraService:
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.PUB)
         self.socket.setsockopt(zmq.LINGER, 0)
+        self.cell_sockets = {}
 
     @staticmethod
     def _load_config(path: Path) -> dict:
@@ -152,6 +314,13 @@ class DualRealCameraService:
     def start(self):
         self.socket.bind(f"tcp://*:{self.zmq_port}")
         for spec in self._camera_specs():
+            port = self._zmq_port_for(spec)
+            if port is not None:
+                socket = self.context.socket(zmq.PUB)
+                socket.setsockopt(zmq.LINGER, 0)
+                socket.bind(f"tcp://*:{port}")
+                self.cell_sockets[spec.name] = socket
+                print(f"[REAL_CAMERA] {spec.name}: publishing cell on tcp://127.0.0.1:{port}")
             worker = CameraWorker(spec, self.latest_frames, self.lock)
             self.workers.append(worker)
             worker.start()
@@ -168,6 +337,12 @@ class DualRealCameraService:
         try:
             self.socket.close()
         finally:
+            for socket in list(self.cell_sockets.values()):
+                try:
+                    socket.close(0)
+                except Exception:
+                    pass
+            self.cell_sockets = {}
             self.context.term()
 
     def _publish_loop(self):
@@ -178,6 +353,7 @@ class DualRealCameraService:
                 with self.lock:
                     snapshot = dict(self.latest_frames)
                 mosaic = self._compose(snapshot)
+                self._publish_cells(snapshot)
                 if mosaic is not None:
                     ok, buf = cv2.imencode(".jpg", mosaic, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
                     if ok:
@@ -191,6 +367,31 @@ class DualRealCameraService:
             pass
         finally:
             self.stop()
+
+    def _publish_cells(self, snapshot: Dict[str, dict]) -> None:
+        for name, item in snapshot.items():
+            socket = self.cell_sockets.get(name)
+            if socket is None:
+                continue
+            frame = item.get("frame")
+            if frame is None:
+                continue
+            spec = item.get("spec")
+            if spec is not None:
+                frame = self._fit_cover(frame, spec.width, spec.height)
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+            if ok:
+                socket.send(buf.tobytes())
+
+    @staticmethod
+    def _zmq_port_for(spec: CameraSpec) -> Optional[int]:
+        value = getattr(spec, "zmq_port", None)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
 
     def _compose(self, snapshot: Dict[str, dict]) -> Optional[np.ndarray]:
         wide = self._find_by_role(snapshot, "wide") or self._find_by_role(snapshot, "front_wide")

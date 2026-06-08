@@ -26,7 +26,7 @@
     ],
     "use_lidar": false,
     "use_radars": false,
-    "disable_visual_artifacts": false,
+    "disable_visual_artifacts": true,
     "preserve_scenario_weather": true,
     "camera_lidar_sensor_tick_from_data_save_freq": false,
     "sync_sensor_processing_with_save_freq": false,

@@ -1,0 +1,49 @@
+{
+  "backend": "zmq",
+  "publish_fps": 15,
+  "jpeg_quality": 82,
+  "output_width": 1280,
+  "output_height": 720,
+  "bind_address": "192.168.11.1",
+  "cameras": {
+    "camera_1_wide": {
+      "enabled": true,
+      "role": "front_wide",
+      "source": "config/camera_1_wide_h265.sdp",
+      "zmq_port": 5556,
+      "lens_mm": 2.8,
+      "fov_deg": 90,
+      "udp_port": 5601,
+      "relay_port": 6601,
+      "width": 1280,
+      "height": 720
+    },
+    "camera_2_narrow": {
+      "enabled": true,
+      "role": "front_narrow",
+      "source": "config/camera_2_narrow_h265.sdp",
+      "zmq_port": 5557,
+      "lens_mm": 6,
+      "fov_deg": 50,
+      "udp_port": 5602,
+      "width": 1280,
+      "height": 720
+    },
+    "camera_3": {
+      "enabled": false,
+      "role": "aux_3",
+      "source": "config/camera_3_h265.sdp",
+      "udp_port": 5603,
+      "width": 1280,
+      "height": 720
+    },
+    "camera_4": {
+      "enabled": false,
+      "role": "aux_4",
+      "source": "config/camera_4_h265.sdp",
+      "udp_port": 5604,
+      "width": 1280,
+      "height": 720
+    }
+  }
+}

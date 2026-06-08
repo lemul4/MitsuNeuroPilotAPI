@@ -1,0 +1,10 @@
+v=0
+o=- 0 0 IN IP4 192.168.11.1
+s=Mitsu camera 1 wide H265
+c=IN IP4 0.0.0.0
+t=0 0
+m=video 6601 RTP/AVP 97
+a=rtpmap:97 H265/90000
+a=rtcp:6701 IN IP4 0.0.0.0
+a=rtcp-mux
+a=recvonly
