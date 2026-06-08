@@ -42,6 +42,9 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
         self.telemetry = VehicleTelemetry()
         self.descriptor: Optional[DeviceDescriptor] = None
         self._connected_event = asyncio.Event()
+        self._rx_packet_count = 0
+        self._mapped_packet_count = 0
+        self._last_packet_can_id: Optional[int] = None
         try:
             self.serial.data_received.connect(self.handle_can_packet)
             self.serial.connection_status.connect(self._handle_connection_status)
@@ -62,8 +65,8 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
             if not getattr(self.serial, "running", False):
                 raise VehicleAdapterError(f"Cannot connect to {descriptor.port}")
         self.telemetry.connected = True
-        self.telemetry.heartbeat_ok = True
-        self.telemetry.last_rx_monotonic = time.monotonic()
+        self.telemetry.heartbeat_ok = False
+        self.telemetry.pose_source = f"{descriptor.port}:no_packets"
 
     async def disconnect(self) -> None:
         self.serial.close()
@@ -76,6 +79,13 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
             # Host-side dry-run guard. The GUI/control stack can exercise the full
             # pipeline, but no active acceleration or gear request is emitted unless
             # MITSU_REAL_ENABLE_ACTUATION=1 and dry_run=false in safety config.
+            if command.active or command.gear_request is not None or getattr(command, "send_cruise_frame", False):
+                print(
+                    "REAL CONTROL: host dry-run blocked physical command "
+                    f"reason={command.reason}; "
+                    f"actuation_allowed={self.safety_config.actuation_allowed}; "
+                    f"dry_run={self.safety_config.dry_run}"
+                )
             command_to_send = VehicleCommand.safe_stop(seq=command.seq, brake_pct=max(25, int(command.brake_pct)), reason="host_dry_run_guard")
         self.gateway.write_vehicle_command_now(command_to_send)
         self.telemetry.requested_gear = command.gear_request or self.telemetry.requested_gear
@@ -89,8 +99,6 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
     def _handle_connection_status(self, connected: bool, message: str) -> None:
         self.telemetry.connected = bool(connected)
         if connected:
-            self.telemetry.heartbeat_ok = True
-            self.telemetry.last_rx_monotonic = time.monotonic()
             try:
                 self._connected_event.set()
             except Exception:
@@ -102,11 +110,23 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
         try:
             can_id = int(pkt.CAN_ID)
             data = pkt.CAN_DATA.DATA
-            self.telemetry_parser.apply_packet(can_id, data, self.telemetry)
+            self._rx_packet_count += 1
+            self._last_packet_can_id = can_id
+            if self.telemetry_parser.apply_packet(can_id, data, self.telemetry):
+                self._mapped_packet_count += 1
             self.telemetry.last_rx_monotonic = time.monotonic()
             self.telemetry.heartbeat_ok = True
         except Exception as exc:
             self.telemetry.fault = str(exc)
+
+    def get_diagnostics(self) -> Dict[str, object]:
+        return {
+            "connected": bool(self.telemetry.connected),
+            "heartbeat_ok": bool(self.telemetry.heartbeat_ok),
+            "rx_packet_count": int(self._rx_packet_count),
+            "mapped_packet_count": int(self._mapped_packet_count),
+            "last_packet_can_id": self._last_packet_can_id,
+        }
 
 
 class MockVehicleAdapter(BaseVehicleAdapter):

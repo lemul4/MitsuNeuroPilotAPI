@@ -65,6 +65,15 @@ except Exception as _camera_zmq_import_error:
     RealCameraAgentAnalyzerThread = None
 
 try:
+    from hardware.gstreamer_udp_camera import (
+        GStreamerUdpH265ReceiverThread,
+        UdpH265CameraSpec,
+    )
+except Exception as _gstreamer_udp_import_error:
+    GStreamerUdpH265ReceiverThread = None
+    UdpH265CameraSpec = None
+
+try:
     from hardware.pose_provider import JsonPoseProviderThread
 except Exception:
     JsonPoseProviderThread = None
@@ -459,6 +468,8 @@ class AppController(QObject):
         self.view.manual_input_updated.connect(self.handle_manual_input)
         self.view.telemetry_toggled.connect(self.handle_telemetry_toggle)
         self.view.ai_toggled.connect(self.handle_ai_toggle)
+        if hasattr(self.view, "manual_toggled"):
+            self.view.manual_toggled.connect(self.handle_manual_toggle)
 
         # Новый UI отправляет один список: 1 маршрут => одиночный запуск, N маршрутов => очередь.
         # Старые сигналы single/queue оставлены как fallback, но основной путь — route_launch_requested.
@@ -600,28 +611,112 @@ class AppController(QObject):
                 return value
         return ""
 
-    def _load_real_camera_ports(self):
+    def _load_real_camera_config(self):
         config_path = self._real_camera_config_path()
-        ports = {"wide_90": 5556, "narrow_50": 5557}
         if not config_path:
-            return ports
+            return {}
         try:
             with open(config_path, "r", encoding="utf-8") as file:
-                payload = json.load(file)
-            for name, data in (payload.get("cameras") or {}).items():
-                role = str(data.get("role") or name).lower()
-                port = data.get("zmq_port")
-                if port is None:
-                    continue
-                if "wide" in role:
-                    ports["wide_90"] = int(port)
-                elif "narrow" in role:
-                    ports["narrow_50"] = int(port)
+                return json.load(file)
         except Exception as exc:
-            print(f"REAL CAMERA: cannot read camera ports: {exc}")
+            print(f"REAL CAMERA: cannot read config: {exc}")
+            return {}
+
+    def _real_camera_backend(self):
+        env_value = os.environ.get("MITSU_REAL_CAMERA_BACKEND", "").strip().lower()
+        if env_value:
+            return env_value
+        payload = self._load_real_camera_config()
+        value = str(payload.get("backend") or payload.get("camera_backend") or "").strip().lower()
+        return value or "zmq"
+
+    def _load_real_camera_ports(self):
+        ports = {"wide_90": 5556, "narrow_50": 5557}
+        payload = self._load_real_camera_config()
+        for name, data in (payload.get("cameras") or {}).items():
+            role = str(data.get("role") or name).lower()
+            port = data.get("zmq_port")
+            if port is None:
+                continue
+            if "wide" in role:
+                ports["wide_90"] = int(port)
+            elif "narrow" in role:
+                ports["narrow_50"] = int(port)
         return ports
 
+    def _load_udp_h265_camera_specs(self):
+        if UdpH265CameraSpec is None:
+            return []
+        payload = self._load_real_camera_config()
+        decoder = str(
+            os.environ.get("MITSU_GSTREAMER_H265_DECODER")
+            or payload.get("decoder")
+            or payload.get("h265_decoder")
+            or "avdec_h265"
+        ).strip()
+        default_payload = int(payload.get("rtp_payload", 96) or 96)
+        jitter_latency_ms = int(payload.get("jitter_latency_ms", 0) or 0)
+
+        specs = []
+        cameras = payload.get("cameras") or {}
+        if cameras:
+            for index, (name, data) in enumerate(cameras.items(), start=1):
+                if not bool(data.get("enabled", True)):
+                    continue
+                port = data.get("udp_port", data.get("port"))
+                if port is None:
+                    continue
+                role = str(data.get("role") or name)
+                role_l = role.lower()
+                if "wide" in role_l:
+                    ui_name = "wide_90"
+                elif "narrow" in role_l:
+                    ui_name = "narrow_50"
+                else:
+                    ui_name = str(data.get("ui_name") or f"camera_{index}")
+                specs.append(UdpH265CameraSpec(
+                    name=ui_name,
+                    port=int(port),
+                    role=role,
+                    decoder=str(data.get("decoder") or decoder),
+                    payload=int(data.get("payload", default_payload) or default_payload),
+                    width=int(data.get("width", 1280) or 1280),
+                    height=int(data.get("height", 720) or 720),
+                    jitter_latency_ms=int(data.get("jitter_latency_ms", jitter_latency_ms) or 0),
+                ))
+        if specs:
+            return specs
+        return [
+            UdpH265CameraSpec("wide_90", 5601, role="front_wide", decoder=decoder),
+            UdpH265CameraSpec("narrow_50", 5602, role="front_narrow", decoder=decoder),
+            UdpH265CameraSpec("camera_3", 5603, role="aux_3", decoder=decoder),
+            UdpH265CameraSpec("camera_4", 5604, role="aux_4", decoder=decoder),
+        ]
+
     def _start_real_camera_stack(self):
+        backend = self._real_camera_backend()
+        if backend in {"gstreamer_udp", "udp_h265", "gst_udp_h265", "gstreamer"}:
+            if GStreamerUdpH265ReceiverThread is None or UdpH265CameraSpec is None:
+                print("REAL CAMERA: gstreamer_udp module unavailable")
+                return
+            specs = self._load_udp_h265_camera_specs()
+            if not specs:
+                print("REAL CAMERA: no UDP/H265 camera specs")
+                return
+            if not self.real_camera_receivers:
+                for spec in specs:
+                    receiver = GStreamerUdpH265ReceiverThread(spec)
+                    if str(spec.name) in {"wide_90", "narrow_50"}:
+                        receiver.frame_received.connect(self.view.update_real_camera_cell)
+                    receiver.status_changed.connect(self.handle_real_camera_cell_status)
+                    self.real_camera_receivers.append(receiver)
+                    receiver.start()
+                print(
+                    "REAL CAMERA: GStreamer UDP/H265 receivers started: "
+                    + ", ".join(f"{spec.name}@:{spec.port}" for spec in specs)
+                )
+            return
+
         if ZmqCameraCellReceiverThread is None or CameraZmqConfig is None:
             print("REAL CAMERA: camera_zmq module unavailable")
             return
@@ -1133,12 +1228,26 @@ class AppController(QObject):
                 "message": "Real vehicle control modules unavailable",
             }
         if is_active:
+            manual_enabled = bool(
+                hasattr(self.view, "is_manual_control_enabled")
+                and self.view.is_manual_control_enabled()
+            )
+            try:
+                self.vehicle_control.set_manual_mode_enabled(manual_enabled)
+            except Exception:
+                pass
+            if manual_enabled:
+                self.ai_control_requested = False
+                try:
+                    self.vehicle_control.set_ai_preview_enabled(False)
+                except Exception:
+                    pass
             ok = await self.vehicle_control.activate_control()
             return {
                 "ok": bool(ok),
                 "requested": True,
                 "active": bool(ok),
-                "message": "AI control active" if ok else "Activation blocked",
+                "message": ("Manual control active" if manual_enabled else "AI control active") if ok else "Activation blocked",
             }
         current_state = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
         park = not (current_state is not None and getattr(current_state, "value", str(current_state)) == "AI_ACTIVE")
@@ -1332,6 +1441,24 @@ class AppController(QObject):
             self.view.statusBar().showMessage("AI Control выключен")
             if hasattr(self.view, "set_route_runtime_state"):
                 self.view.set_route_runtime_state("selected", "AI Control выключен")
+
+    def handle_manual_toggle(self, is_active):
+        self.manual_control_requested = bool(is_active)
+        if self.runtime_mode != "real":
+            return
+        if self.vehicle_control is not None:
+            self.vehicle_control.set_manual_mode_enabled(bool(is_active))
+        if bool(is_active):
+            self.ai_control_requested = False
+            if self.real_agent_analyzer is not None:
+                self.real_agent_analyzer.set_ai_enabled(False)
+            if self.vehicle_control is not None:
+                self.vehicle_control.set_ai_preview_enabled(False)
+            if hasattr(self.view, "set_ai_checkbox"):
+                self.view.set_ai_checkbox(False)
+            self.view.statusBar().showMessage("Manual control enabled: mission/pose/cameras/AI Preview are not required")
+        else:
+            self.view.statusBar().showMessage("Manual control disabled")
 
     def _start_carla_motion_monitor(self):
         self._stop_carla_motion_monitor()
@@ -2197,7 +2324,9 @@ class AppController(QObject):
             # In real/mock mode manual commands are available after AI authority
             # has been disengaged. While AI is active, keyboard input is ignored
             # rather than mixed into the autonomy command stream.
-            if self.control_active:
+            state = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+            state_text = getattr(state, "value", str(state or ""))
+            if self.control_active and state_text != "MANUAL_ACTIVE":
                 return
             self._schedule_async(self.vehicle_control.submit_manual_command(angle, accel, brake), "real_manual_command")
             return
@@ -2215,7 +2344,9 @@ class AppController(QObject):
         if self.runtime_mode == "real":
             if self.vehicle_control is None or not self.is_connected:
                 return
-            if self.control_active:
+            state = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+            state_text = getattr(state, "value", str(state or ""))
+            if self.control_active and state_text != "MANUAL_ACTIVE":
                 now = time.monotonic()
                 if now - self._last_real_gear_ignore_log_at > 1.0:
                     self._last_real_gear_ignore_log_at = now

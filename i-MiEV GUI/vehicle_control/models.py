@@ -187,6 +187,7 @@ class VehicleCommand:
     accel_pct: int = 0
     brake_pct: int = 0
     cruise_enabled: bool = False
+    send_cruise_frame: bool = False
     valid_for_ms: int = 100
     reason: str = ""
 
