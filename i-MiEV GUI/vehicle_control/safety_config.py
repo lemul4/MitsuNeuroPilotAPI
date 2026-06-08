@@ -25,6 +25,10 @@ class RealVehicleSafetyConfig:
     max_accel_pct: int = 10
     max_brake_pct: int = 80
     max_steering_raw: int = 60
+    manual_accel_rise_pct_per_sec: float = 35.0
+    manual_accel_fall_pct_per_sec: float = 80.0
+    manual_brake_rise_pct_per_sec: float = 120.0
+    manual_brake_fall_pct_per_sec: float = 160.0
     command_timeout_ms: int = 100
     gear_confirm_timeout_sec: float = 2.0
     park_speed_threshold_kmh: float = 0.25
@@ -45,6 +49,10 @@ class RealVehicleSafetyConfig:
             max_accel_pct=int(d.get("max_accel_pct", 10)),
             max_brake_pct=int(d.get("max_brake_pct", 80)),
             max_steering_raw=int(d.get("max_steering_raw", 60)),
+            manual_accel_rise_pct_per_sec=float(d.get("manual_accel_rise_pct_per_sec", 35.0)),
+            manual_accel_fall_pct_per_sec=float(d.get("manual_accel_fall_pct_per_sec", 80.0)),
+            manual_brake_rise_pct_per_sec=float(d.get("manual_brake_rise_pct_per_sec", 120.0)),
+            manual_brake_fall_pct_per_sec=float(d.get("manual_brake_fall_pct_per_sec", 160.0)),
             command_timeout_ms=int(d.get("command_timeout_ms", 100)),
             gear_confirm_timeout_sec=float(d.get("gear_confirm_timeout_sec", 2.0)),
             park_speed_threshold_kmh=float(d.get("park_speed_threshold_kmh", 0.25)),
@@ -74,6 +82,18 @@ class RealVehicleSafetyConfig:
         env_dry_run = os.environ.get("MITSU_REAL_DRY_RUN", "").strip().lower()
         if env_dry_run:
             cfg = cls.from_dict({**cfg.__dict__, "dry_run": env_dry_run not in {"0", "false", "no", "off"}})
+        env_accel_rise = os.environ.get("MITSU_MANUAL_ACCEL_RISE_PCT_PER_SEC", "").strip()
+        if env_accel_rise:
+            cfg = cls.from_dict({**cfg.__dict__, "manual_accel_rise_pct_per_sec": float(env_accel_rise)})
+        env_accel_fall = os.environ.get("MITSU_MANUAL_ACCEL_FALL_PCT_PER_SEC", "").strip()
+        if env_accel_fall:
+            cfg = cls.from_dict({**cfg.__dict__, "manual_accel_fall_pct_per_sec": float(env_accel_fall)})
+        env_brake_rise = os.environ.get("MITSU_MANUAL_BRAKE_RISE_PCT_PER_SEC", "").strip()
+        if env_brake_rise:
+            cfg = cls.from_dict({**cfg.__dict__, "manual_brake_rise_pct_per_sec": float(env_brake_rise)})
+        env_brake_fall = os.environ.get("MITSU_MANUAL_BRAKE_FALL_PCT_PER_SEC", "").strip()
+        if env_brake_fall:
+            cfg = cls.from_dict({**cfg.__dict__, "manual_brake_fall_pct_per_sec": float(env_brake_fall)})
         return cfg
 
     @property
@@ -84,5 +104,7 @@ class RealVehicleSafetyConfig:
         return (
             f"profile={self.profile_name}; dry_run={self.dry_run}; "
             f"actuation_allowed={self.actuation_allowed}; max_speed={self.max_speed_kmh:.1f}km/h; "
-            f"max_accel={self.max_accel_pct}%; max_steer={self.max_steering_raw}"
+            f"max_accel={self.max_accel_pct}%; max_steer={self.max_steering_raw}; "
+            f"manual_rates accel+={self.manual_accel_rise_pct_per_sec:.1f}%/s "
+            f"brake+={self.manual_brake_rise_pct_per_sec:.1f}%/s"
         )

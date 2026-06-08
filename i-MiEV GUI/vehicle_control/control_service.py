@@ -87,6 +87,9 @@ class VehicleControlService(QObject):
         self._last_external_intent: Optional[ControlIntent] = None
         self._last_goal = None
         self.external_intent_max_age_ms = 150.0
+        self._manual_last_update_monotonic: Optional[float] = None
+        self._manual_accel_pct = 0.0
+        self._manual_brake_pct = 0.0
 
     def _schedule_coro_threadsafe(self, coro, label="vehicle control task"):
         try:
@@ -190,10 +193,34 @@ class VehicleControlService(QObject):
         # preconditions. It still requires a connected vehicle controller with a
         # live heartbeat and normal safety checks before Drive can be armed.
         self._refresh_readiness_state()
+        if not enabled:
+            self._reset_manual_pedal_slew()
         self._log("Manual mode enabled" if enabled else "Manual mode disabled")
 
     def get_current_goal(self):
         return self._last_goal
+
+    @staticmethod
+    def _slew_value(current: float, target: float, dt: float, rise_rate: float, fall_rate: float) -> float:
+        current = float(current)
+        target = float(target)
+        dt = max(0.0, float(dt))
+        rate = float(rise_rate if target > current else fall_rate)
+        if rate <= 0.0 or dt <= 0.0:
+            return current
+        step = rate * dt
+        if target > current:
+            return min(target, current + step)
+        return max(target, current - step)
+
+    def _manual_rate(self, name: str, default: float) -> float:
+        cfg = getattr(self.adapter, "safety_config", None)
+        return float(getattr(cfg, name, default))
+
+    def _reset_manual_pedal_slew(self) -> None:
+        self._manual_last_update_monotonic = None
+        self._manual_accel_pct = 0.0
+        self._manual_brake_pct = 0.0
 
     def set_camera_status(self, ok: bool) -> None:
         self.cameras_ok = bool(ok)
@@ -329,6 +356,7 @@ class VehicleControlService(QObject):
             self.state_machine.on_gear_drive_confirmed(manual=manual_active)
             self._emit_state()
             if manual_active:
+                self._reset_manual_pedal_slew()
                 await self._send_raw_command(
                     VehicleCommand(
                         active=True,
@@ -426,6 +454,7 @@ class VehicleControlService(QObject):
                     reason="manual_control_disable",
                 )
             )
+            self._reset_manual_pedal_slew()
             await self._send_raw_command(VehicleCommand.safe_stop(reason="deactivate"))
             while time.monotonic() < deadline:
                 telemetry = self.get_telemetry()
@@ -577,38 +606,52 @@ class VehicleControlService(QObject):
             return
 
         telemetry = self.get_telemetry()
-        steer_norm = max(-1.0, min(1.0, float(angle_deg) / 630.0))
-        throttle = max(0.0, min(1.0, float(accel_pct) / 100.0))
-        brake = max(0.0, min(1.0, float(brake_pct) / 100.0))
+        steering_raw = max(-100, min(100, int(float(angle_deg) / 630.0 * 100.0)))
+        target_accel = max(0, min(100, int(accel_pct)))
+        target_brake = max(0, min(100, int(brake_pct)))
 
-        # Unknown gear feedback is unsafe for throttle. A known Park/Neutral gear
-        # is still valid for bench/manual actuator tests, where the operator may
-        # need to verify pedal commands without moving the vehicle.
-        if telemetry.gear is None:
-            throttle = 0.0
-
-        intent = ControlIntent(
-            seq=self._command_seq,
-            steer_norm=steer_norm,
-            throttle_norm=throttle,
-            brake_norm=brake,
-            target_angle_deg=float(angle_deg),
-            confidence=1.0,
-            speed_cap_kmh=self.mission.speed_cap_kmh if self.mission else 3.0,
-            valid_for_ms=120,
+        # Manual bench mode must match the proven GTK controller: pedal values
+        # are operator percentages, not scaled again by AI/PID limits. They are
+        # only slew-limited before CAN TX so a held key cannot step the actuator.
+        now = time.monotonic()
+        if self._manual_last_update_monotonic is None:
+            dt = 0.05
+        else:
+            dt = min(0.25, max(0.0, now - self._manual_last_update_monotonic))
+        self._manual_last_update_monotonic = now
+        accel = self._slew_value(
+            self._manual_accel_pct,
+            target_accel,
+            dt,
+            self._manual_rate("manual_accel_rise_pct_per_sec", 35.0),
+            self._manual_rate("manual_accel_fall_pct_per_sec", 80.0),
         )
+        brake = self._slew_value(
+            self._manual_brake_pct,
+            target_brake,
+            dt,
+            self._manual_rate("manual_brake_rise_pct_per_sec", 120.0),
+            self._manual_rate("manual_brake_fall_pct_per_sec", 160.0),
+        )
+
+        # Unknown gear feedback is still unsafe for throttle.
+        if telemetry.gear is None:
+            accel = 0.0
+        if target_brake > 0 or brake > 0.0:
+            accel = 0.0
+        self._manual_accel_pct = accel
+        self._manual_brake_pct = brake
+
         self._command_seq += 1
-        command = self.arbiter.build_command(intent, telemetry=telemetry, gear=telemetry.gear, active=True)
         command = VehicleCommand(
-            seq=command.seq,
-            timestamp_monotonic=command.timestamp_monotonic,
+            seq=self._command_seq,
             active=True,
             gear_request=None,
-            steering_raw=command.steering_raw,
-            accel_pct=command.accel_pct,
-            brake_pct=command.brake_pct,
+            steering_raw=steering_raw,
+            accel_pct=int(round(accel)),
+            brake_pct=int(round(brake)),
             cruise_enabled=False,
-            valid_for_ms=command.valid_for_ms,
+            valid_for_ms=120,
             reason="manual",
         )
         await self._send_raw_command(command)

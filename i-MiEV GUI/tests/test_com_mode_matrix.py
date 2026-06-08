@@ -254,7 +254,14 @@ class ComModeAdapterMatrixTests(unittest.IsolatedAsyncioTestCase):
         adapter = RealSerialVehicleAdapter(
             serial,
             sink,
-            safety_config=RealVehicleSafetyConfig(allow_real_actuation=True, dry_run=False),
+            safety_config=RealVehicleSafetyConfig(
+                allow_real_actuation=True,
+                dry_run=False,
+                manual_accel_rise_pct_per_sec=1000.0,
+                manual_accel_fall_pct_per_sec=1000.0,
+                manual_brake_rise_pct_per_sec=1000.0,
+                manual_brake_fall_pct_per_sec=1000.0,
+            ),
             telemetry_parser=_parser(),
         )
         service = VehicleControlService(
@@ -284,19 +291,68 @@ class ComModeAdapterMatrixTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(command.active)
             self.assertFalse(command.send_cruise_frame)
             self.assertGreater(command.steering_raw, 0)
-            self.assertGreater(command.accel_pct, 0)
-            self.assertLessEqual(command.accel_pct, 7)
+            self.assertEqual(command.accel_pct, 7)
             self.assertEqual(command.brake_pct, 0)
             self.assertIsNone(command.gear_request)
 
+            await asyncio.sleep(0.02)
             await service.submit_manual_command(angle_deg=0, accel_pct=0, brake_pct=11)
             command = sink.commands[-1]
             self.assertEqual(command.reason, "manual")
             self.assertFalse(command.send_cruise_frame)
             self.assertEqual(command.accel_pct, 0)
-            self.assertGreater(command.brake_pct, 0)
-            self.assertLessEqual(command.brake_pct, 11)
+            self.assertEqual(command.brake_pct, 11)
             self.assertIsNone(command.gear_request)
+        finally:
+            await service.disconnect()
+
+    async def test_real_com_manual_pedals_are_slew_limited(self):
+        serial = _FakeSerialManager()
+        sink = _CommandSink()
+        adapter = RealSerialVehicleAdapter(
+            serial,
+            sink,
+            safety_config=RealVehicleSafetyConfig(
+                allow_real_actuation=True,
+                dry_run=False,
+                manual_accel_rise_pct_per_sec=20.0,
+                manual_accel_fall_pct_per_sec=40.0,
+                manual_brake_rise_pct_per_sec=40.0,
+                manual_brake_fall_pct_per_sec=80.0,
+            ),
+            telemetry_parser=_parser(),
+        )
+        service = VehicleControlService(
+            VehicleAdapterFactory(real_adapter=adapter, mock_adapter=MockVehicleAdapter()),
+            ControlArbiter(),
+        )
+        try:
+            await service.connect_device("COM4")
+            service.set_manual_mode_enabled(True)
+            serial.data_received.emit(_Packet(0x44, [0, 0, 0, 0]))
+            serial.data_received.emit(_Packet(0x45, [Gear.P.value, 0, 0, 0]))
+            await asyncio.sleep(0.06)
+
+            self.assertTrue(await service.activate_control())
+
+            await service.submit_manual_command(angle_deg=0, accel_pct=100, brake_pct=0)
+            first = sink.commands[-1]
+            self.assertEqual(first.reason, "manual")
+            self.assertGreater(first.accel_pct, 0)
+            self.assertLess(first.accel_pct, 100)
+
+            await asyncio.sleep(0.10)
+            await service.submit_manual_command(angle_deg=0, accel_pct=100, brake_pct=0)
+            second = sink.commands[-1]
+            self.assertGreater(second.accel_pct, first.accel_pct)
+            self.assertLess(second.accel_pct, 100)
+
+            await asyncio.sleep(0.10)
+            await service.submit_manual_command(angle_deg=0, accel_pct=0, brake_pct=100)
+            third = sink.commands[-1]
+            self.assertEqual(third.accel_pct, 0)
+            self.assertGreater(third.brake_pct, 0)
+            self.assertLess(third.brake_pct, 100)
         finally:
             await service.disconnect()
 
