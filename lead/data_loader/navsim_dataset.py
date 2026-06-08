@@ -30,7 +30,7 @@ class NavsimData(Dataset):
         self.config = config
         self.training_session_cache = training_session_cache
         self.rank = config.rank
-        self.data_sampling_generator = default_rng(seed=self.config.seed)
+        self.data_sampling_generator = default_rng(seed=self.config.runtime_seed())
 
         self._feature = glob.glob(
             os.path.join(self.root, "**/transfuser_feature.gz"), recursive=True
@@ -55,8 +55,8 @@ class NavsimData(Dataset):
             )
 
     def shuffle(self, epoch):
-        # Use epoch as seed for reproducible sampling across epochs
-        rng = default_rng(seed=self.config.seed + epoch)
+        # Use either reproducible seed + epoch or a fresh runtime seed.
+        rng = default_rng(seed=self.config.runtime_seed(epoch))
 
         if self.config.navsim_num_samples > 0:
             target_size: int = self.config.navsim_num_samples

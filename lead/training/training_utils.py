@@ -154,11 +154,12 @@ def initialize_training_session_cache(config: TrainingConfig) -> Cache | None:
 
 @beartype
 def initialize_torch(config: TrainingConfig) -> int:
-    torch.manual_seed(config.seed)
-    np.random.seed(config.seed)
-    random.seed(config.seed)
-    torch.cuda.manual_seed(config.seed)
-    torch.cuda.manual_seed_all(config.seed)
+    runtime_seed = config.runtime_seed()
+    torch.manual_seed(runtime_seed)
+    np.random.seed(runtime_seed)
+    random.seed(runtime_seed)
+    torch.cuda.manual_seed(runtime_seed)
+    torch.cuda.manual_seed_all(runtime_seed)
 
     ngpus_per_node = torch.cuda.device_count()
     ncpus_per_node = config.assigned_cpu_cores
@@ -356,7 +357,7 @@ def initialize_dataloader(
     num_workers: int,
 ):
     g_cuda = torch.Generator(device="cpu")
-    g_cuda.manual_seed(config.seed)
+    g_cuda.manual_seed(config.runtime_seed())
 
     datasets, samplers = [], []
     if config.use_carla_data:

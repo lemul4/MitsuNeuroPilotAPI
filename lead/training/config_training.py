@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 from typing import Any
 
 import torch
@@ -164,6 +165,9 @@ class TrainingConfig(BaseConfig):
     # --- Training ID, Logging setting ---
     # Training Seed
     seed = 0
+    # If true, use fresh runtime seeds for data sampling and augmentations on
+    # every training start instead of reproducible seed + epoch values.
+    full_random_training = False
     # WandB ID for the experiment. If None, it will be generated automatically.
     wandb_id: str = None
     # must, allow, never
@@ -175,6 +179,16 @@ class TrainingConfig(BaseConfig):
         if self.is_pretraining:
             return "lead_pretrain"
         return "lead_posttrain"
+
+    def runtime_seed(self, epoch: int | None = None) -> int:
+        """Return a seed for training RNGs according to reproducibility settings."""
+        if self.full_random_training:
+            return secrets.randbelow(2**31 - 1)
+
+        seed = int(self.seed)
+        if epoch is not None:
+            seed += int(epoch)
+        return seed
 
     # Description of the experiment.
     description = "An example experiment description."
@@ -809,6 +823,9 @@ class TrainingConfig(BaseConfig):
 
     # If true will use TFv5's planning decoder
     use_tfv5_planning_decoder = False
+
+    # Dropout probability used inside the planning decoder.
+    planner_dropout = 0.1
 
     # Used for TFv5 planning decoder
     gru_hidden_size = 64

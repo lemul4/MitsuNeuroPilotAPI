@@ -51,12 +51,14 @@ class PlanningDecoder(nn.Module):
             decoder_layer=nn.TransformerDecoderLayer(
                 self.config.transfuser_token_dim,
                 self.config.transfuser_num_bev_cross_attention_heads,
+                dropout=self.config.planner_dropout,
                 activation=nn.GELU(),
                 batch_first=True,
             ),
             num_layers=self.config.transfuser_num_bev_cross_attention_layers,
             norm=nn.LayerNorm(self.config.transfuser_token_dim),
         )
+        self.dropout = nn.Dropout(self.config.planner_dropout)
 
         # Only create decoders if needed
         if self.config.predict_spatial_path:
@@ -72,6 +74,7 @@ class PlanningDecoder(nn.Module):
                     self.config.transfuser_token_dim,
                 ),
                 nn.ReLU(inplace=True),
+                nn.Dropout(self.config.planner_dropout),
                 nn.Linear(
                     self.config.transfuser_token_dim,
                     len(self.config.target_speed_classes),
@@ -151,6 +154,7 @@ class PlanningDecoder(nn.Module):
             route_queries = queries[
                 :, query_idx : query_idx + self.config.num_route_points_prediction
             ]
+            route_queries = self.dropout(route_queries)
             route = torch.cumsum(self.route_decoder(route_queries), 1)
             query_idx += self.config.num_route_points_prediction
 
@@ -158,13 +162,14 @@ class PlanningDecoder(nn.Module):
             waypoints_queries = queries[
                 :, query_idx : query_idx + self.config.num_way_points_prediction
             ]
+            waypoints_queries = self.dropout(waypoints_queries)
             waypoints = torch.cumsum(self.wp_decoder(waypoints_queries), 1)
             if self.config.use_navsim_data:
                 headings = torch.cumsum(self.heading_decoder(waypoints_queries), 1)
             query_idx += self.config.num_way_points_prediction
 
         if self.config.predict_target_speed:
-            target_speed_query = queries[:, query_idx]
+            target_speed_query = self.dropout(queries[:, query_idx])
             target_speed_dist = self.target_speed_decoder(target_speed_query)
 
             with torch.amp.autocast(device_type="cuda", enabled=False):
@@ -476,6 +481,7 @@ class PlanningContextEncoder(nn.Module):
         self.dimension_adapter = nn.Conv2d(
             input_bev_channels, self.config.transfuser_token_dim, kernel_size=1
         )
+        self.dropout = nn.Dropout(self.config.planner_dropout)
         self.reset_parameters()
 
         self.target_points_normalization_constants = torch.tensor(
@@ -638,7 +644,7 @@ class PlanningContextEncoder(nn.Module):
                 [context_tokens, status_tokens], dim=1
             )  # (bs, height * width + num_status_tokens, transfuser_token_dim)
 
-        return context_tokens
+        return self.dropout(context_tokens)
 
 
 class PositionEmbeddingSine(nn.Module):
