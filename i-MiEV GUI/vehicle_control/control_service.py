@@ -87,6 +87,9 @@ class VehicleControlService(QObject):
         self._last_external_intent: Optional[ControlIntent] = None
         self._last_goal = None
         self.external_intent_max_age_ms = 150.0
+        self._manual_last_update_monotonic: Optional[float] = None
+        self._manual_accel_pct = 0.0
+        self._manual_brake_pct = 0.0
 
     def _schedule_coro_threadsafe(self, coro, label="vehicle control task"):
         try:
@@ -185,14 +188,39 @@ class VehicleControlService(QObject):
 
     def set_manual_mode_enabled(self, enabled: bool) -> None:
         self.manual_mode_enabled = bool(enabled)
-        # Manual mode is an explicit authority mode. It does not require the neural
-        # preview flag, but it still requires mission, pose, cameras and vehicle readiness
-        # before Activate Control can arm Drive.
+        # Manual mode is an explicit local authority mode. It does not require a
+        # mission, pose, camera stream or AI Preview; those are autonomous-control
+        # preconditions. It still requires a connected vehicle controller with a
+        # live heartbeat and normal safety checks before Drive can be armed.
         self._refresh_readiness_state()
+        if not enabled:
+            self._reset_manual_pedal_slew()
         self._log("Manual mode enabled" if enabled else "Manual mode disabled")
 
     def get_current_goal(self):
         return self._last_goal
+
+    @staticmethod
+    def _slew_value(current: float, target: float, dt: float, rise_rate: float, fall_rate: float) -> float:
+        current = float(current)
+        target = float(target)
+        dt = max(0.0, float(dt))
+        rate = float(rise_rate if target > current else fall_rate)
+        if rate <= 0.0 or dt <= 0.0:
+            return current
+        step = rate * dt
+        if target > current:
+            return min(target, current + step)
+        return max(target, current - step)
+
+    def _manual_rate(self, name: str, default: float) -> float:
+        cfg = getattr(self.adapter, "safety_config", None)
+        return float(getattr(cfg, name, default))
+
+    def _reset_manual_pedal_slew(self) -> None:
+        self._manual_last_update_monotonic = None
+        self._manual_accel_pct = 0.0
+        self._manual_brake_pct = 0.0
 
     def set_camera_status(self, ok: bool) -> None:
         self.cameras_ok = bool(ok)
@@ -216,12 +244,13 @@ class VehicleControlService(QObject):
         telemetry = self.get_telemetry()
         pose_valid = bool(getattr(telemetry, "pose_valid", False))
         pose_fresh = telemetry.age_ms() <= 750.0
+        manual = bool(self.manual_mode_enabled)
         return ReadinessStatus(
             connected=self._connected and telemetry.connected,
-            mission_ok=self.mission is not None and bool(self.mission.waypoints),
-            pose_ok=self.pose_ok and pose_valid and pose_fresh,
-            cameras_ok=self.cameras_ok or self.manual_mode_enabled,
-            ai_preview_ok=self.ai_preview_enabled or self.manual_mode_enabled,
+            mission_ok=manual or (self.mission is not None and bool(self.mission.waypoints)),
+            pose_ok=manual or (self.pose_ok and pose_valid and pose_fresh),
+            cameras_ok=manual or self.cameras_ok,
+            ai_preview_ok=manual or self.ai_preview_enabled,
             vehicle_ok=self.vehicle_ok and telemetry.heartbeat_ok,
             speed_zero=telemetry.speed_kmh <= self.park_speed_threshold_kmh,
             gear_known=telemetry.gear is not None,
@@ -304,24 +333,41 @@ class VehicleControlService(QObject):
             await self._send_raw_command(VehicleCommand(active=False, gear_request=None, accel_pct=0, brake_pct=35, cruise_enabled=False, reason="brake_hold"))
             await asyncio.sleep(0.1)
 
-            self._log("ARMING: requesting Drive")
-            if self.adapter is not None:
-                await self.adapter.request_gear(Gear.D)
-            await asyncio.sleep(self.arming_delay_sec)
-
-            telemetry = self.get_telemetry()
-            if telemetry.gear != Gear.D:
-                reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
-                self.state_machine.on_fault(reason)
-                self._emit_state()
-                self.activation_blocked.emit(reason)
-                self._log(f"Activation failed: {reason}")
-                return False
-
             manual_active = bool(self.manual_mode_enabled and not self.ai_preview_enabled)
+            if manual_active:
+                telemetry = self.get_telemetry()
+                gear_text = telemetry.gear.name if telemetry.gear else "unknown"
+                self._log(f"ARMING: manual mode in current gear {gear_text}")
+            else:
+                self._log("ARMING: requesting Drive")
+                if self.adapter is not None:
+                    await self.adapter.request_gear(Gear.D)
+                await asyncio.sleep(self.arming_delay_sec)
+
+                telemetry = self.get_telemetry()
+                if telemetry.gear != Gear.D:
+                    reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
+                    self.state_machine.on_fault(reason)
+                    self._emit_state()
+                    self.activation_blocked.emit(reason)
+                    self._log(f"Activation failed: {reason}")
+                    return False
+
             self.state_machine.on_gear_drive_confirmed(manual=manual_active)
             self._emit_state()
             if manual_active:
+                self._reset_manual_pedal_slew()
+                await self._send_raw_command(
+                    VehicleCommand(
+                        active=True,
+                        gear_request=None,
+                        accel_pct=0,
+                        brake_pct=0,
+                        cruise_enabled=True,
+                        send_cruise_frame=True,
+                        reason="manual_control_enable",
+                    )
+                )
                 self._log("MANUAL_ACTIVE")
             else:
                 self._log("AI_ACTIVE")
@@ -397,6 +443,18 @@ class VehicleControlService(QObject):
             self._log(f"DISENGAGING: {reason}")
 
             deadline = time.monotonic() + float(self.disengage_timeout_sec)
+            await self._send_raw_command(
+                VehicleCommand(
+                    active=False,
+                    gear_request=None,
+                    accel_pct=0,
+                    brake_pct=0,
+                    cruise_enabled=False,
+                    send_cruise_frame=True,
+                    reason="manual_control_disable",
+                )
+            )
+            self._reset_manual_pedal_slew()
             await self._send_raw_command(VehicleCommand.safe_stop(reason="deactivate"))
             while time.monotonic() < deadline:
                 telemetry = self.get_telemetry()
@@ -548,37 +606,52 @@ class VehicleControlService(QObject):
             return
 
         telemetry = self.get_telemetry()
-        steer_norm = max(-1.0, min(1.0, float(angle_deg) / 630.0))
-        throttle = max(0.0, min(1.0, float(accel_pct) / 100.0))
-        brake = max(0.0, min(1.0, float(brake_pct) / 100.0))
+        steering_raw = max(-100, min(100, int(float(angle_deg) / 630.0 * 100.0)))
+        target_accel = max(0, min(100, int(accel_pct)))
+        target_brake = max(0, min(100, int(brake_pct)))
 
-        # Do not apply throttle in Park/Neutral. User must manually request D/R
-        # first, which is visible and auditable in the event log.
-        if telemetry.gear not in (Gear.D, Gear.R, Gear.E, Gear.B):
-            throttle = 0.0
-
-        intent = ControlIntent(
-            seq=self._command_seq,
-            steer_norm=steer_norm,
-            throttle_norm=throttle,
-            brake_norm=brake,
-            target_angle_deg=float(angle_deg),
-            confidence=1.0,
-            speed_cap_kmh=self.mission.speed_cap_kmh if self.mission else 3.0,
-            valid_for_ms=120,
+        # Manual bench mode must match the proven GTK controller: pedal values
+        # are operator percentages, not scaled again by AI/PID limits. They are
+        # only slew-limited before CAN TX so a held key cannot step the actuator.
+        now = time.monotonic()
+        if self._manual_last_update_monotonic is None:
+            dt = 0.05
+        else:
+            dt = min(0.25, max(0.0, now - self._manual_last_update_monotonic))
+        self._manual_last_update_monotonic = now
+        accel = self._slew_value(
+            self._manual_accel_pct,
+            target_accel,
+            dt,
+            self._manual_rate("manual_accel_rise_pct_per_sec", 35.0),
+            self._manual_rate("manual_accel_fall_pct_per_sec", 80.0),
         )
+        brake = self._slew_value(
+            self._manual_brake_pct,
+            target_brake,
+            dt,
+            self._manual_rate("manual_brake_rise_pct_per_sec", 120.0),
+            self._manual_rate("manual_brake_fall_pct_per_sec", 160.0),
+        )
+
+        # Unknown gear feedback is still unsafe for throttle.
+        if telemetry.gear is None:
+            accel = 0.0
+        if target_brake > 0 or brake > 0.0:
+            accel = 0.0
+        self._manual_accel_pct = accel
+        self._manual_brake_pct = brake
+
         self._command_seq += 1
-        command = self.arbiter.build_command(intent, telemetry=telemetry, gear=telemetry.gear, active=True)
         command = VehicleCommand(
-            seq=command.seq,
-            timestamp_monotonic=command.timestamp_monotonic,
+            seq=self._command_seq,
             active=True,
             gear_request=None,
-            steering_raw=command.steering_raw,
-            accel_pct=command.accel_pct,
-            brake_pct=command.brake_pct,
+            steering_raw=steering_raw,
+            accel_pct=int(round(accel)),
+            brake_pct=int(round(brake)),
             cruise_enabled=False,
-            valid_for_ms=command.valid_for_ms,
+            valid_for_ms=120,
             reason="manual",
         )
         await self._send_raw_command(command)

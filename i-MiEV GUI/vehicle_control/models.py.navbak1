@@ -187,7 +187,6 @@ class VehicleCommand:
     accel_pct: int = 0
     brake_pct: int = 0
     cruise_enabled: bool = False
-    send_cruise_frame: bool = False
     valid_for_ms: int = 100
     reason: str = ""
 
@@ -373,10 +372,6 @@ class LocalNavigationGoal:
     target_x_m: float = 0.0
     target_y_m: float = 0.0
     target_heading_deg: float = 0.0
-    previous_x_m: float = 0.0
-    previous_y_m: float = 0.0
-    next_x_m: float = 0.0
-    next_y_m: float = 0.0
     distance_to_target_m: float = 0.0
     distance_to_goal_m: float = 0.0
     cross_track_error_m: float = 0.0

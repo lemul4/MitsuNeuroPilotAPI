@@ -211,6 +211,9 @@ class CARLAData(Dataset):
 
         copy_id = int(self.hard_sample_oversample_copy_ids[index])
         if copy_id > 0:
+            if self.config.full_random_training:
+                return self.image_augmenter_func.to_deterministic()
+
             augmenter = copy.deepcopy(self.image_augmenter_func)
             seed = (
                 int(self.config.seed)
@@ -1456,9 +1459,10 @@ class CARLAData(Dataset):
 
     def shuffle(self, epoch):
         self.current_epoch = epoch
-        rng = default_rng(seed=self.config.seed + epoch)
-        np.random.seed(self.config.seed + epoch)
-        random.seed(self.config.seed + epoch)
+        runtime_seed = self.config.runtime_seed(epoch)
+        rng = default_rng(seed=runtime_seed)
+        np.random.seed(runtime_seed)
+        random.seed(runtime_seed)
 
         # Build lists by sampling from each bucket
         self.bev_3rd_person_images = []

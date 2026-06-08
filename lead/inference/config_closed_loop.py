@@ -28,7 +28,7 @@ class ClosedLoopConfig(OpenLoopConfig):
 
     # --- Control which output is used for controlling ---
     # Modality used for steering control
-    steer_modality = "route"
+    steer_modality = "waypoint"
     # Modality used for throttle control
     throttle_modality = "target_speed"
     # Modality used for brake control
@@ -42,7 +42,7 @@ class ClosedLoopConfig(OpenLoopConfig):
 
     # --- Route Planner ---
     # Minimum distance for route planner
-    route_planner_min_distance = 5.0
+    route_planner_min_distance = 3.25
     # Maximum distance for route planner
     route_planner_max_distance = 50
 

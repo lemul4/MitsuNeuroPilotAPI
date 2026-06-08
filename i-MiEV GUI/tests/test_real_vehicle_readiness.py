@@ -48,7 +48,7 @@ class ManualModeActivationTests(unittest.IsolatedAsyncioTestCase):
         ok = await service.activate_control()
         self.assertTrue(ok)
         self.assertEqual(service.state_machine.state, DriveState.MANUAL_ACTIVE)
-        self.assertEqual(service.get_telemetry().gear, Gear.D)
+        self.assertEqual(service.get_telemetry().gear, Gear.P)
 
 
 if __name__ == "__main__":

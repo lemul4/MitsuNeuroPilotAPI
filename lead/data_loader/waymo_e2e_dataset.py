@@ -46,7 +46,7 @@ class WODE2EData(Dataset):
         )
 
         self.rank = config.rank
-        self.data_sampling_generator = default_rng(seed=self.config.seed)
+        self.data_sampling_generator = default_rng(seed=self.config.runtime_seed())
 
         self._rgb = glob.glob(os.path.join(self.root, "**/*.jpg"), recursive=True)
         self._measurements = glob.glob(
@@ -68,8 +68,8 @@ class WODE2EData(Dataset):
             )
 
     def shuffle(self, epoch):
-        # Use epoch as seed for reproducible sampling across epochs
-        rng = default_rng(seed=self.config.seed + epoch)
+        # Use either reproducible seed + epoch or a fresh runtime seed.
+        rng = default_rng(seed=self.config.runtime_seed(epoch))
 
         if (
             not (self.val or self.test)
