@@ -1,103 +1,255 @@
-## Table of Contents
+# MitsuNeuroPilotAPI
 
-- [Table of Contents](#table-of-contents)
-- [Quick Start](#quick-start)
-  - [1. Environment initialization](#1-environment-initialization)
-  - [2. Install dependencies](#2-install-dependencies)
-  - [2.5. Configure Environment Variables (Conda)](#25-configure-environment-variables-conda)
-  - [3. Download checkpoints](#3-download-checkpoints)
-  - [4. Setup VSCode/PyCharm](#4-setup-vscodepycharm)
-  - [5. Evaluate model](#5-evaluate-model)
-- [Training](#training)
-- [Data Collection](#data-collection)
-- [Benchmarking](#benchmarking)
-- [Project Structure](#project-structure)
+MitsuNeuroPilotAPI is a full-stack neural autopilot project for autonomous driving research and deployment on a Mitsubishi i-MiEV electric vehicle.
 
-## Quick Start
+## What This Project Includes
 
-### 1. Environment initialization
+- CARLA simulation environment support for data collection, training, closed-loop evaluation, and visual debugging.
+- Custom route and scenario tooling for different road situations, weather, time of day, traffic interactions, and failure cases.
+- An improved script-based expert driver with a camera-limited observation setup that is closer to a real vehicle camera rig and therefore reduces learner-expert asymmetry.
+- A modified TransFuser V6-style neural autopilot with transformer feature fusion, geometry-aware BEV projection, detection, segmentation, waypoint prediction, target-speed prediction, and PID control.
+- Dual-front-camera model support using a wide 2.8 mm / 90 degree camera and a narrow 6 mm / 50 degree camera with overlapping fields of view for stereo-like depth cues.
+- Dataset bucket/cache tooling, image augmentation, and two-stage training for scalable pre-training and post-training.
+- Bench2Drive, Longest6, Town13, CARLA Leaderboard, ScenarioRunner, and NAVSIM-related tooling.
+- An operator GUI for CARLA demos, mock vehicle testing, serial loopback testing, telemetry, manual takeover, and real i-MiEV integration.
+- A GUI navigation panel for A-to-B missions, route validation, waypoint tracking, road-routing, route preview, and PID fallback when neural predictions are unavailable.
+- Map and mission configuration support for real/mock operation, including route metadata, current-pose configuration, map settings, and reusable mission files.
+- Vehicle telemetry dashboards for speed, steering angle, throttle, brake, gear, pose state, route progress, neural-agent status, BEV detection, and BEV segmentation outputs.
+- Bench and hardware-readiness tooling for dry-run operation, preflight checks, MCU telemetry mapping, serial/CAN packet inspection, and staged transition from mock to telemetry-only to real actuation.
+- A real-vehicle control layer with asynchronous GUI, hardware communication, neural-agent execution, safety checks, state machine transitions, command arbitration, MCU/CAN packet integration points, and preflight tooling.
 
-Clone the repository and map the project root to your environment
+## Project Motivation
+
+Training a neural autopilot directly on a real car is expensive and dangerous. Simulation helps, but it creates three major problems:
+
+- **Learner-expert asymmetry**: a simulator expert often uses privileged state that a real neural agent cannot observe.
+- **Sim-to-real gap**: real cameras, latency, sensor noise, vehicle dynamics, and lighting differ from synthetic data.
+- **Vision-only depth ambiguity**: pure monocular camera models are attractive for real deployment, but they often struggle with distance estimation, object motion, and braking decisions because depth is only inferred indirectly from a single image stream.
+
+## Architecture Overview
+
+```mermaid
+flowchart TB
+    U[User / researcher]
+    CARLA[CARLA + ScenarioRunner + Leaderboard]
+    GUI[i-MiEV GUI]
+    CAN[CAN bus + MCU gateway]
+    VEH[Mitsubishi i-MiEV<br/>real vehicle]
+
+    subgraph SYS[MitsuNeuroPilotAPI software system]
+        direction TB
+
+        CFG[Configuration and orchestration]
+        EXP[Expert data collection]
+        DATA[Dataset preparation<br/>buckets + cache]
+        TRAIN[Neural autopilot training<br/>modified TFv6]
+        BENCH[Testing and benchmarking]
+        INF[Inference and vehicle control<br/>model + PID + safety]
+        GATE[Vehicle gateway]
+
+        CFG --> EXP
+        EXP --> DATA
+        DATA --> TRAIN
+        TRAIN --> BENCH
+        TRAIN --> INF
+        BENCH -.metrics / checkpoints.-> TRAIN
+        INF --> GATE
+    end
+
+    U -->|configure and run experiments| CFG
+    U -->|operate vehicle modes| GUI
+
+    CFG -->|scenario launch| CARLA
+    CARLA -->|sensor data and environment state| EXP
+    CARLA -->|closed-loop routes| BENCH
+
+    GUI -->|operator commands| INF
+    INF -->|telemetry and visual outputs| GUI
+
+    GATE -->|control packets| CAN
+    CAN -->|steering / throttle / brake / gear| VEH
+    VEH -->|feedback telemetry| INF
+```
+
+## Model and Training Notes
+
+The project extends a TransFuser V6-style architecture, but it changes the sensor layout, backbone choice, BEV projection, deployment graph, and real-vehicle interface. The model fuses visual embeddings, projects them into a bird's-eye-view representation, predicts auxiliary perception outputs, and plans motion through future waypoints and target speed.
+
+![MitsuNeuroPilot model architecture](docs/assets/model%20diagram.png)
+
+### Main Differences from TFv6
+
+- **Camera system**: TFv6 commonly uses a broader simulator sensor setup and baseline RGB configurations. This project uses two real-deployable front cameras: a 2.8 mm / 90 degree wide camera and a 6 mm / 50 degree narrow camera. The overlapping camera views provide stereo-like evidence for distance estimation, which is especially important because the target model does not rely on LiDAR.
+- **Vision backbone**: the baseline ResNet-34 variant is replaced in the project design by ConvNeXt Nano to improve the speed/accuracy tradeoff for deployment.
+- **Vision-only deployment target**: the project explicitly removes the dependence on LiDAR/radar in the real-vehicle path and compensates with dual-camera geometry and richer camera fusion.
+- **BEV projection**: instead of relying only on learned layers, the BEV projection also uses camera placement and field-of-view information. This makes the model less tied to a single simulator sensor layout and closer to the physical camera rig.
+- **Planner inputs**: BEV embeddings are fused with vehicle speed and navigation commands in the planner block. The planner predicts future waypoints and target speed, then PID controllers convert them into steering, throttle, and brake commands.
+- **Deployment graph**: the architecture was rewritten and optimized into a more static inference graph for compilation and runtime stability.
+- **Real control loop**: TFv6 mainly ends at CARLA/Leaderboard control. MitsuNeuroPilotAPI adds a GUI, state machine, command arbitration, MCU/CAN gateway, manual takeover, and safe disengagement behavior for a real vehicle.
+
+### Training and Optimization
+
+The training system uses bucket and cache storage for large CARLA datasets, image augmentations, and remote monitoring through Weights & Biases. Training is divided into two stages:
+
+1. Encoder and BEV representation pre-training on detection and segmentation tasks.
+2. Planner fine-tuning for route following, waypoint prediction, and target-speed prediction.
+
+For deployment, the model path was optimized and converted toward a static graph. According to the project document, this reduced inference latency by about 5x and brought model inference time down to approximately `12 ms`. The asynchronous GUI/hardware/neural-agent loop reduced end-to-end control-loop delay to approximately `15 ms`.
+
+Reported project results:
+
+- waypoint displacement error: `0.13`;
+- speed correlation: `0.95`;
+- semantic mIoU: `0.70`;
+- CenterNet mAP: `0.81`.
+
+`Bench2Drive` closed-loop comparison at a 20 km/h speed cap:
+
+| Model | Route completion | Rule compliance |
+| --- | ---: | ---: |
+| Baseline TransFuser | `79%` | `88%` |
+| MitsuNeuroPilot modified TFv6 | `91%` | `82%` |
+
+The modified model completed more route distance than the baseline. The lower rule-compliance score is attributed to the LiDAR-free setup, narrower total field of view, and smaller training dataset used in this project configuration.
+
+The same deployment stack was tested on a real proving ground. The tests included straight-line autonomous motion, acceleration and speed holding, turning, pedestrian and vehicle interactions, traffic-light reaction, stop commands, and autonomous-mode disengagement. Future work includes additional fine-tuning on real data to reduce the sim-to-real gap and adding LiDAR support for harder scenarios.
+
+
+## Repository Layout
+
+```text
+lead/                         Main Python package
+  common/                     Shared utilities, config, logging, geometry
+  data_buckets/               Dataset bucket definitions and sampling
+  data_loader/                CARLA, NAVSIM, Waymo-style data loaders
+  expert/                     Scripted expert driver and data collection logic
+  inference/                  Closed-loop and open-loop inference
+  infraction_webapp/          Web dashboard for evaluation failures
+  tfv6/                       TransFuser V6 model components
+  training/                   Training loops, losses, metrics, utilities
+
+i-MiEV GUI/                   PyQt GUI and real-vehicle integration
+  hardware/                   Camera, serial, CAN, ZMQ, pose services
+  real_agent_adapters/        Hooks for real model inference
+  ui/                         Main window, mission panel, route dialogs
+  vehicle_control/            State machine, arbiter, gateway, navigation
+  tests/                      GUI and real/mock vehicle unit tests
+
+scripts/                      Setup, training, evaluation, visualization tools
+data/                         Routes and benchmark route definitions
+docs/                         Sphinx and project documentation
+3rd_party/                    CARLA, Leaderboard, ScenarioRunner, Bench2Drive
+outputs/                      Checkpoints, logs, local training/evaluation output
+slurm/                        Cluster training and evaluation helpers
+```
+
+## Requirements
+
+The main supported development environment is Python 3.10 with Conda.
+
+Core external components:
+
+- CARLA `0.9.15`;
+- CUDA-capable PyTorch environment for training/inference;
+- Git LFS for checkpoints and datasets;
+- FFmpeg and common build tools;
+- PyQt dependencies for the GUI;
+- optional serial/CAN hardware stack for real-vehicle integration.
+
+The repository includes:
+
+- `environment.yml` for the base Conda environment;
+- `conda-lock.yml` for reproducible Conda installation;
+- `requirements.txt` for Linux/Python dependencies;
+- `requirements-win.txt` for Windows CPU-oriented setup.
+
+## Installation
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/lemul4/MitsuNeuroPilotAPI.git
 cd MitsuNeuroPilotAPI
 ```
 
-Please verify that `~/.bashrc` reflects these paths correctly.
-
-### 2. Install dependencies
-
-We utilize [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install), conda-lock and uv:
+Create and activate the Conda environment:
 
 ```bash
-# Install conda-lock and create conda environment
-pip install conda-lock 
+pip install conda-lock
 conda-lock install -n lead conda-lock.yml
-
-# Activate conda environment
 conda activate lead
+```
 
-# Install dependencies and setup git hooks
-pip install uv 
-uv pip install -r requirements.txt  
+Install Python dependencies and the editable package:
 
-# Install dependencies (Windows CPU)
-uv pip install -r requirements-win.txt  
-
+```bash
+pip install uv
+uv pip install -r requirements.txt
 uv pip install -e .
+```
 
-# Install other tools needed for development
+On Windows, use:
+
+```powershell
+conda activate lead
+pip install uv
+uv pip install -r requirements-win.txt
+uv pip install -e .
+```
+
+Install optional development tools:
+
+```bash
 conda install -c conda-forge ffmpeg parallel tree gcc zip unzip
-
-# Optional: Activate git hooks
 pre-commit install
 ```
 
-While waiting for dependencies installation, we recommend setting up CARLA and downloading checkpoints on parallel:
+Install CARLA into `3rd_party/CARLA_0915`:
 
 ```bash
-# Download and setup CARLA at 3rd_party/CARLA_0915
 bash scripts/setup_carla.sh
 ```
 
-Move file [DefaultEngine.ini](DefaultEngine.ini) in your_carla_folder\CarlaUE4\Config
+Copy `DefaultEngine.ini` into the CARLA configuration directory:
 
-Carla parameters: -quality-level=Epic -world-port=2000 -nosound -carla-streaming-port=2001
-
-### 2.5. Configure Environment Variables (Conda)
-
-To avoid manual exports, set up `SCENARIO_RUNNER_ROOT` and `LEAD_PROJECT_ROOT` to load automatically whenever the `lead` environment is activated:
-
-```bash
-# 1. Create directory for environment hooks
-mkdir -p $CONDA_PREFIX/etc/conda/activate.d
-mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
-
-# 2. Create activation script (sets variables)
-cat <<EOF > $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
-export LEAD_PROJECT_ROOT="$(pwd)"
-export SCENARIO_RUNNER_ROOT="\${LEAD_PROJECT_ROOT}/3rd_party/scenario_runner_autopilot"
-EOF
-
-# 3. Create deactivation script (cleans up variables)
-cat <<EOF > $CONDA_PREFIX/etc/conda/deactivate.d/env_vars.sh
-unset LEAD_PROJECT_ROOT
-unset SCENARIO_RUNNER_ROOT
-EOF
-
-# 4. Apply changes (Restart environment)
-conda deactivate && conda activate lead
-
-# 5. Verify setup
-echo "Project Root: \$LEAD_PROJECT_ROOT"
-echo "Scenario Runner: \$SCENARIO_RUNNER_ROOT"
-
-echo "scripts/main.sh" >> ~/.bashrc       # Persist more environment variables
-source ~/.bashrc                                        # Reload config
+```text
+<CARLA_ROOT>/CarlaUE4/Config/DefaultEngine.ini
 ```
 
-windows
+Typical CARLA startup parameters:
+
+```text
+-quality-level=Epic -world-port=2000 -nosound -carla-streaming-port=2001
+```
+
+## Environment Variables
+
+Linux/macOS Conda activation hook:
+
+```bash
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
+mkdir -p "$CONDA_PREFIX/etc/conda/deactivate.d"
+
+cat > "$CONDA_PREFIX/etc/conda/activate.d/mitsu_neuropilot.sh" <<EOF
+export LEAD_PROJECT_ROOT="$(pwd)"
+export SCENARIO_RUNNER_ROOT="\${LEAD_PROJECT_ROOT}/3rd_party/scenario_runner_autopilot"
+export CARLA_VERSION="0915"
+export CARLA_ROOT="\${LEAD_PROJECT_ROOT}/3rd_party/CARLA_\${CARLA_VERSION}"
+export PYTHONPATH="\${CARLA_ROOT}/PythonAPI/carla:\${LEAD_PROJECT_ROOT}:\${PYTHONPATH}"
+EOF
+
+cat > "$CONDA_PREFIX/etc/conda/deactivate.d/mitsu_neuropilot.sh" <<EOF
+unset LEAD_PROJECT_ROOT
+unset SCENARIO_RUNNER_ROOT
+unset CARLA_VERSION
+unset CARLA_ROOT
+EOF
+
+conda deactivate
+conda activate lead
+```
+
+Windows PowerShell setup:
 
 ```powershell
 conda activate lead
@@ -109,304 +261,136 @@ New-Item -ItemType Directory -Force "$env:CONDA_PREFIX\etc\conda\deactivate.d" |
 @"
 `$env:LEAD_PROJECT_ROOT = '$PROJECT_ROOT'
 `$env:SCENARIO_RUNNER_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\scenario_runner_autopilot"
-
 `$env:CARLA_VERSION = '0915'
 `$env:CARLA_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\CARLA_`$env:CARLA_VERSION"
-
-if ([string]::IsNullOrEmpty(`$env:PYTHONPATH)) {
-    `$env:PYTHONPATH = "`$env:CARLA_ROOT\PythonAPI\carla"
-} else {
-    `$env:PYTHONPATH = "`$env:CARLA_ROOT\PythonAPI\carla;`$env:PYTHONPATH"
-}
-
-`$env:PATH = "`$env:LEAD_PROJECT_ROOT;`$env:LEAD_PROJECT_ROOT\scripts;`$env:PATH"
-
-`$env:NUPLAN_MAP_VERSION = 'nuplan-maps-v1.0'
-`$env:NUPLAN_MAPS_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\dataset\maps"
-`$env:NAVSIM_EXP_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\exp"
-`$env:NAVSIM_DEVKIT_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\navsimv1.1"
-`$env:OPENSCENE_DATA_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\navsim_workspace\dataset"
-
-`$env:PY123D_DATA_ROOT = "`$env:LEAD_PROJECT_ROOT\data\carla_leaderboard2_py123d"
-"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\activate.d\env_vars.ps1"
+`$env:PYTHONPATH = "`$env:CARLA_ROOT\PythonAPI\carla;`$env:LEAD_PROJECT_ROOT;`$env:PYTHONPATH"
+"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\activate.d\mitsu_neuropilot.ps1"
 
 @"
 Remove-Item Env:LEAD_PROJECT_ROOT -ErrorAction SilentlyContinue
 Remove-Item Env:SCENARIO_RUNNER_ROOT -ErrorAction SilentlyContinue
 Remove-Item Env:CARLA_VERSION -ErrorAction SilentlyContinue
 Remove-Item Env:CARLA_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:NUPLAN_MAP_VERSION -ErrorAction SilentlyContinue
-Remove-Item Env:NUPLAN_MAPS_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:NAVSIM_EXP_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:NAVSIM_DEVKIT_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:OPENSCENE_DATA_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:PY123D_DATA_ROOT -ErrorAction SilentlyContinue
-"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\deactivate.d\env_vars.ps1"
+"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\deactivate.d\mitsu_neuropilot.ps1"
 
 conda deactivate
 conda activate lead
-
-echo "Project Root: $env:LEAD_PROJECT_ROOT"
-echo "Scenario Runner: $env:SCENARIO_RUNNER_ROOT"
-echo "CARLA Version: $env:CARLA_VERSION"
-echo "CARLA Root: $env:CARLA_ROOT"
-echo "PYTHONPATH: $env:PYTHONPATH"
-echo "NUPLAN Map Version: $env:NUPLAN_MAP_VERSION"
-echo "NUPLAN Maps Root: $env:NUPLAN_MAPS_ROOT"
-echo "NAVSIM Exp Root: $env:NAVSIM_EXP_ROOT"
-echo "NAVSIM Devkit Root: $env:NAVSIM_DEVKIT_ROOT"
-echo "OPENSCENE Data Root: $env:OPENSCENE_DATA_ROOT"
-echo "PY123D Data Root: $env:PY123D_DATA_ROOT"
 ```
 
-### 3. Download checkpoints
+## Checkpoints
 
-Pre-trained checkpoints are hosted on [HuggingFace](https://huggingface.co/ln2697/tfv6) for reproducibility. These checkpoints follow the TFv6 architecture, but differ in their sensor configurations, vision backbones or dataset composition.
+Our checkpoint:
 
-<div align="center">
+- [Download MitsuNeuroPilot checkpoint](https://drive.google.com/file/d/1BDEFzryFQHtxKEGM8FBgI0UZCSk3jMDS/view?usp=sharing)
 
-| Description                           | Bench2Drive | Longest6 v2 |  Town13  |                                 Checkpoint                                  |
-| ------------------------------------- | :---------: | :---------: | :------: | :-------------------------------------------------------------------------: |
-| Full TransFuser V6                    |  **95.2**   |   **62**    | **5.24** |    [Link](https://huggingface.co/ln2697/tfv6/tree/main/tfv6_regnety032)     |
-| ResNet34 backbone with 60M parameters |    94.7     |     57      |   5.01   |     [Link](https://huggingface.co/ln2697/tfv6/tree/main/tfv6_resnet34)      |
-| Rear camera as additional input       |    95.1     |     53      |   TBD    |   [Link](https://huggingface.co/ln2697/tfv6/tree/main/4cameras_resnet34)    |
-| Radar sensor removed                  |    94.7     |     52      |   TBD    |    [Link](https://huggingface.co/ln2697/tfv6/tree/main/noradar_resnet34)    |
-| Vision only driving                   |    91.6     |     43      |   TBD    |  [Link](https://huggingface.co/ln2697/tfv6/tree/main/visiononly_resnet34)   |
-| Removed Town13 from training set      |    93.1     |     52      |   3.52   | [Link](https://huggingface.co/ln2697/tfv6/tree/main/town13heldout_resnet34) |
+## CARLA Evaluation
 
-</div>
-
-To download checkpoints:
+Start CARLA:
 
 ```bash
-# Either download one for test purpose
-bash scripts/download_one_checkpoint.sh
-
-# Or clone them all (>10GB)
-git clone https://huggingface.co/ln2697/tfv6 outputs/checkpoints
-cd outputs/checkpoints
-git lfs pull
-```
-
-### 4. Setup VSCode/PyCharm
-
-For VSCode, install recommended extensions when prompted. We support debugging of data collection, training and evaluation out of the box.
-
-![](docs/assets/vscode.png)
-
-For PyCharm, you need to add CARLA Python API `3rd_party/CARLA_0915/PythonAPI/carla` to your Python path `Settings... → Python → Interpreter → Show All... → Show Interpreter Paths`.
-
-![](docs/assets/pycharm.png)
-
-
-### 5. Evaluate model
-
-To initiate closed-loop evaluation and verify the setup, execute the following:
-
-```bash
-# Start driving environment
 bash scripts/start_carla.sh
+```
 
-# Start policy on one route
+Run one closed-loop route through the wrapper:
+
+```bash
 python lead/leaderboard_wrapper.py \
-  --checkpoint outputs/checkpoints/tfv6_resnet34 \
+  --checkpoint outputs/model_0011/config_dual_front_camera.json \
   --routes data/benchmark_routes/bench2drive/23687.xml \
   --bench2drive
 ```
 
-Driving logs will be saved to <code>outputs/local_evaluation</code> with the following structure:
-
-```html
-outputs/local_evaluation/1_town15_construction
-├── 1_town15_construction_debug.mp4
-├── 1_town15_construction_demo.mp4
-├── 1_town15_construction_input.mp4
-├── checkpoint_endpoint.json
-├── debug_images
-├── demo_images
-├── input_images
-├── input_log
-├── infractions.json
-├── metric_info.json
-└── qualitative_results.mp4
-```
-Launch the interactive infraction dashboard to analyze driving failures more conveniently:
+Open the infraction dashboard:
 
 ```bash
 python lead/infraction_webapp/app.py
 ```
 
-Navigate to [http://localhost:5000](http://localhost:5000/?dir=outputs%2Flocal_evaluation), fill the input field with `outputs/local_evaluation` to access the infraction dashboard, useful for analyzing large-scale evaluations
+Then open:
 
-<div align="center">
+```text
+http://localhost:5000/?dir=outputs%2Flocal_evaluation
+```
 
-https://github.com/user-attachments/assets/81954b7c-4153-45d1-90a8-80cb426ccb70
+## Training and Data Pipeline
 
-</div>
-
-> [!TIP]
-> 1. Disable video recording in [config_closed_loop](lead/inference/config_closed_loop.py) by turning off `produce_demo_video` and `produce_debug_video`.
-> 2. If memory is limited, modify the file prefixes to load only the first checkpoint seed. By default, the pipeline loads all three seeds as an ensemble.
-> 3. To save time, decrease video FPS in [config_closed_loop](lead/inference/config_closed_loop.py) by increasing `produce_frame_frequency`.
-
-## Training
-
-For a more detailed documentation, take a look at the [documentation page](https://ln2697.github.io/lead/docs/carla_training.html). First, download the CARLA dataset from [HuggingFace](https://huggingface.co/datasets/ln2697/lead_carla) using git lfs:
+Common data and training utilities:
 
 ```bash
-# Download all routes
-git clone https://huggingface.co/datasets/ln2697/lead_carla data/carla_leaderboard2/zip
-cd data/carla_leaderboard2/zip
-git lfs pull
-
-# Or download a single route for testing
-bash scripts/download_one_route.sh
-
-# Upzip the routes
-bash scripts/unzip_routes.sh
-
-# Build data cache
 python scripts/build_cache.py
 ```
 
 Start pretraining:
 
 ```bash
-# Train on a single GPU
 python3 lead/training/train.py \
   logdir=outputs/local_training/pretrain
-
-# Or Torch DDP
-bash scripts/pretrain_ddp.sh
 ```
 
-Training logs and checkpoints will be saved to `outputs/local_training/pretrain`. To fine-tune the pretrained model with planning decoder enabled:
+posttrain:
 
 ```bash
-# Single GPU
 python3 lead/training/train.py \
   logdir=outputs/local_training/posttrain \
-  load_file=outputs/local_training/pretrain/model_0030.pth \
+  load_file=outputs/local_training/pretrain/model.pth \
   use_planning_decoder=true
-
-# Distributed Torch DDP
-bash scripts/posttrain_ddp.sh
 ```
 
-Post-training checkpoints will be saved to `outputs/local_training/posttrain`.
+## GUI
 
-For distributed training on SLURM, see this [documentation page](https://ln2697.github.io/lead/docs/slurm_training.html). For a complete SLURM workflow of pre-training, post-training, evaluation, see this [example](slurm/experiments/001_example).
-
-## Data Collection
-
-To collect your own dataset, you can run the rule-based expert driver. To setup own camera/lidar/radar calibration, see [config_base.py](lead/common/config_base.py) and [config_expert.py](lead/expert/config_expert.py).
+Launch the GUI from the repository root:
 
 ```bash
-# Start CARLA
-bash scripts/start_carla.sh
-
-# Collect Data Alternative 1
-python lead/leaderboard_wrapper.py \
-  --expert \
-  --routes data/data_routes/lead/noScenarios/short_route.xml
-
-# Collect Data Alternative 2
-bash scripts/eval_expert.sh
-
-# Collect Data Windows
-powershell -ExecutionPolicy Bypass -File .\scripts\run_expert.ps1
-
-# Collect Data 123D Format Alternative 1
-export LEAD_EXPERT_CONFIG="target_dataset=6 py123d_data_format=true use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false"
-python -u $LEAD_PROJECT_ROOT/lead/leaderboard_wrapper.py \
-    --expert \
-    --py123d \
-    --routes data/data_routes/50x38_Town12/ParkingCrossingPedestrian/3250_1.xml
-
-# Collect Data 123D Format Alternative 2
-bash scripts/eval_expert_123d.sh
-```
-Collected data will be saved to `outputs/expert_evaluation/` with the following sensor outputs:
-
-
-```html
-├── bboxes/                  # Per-frame 3D bounding boxes for all actors
-├── depth/                   # Compressed and quantized depth maps
-├── depth_perturbated        # Depth from a perturbated ego state
-├── hdmap/                   # Ego-centric rasterized HD map
-├── hdmap_perturbated        # HD map aligned to perturbated ego pose
-├── lidar/                   # LiDAR point clouds
-├── metas/                   # Per-frame metadata and ego state
-├── radar/                   # Radar detections
-├── radar_perturbated        # Radar detections from perturbated ego state
-├── rgb/                     # RGB images
-├── rgb_perturbated          # RGB images from perturbated ego state
-├── semantics/               # Semantic segmentation maps
-├── semantics_perturbated    # Semantics from perturbated ego state
-└── results.json             # Route-level summary and evaluation metadata
+python "i-MiEV GUI/main.py"
 ```
 
-For large-scale data collection on SLURM clusters, see the [data collection documentation](https://ln2697.github.io/lead/docs/data_collection.html). The [Jupyter notebooks](notebooks) provide some example scripts to visualize the collected data:
+Main operating modes:
 
-<div align="center">
-  <picture>
-    <img src="docs/assets/visualization.webp" width="49%" />
-  </picture>
-  <picture>
-    <img src="docs/assets/point_cloud_visualization.webp" width="49%" />
-  </picture>
+- `VIRTUAL_DEMO_MODE`: CARLA simulation, route picker, route queues, `LeadAgentThread`, CARLA watchdog, and ZMQ camera preview.
+- `TEST_MOCK_VEHICLE`: full real-vehicle control flow without physical hardware.
+- `TEST_SERIAL_LOOPBACK`: transport-layer testing for USB/serial packet format, ACK/timeout behavior, and command scheduling.
+- real COM port: hardware path for MCU/CAN integration after bench, dry-run, and telemetry-only validation.
 
-</div>
+## Real-Vehicle Integration
 
-## Benchmarking
+The real i-MiEV path is built around a conservative control chain:
 
-For a more detailed documentation, take a look at the [evaluation documentation](https://ln2697.github.io/lead/docs/evaluation.html).
-
-```bash
-# Start CARLA
-bash scripts/start_carla.sh
-
-# Bench2Drive Alternative 1
-python lead/leaderboard_wrapper.py \
-  --checkpoint outputs/checkpoints/tfv6_resnet34 \
-  --routes data/benchmark_routes/bench2drive/23687.xml \
-  --bench2drive
-
-# Bench2Drive Alternative 2
-bash scripts/eval_bench2drive.sh
-
-# Longest6 v2 Alternative 1
-python lead/leaderboard_wrapper.py \
-  --checkpoint outputs/checkpoints/tfv6_resnet34 \
-  --routes data/benchmark_routes/longest6/00.xml
-
-# Longest6 v2 Alternative 2
-bash scripts/eval_longest6.sh
-
-# Town13 Alternative 1
-python lead/leaderboard_wrapper.py \
-  --checkpoint outputs/checkpoints/tfv6_resnet34 \
-  --routes data/benchmark_routes/Town13/0.xml
-
-# Town13 Alternative 2
-bash scripts/eval_town13.sh
-
-# Clean CARLA
-bash scripts/clean_carla.sh
+```text
+GUI
+  -> VehicleControlService
+  -> ControlArbiter
+  -> VehicleGateway
+  -> serial / MCU / CAN adapter
+  -> Mitsubishi i-MiEV actuators
 ```
 
-Results will be saved to `outputs/local_evaluation/` with videos, infractions, and metrics. For distributed evaluation across multiple routes and benchmarks, see the [SLURM evaluation documentation](https://ln2697.github.io/lead/docs/slurm_evaluation.html). For large-scale evaluation we also provide a WandB logger.
+Real camera preview uses two front camera streams:
 
-## Project Structure
+- `wide_90`: 2.8 mm lens, approximately 90 degree FOV;
+- `narrow_50`: 6 mm lens, approximately 50 degree FOV.
 
-The project is organized into several key directories:
+The dual-camera service publishes:
 
-- **`lead`** - Main Python package containing model architecture, training, inference, and expert driver
-- **`3rd_party`** - Third-party dependencies (CARLA, benchmarks, evaluation tools)
-- **`data`** - Route definitions for training and evaluation. Sensor data will also be stored here.
-- **`scripts`** - Utility scripts for data processing, training, and evaluation
-- **`outputs`** - Model checkpoints, evaluation results, and visualizations
-- **`notebooks`** - Jupyter notebooks for data inspection and analysis
-- **`slurm`** - SLURM job scripts for large-scale experiments
+- wide camera on `tcp://127.0.0.1:5556`;
+- narrow camera on `tcp://127.0.0.1:5557`.
 
-For a detailed breakdown of the codebase organization, see the [project structure documentation](https://ln2697.github.io/lead/docs/project_structure.html).
+Configure cameras from:
+
+```text
+i-MiEV GUI/config/real_cameras.example.json
+```
+
+## Scientific Publications
+
+- **Vision-only neural autopilot: bridging sim-to-real gap and learner-expert asymmetry** - published in the proceedings of the International Scientific and Technical Conference "Prom-Engineering", indexed in Scopus. [Document](https://docs.google.com/document/d/12W7nTc2MBqf2siFnO7W33XS8Fv4XVQfi/edit?usp=drive_link&ouid=113779812991506542148&rtpof=true&sd=true)
+- **Intelligent autopilot agent based on neural network technologies in an autonomous driving simulation environment** - submitted to the VAK journal "Software Engineering", ISSN 2220-3397; awaiting publication. [Document](https://docs.google.com/document/d/1-k103PH6_jngbjBz79SBykJh8hvrZUgH/edit?usp=sharing&ouid=113779812991506542148&rtpof=true&sd=true)
+
+## Acknowledgements
+
+This project builds on the ideas of TFv6 from **LEAD: Minimizing Learner-Expert Asymmetry in End-to-End Driving** by Long Nguyen, Micha Fauth, Bernhard Jaeger, Daniel Dauner, Maximilian Igl, Andreas Geiger, and Kashyap Chitta.
+
+Paper: [https://arxiv.org/abs/2512.20563v1](https://arxiv.org/abs/2512.20563v1)
+
+## License
+
+See `LICENSE`.
