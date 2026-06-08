@@ -397,6 +397,61 @@ class ComModeAdapterMatrixTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service.disconnect()
 
+    async def test_real_com_model_prediction_is_sent_to_can_when_ai_active(self):
+        serial = _FakeSerialManager()
+        sink = _CommandSink()
+        safety = RealVehicleSafetyConfig(allow_real_actuation=True, dry_run=False)
+        adapter = RealSerialVehicleAdapter(
+            serial,
+            sink,
+            safety_config=safety,
+            telemetry_parser=_parser(),
+        )
+        service = VehicleControlService(
+            VehicleAdapterFactory(real_adapter=adapter, mock_adapter=None),
+            ControlArbiter(max_accel_pct=20, max_brake_pct=80, max_steering_raw=100),
+        )
+        service.arming_delay_sec = 0.0
+        service.autonomy_loop_enabled = False
+
+        try:
+            await service.connect_device("COM4")
+            service.set_mission(Mission.default_test_mission())
+            service.submit_pose(Pose2D(0.0, 0.0, 0.0, valid=True, source="test_pose"))
+            service.set_camera_status(True)
+            service.set_ai_preview_enabled(True)
+            serial.data_received.emit(_Packet(0x44, [0, 0, 0, 0]))
+            serial.data_received.emit(_Packet(0x45, [Gear.D.value, 0, 0, 0]))
+            await asyncio.sleep(0.06)
+
+            self.assertTrue(await service.activate_control())
+            before = len(sink.commands)
+            await service.submit_external_agent_intent(
+                ControlIntent(
+                    frame_id=77,
+                    steer_norm=0.4,
+                    throttle_norm=0.5,
+                    brake_norm=0.0,
+                    confidence=1.0,
+                    prediction_age_ms=0.0,
+                    desired_speed_kmh=1.0,
+                    speed_cap_kmh=3.0,
+                    valid_for_ms=150,
+                )
+            )
+
+            self.assertGreater(len(sink.commands), before)
+            command = sink.commands[-1]
+            self.assertEqual(command.reason, "ai_intent")
+            self.assertTrue(command.active)
+            self.assertEqual(command.gear_request, Gear.D)
+            self.assertGreater(command.steering_raw, 0)
+            self.assertEqual(command.accel_pct, 10)
+            self.assertEqual(command.brake_pct, 0)
+            self.assertTrue(command.cruise_enabled)
+        finally:
+            await service.disconnect()
+
     async def test_dry_run_guard_replaces_active_real_command_with_safe_stop(self):
         sink = _CommandSink()
         adapter = RealSerialVehicleAdapter(

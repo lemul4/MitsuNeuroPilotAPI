@@ -61,6 +61,7 @@ class GStreamerUdpH265ReceiverThread(QThread):
     """
 
     frame_received = Signal(str, QPixmap)
+    model_frame_received = Signal(str, object)
     status_changed = Signal(str, bool, str)
 
     def __init__(self, spec: UdpH265CameraSpec, parent=None):
@@ -113,11 +114,12 @@ class GStreamerUdpH265ReceiverThread(QThread):
                 sample = appsink.emit("try-pull-sample", 20 * Gst.MSECOND)
                 if sample is None:
                     continue
-                pixmap = self._sample_to_pixmap(sample)
-                if pixmap is None:
+                pixmap, frame_bgr = self._sample_to_outputs(sample)
+                if pixmap is None or frame_bgr is None:
                     continue
                 self.received_count += 1
                 self.frame_received.emit(self.spec.name, pixmap)
+                self.model_frame_received.emit(self.spec.name, frame_bgr)
 
                 now = time.monotonic()
                 if now - last_status_at >= 1.0:
@@ -130,27 +132,35 @@ class GStreamerUdpH265ReceiverThread(QThread):
                 pass
             self._pipeline = None
 
-    def _sample_to_pixmap(self, sample) -> Optional[QPixmap]:
+    def _sample_to_outputs(self, sample):
         caps = sample.get_caps()
         structure = caps.get_structure(0) if caps is not None and caps.get_size() else None
         if structure is None:
-            return None
+            return None, None
         width = int(structure.get_value("width") or 0)
         height = int(structure.get_value("height") or 0)
         if width <= 0 or height <= 0:
-            return None
+            return None, None
 
         buffer = sample.get_buffer()
         try:
             data = buffer.extract_dup(0, buffer.get_size())
         except Exception:
-            return None
+            return None, None
 
         bytes_per_line = width * 3
         image = QImage(data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
         if image.isNull():
-            return None
-        return QPixmap.fromImage(image)
+            return None, None
+        frame_bgr = None
+        try:
+            import numpy as _np
+
+            frame_rgb = _np.frombuffer(data, dtype=_np.uint8).reshape((height, width, 3))
+            frame_bgr = frame_rgb[:, :, ::-1].copy()
+        except Exception:
+            frame_bgr = None
+        return QPixmap.fromImage(image), frame_bgr
 
     def stop(self):
         self.is_running = False

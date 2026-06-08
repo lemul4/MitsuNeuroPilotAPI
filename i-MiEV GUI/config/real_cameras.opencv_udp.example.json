@@ -1,0 +1,39 @@
+{
+  "backend": "opencv_udp",
+  "listen_ip": "127.0.0.1",
+  "rtp_payload": 96,
+  "cameras": {
+    "camera_1_wide": {
+      "enabled": true,
+      "role": "front_wide",
+      "ui_name": "wide_90",
+      "udp_port": 5601,
+      "width": 1280,
+      "height": 720
+    },
+    "camera_2_narrow": {
+      "enabled": true,
+      "role": "front_narrow",
+      "ui_name": "narrow_50",
+      "udp_port": 5602,
+      "width": 1280,
+      "height": 720
+    },
+    "camera_3": {
+      "enabled": true,
+      "role": "aux_3",
+      "ui_name": "camera_3",
+      "udp_port": 5603,
+      "width": 1280,
+      "height": 720
+    },
+    "camera_4": {
+      "enabled": true,
+      "role": "aux_4",
+      "ui_name": "camera_4",
+      "udp_port": 5604,
+      "width": 1280,
+      "height": 720
+    }
+  }
+}

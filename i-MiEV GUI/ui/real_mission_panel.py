@@ -172,6 +172,11 @@ class RealMissionPanel(QGroupBox):
         self.input_lane_offset = QLineEdit("1.7")
         self.input_lane_offset.setPlaceholderText("1.5–2.0")
         coord_grid.addWidget(self.input_lane_offset, 5, 1)
+        coord_grid.addWidget(QLabel("Pose автомобиля"), 6, 0)
+        self.combo_pose_mode = QComboBox()
+        self.combo_pose_mode.addItem("GPS / внешний pose", "external")
+        self.combo_pose_mode.addItem("Без GPS: A→B по скорости", "dead_reckoning_ab")
+        coord_grid.addWidget(self.combo_pose_mode, 6, 1)
         layout.addLayout(coord_grid)
 
         map_row = QHBoxLayout()
@@ -286,6 +291,7 @@ class RealMissionPanel(QGroupBox):
                 "lane_offset_m": lane_offset_m,
                 "traffic_side": "right",
             }
+            pose_mode = self.combo_pose_mode.currentData() if hasattr(self, "combo_pose_mode") else "external"
             goal_label = f"B=({gx:.1f}, {gy:.1f})"
 
             if self._map_start_geo and self._map_goal_geo and GeoPoint is not None and geo_points_to_local_ab is not None:
@@ -310,6 +316,7 @@ class RealMissionPanel(QGroupBox):
                 "start": start_payload,
                 "goal": goal_payload,
                 "goal_label": goal_label,
+                "pose_mode": pose_mode,
                 "spacing_m": float(self.input_spacing.text() or 2.0),
                 "turn_speed_kmh": min(1.2, speed),
                 "hints": hints,

@@ -200,6 +200,17 @@ class VehicleControlService(QObject):
     def get_current_goal(self):
         return self._last_goal
 
+    def update_navigation_preview(self):
+        if self.mission is None:
+            self._last_goal = None
+            return None
+        telemetry = self.get_telemetry()
+        pose = telemetry.pose()
+        goal = self.navigator.update(self.mission, pose, telemetry.speed_kmh)
+        self._last_goal = goal
+        self.nav_goal_changed.emit(goal)
+        return goal
+
     @staticmethod
     def _slew_value(current: float, target: float, dt: float, rise_rate: float, fall_rate: float) -> float:
         current = float(current)
@@ -550,6 +561,15 @@ class VehicleControlService(QObject):
     async def submit_external_agent_intent(self, intent: ControlIntent) -> None:
         self._last_external_intent = intent
         if self.state_machine.state == DriveState.AI_ACTIVE:
+            if time.monotonic() - self._last_autonomy_log_at > 0.25:
+                self._last_autonomy_log_at = time.monotonic()
+                self._log(
+                    "MODEL->CAN: "
+                    f"frame={int(getattr(intent, 'frame_id', 0) or 0)} "
+                    f"steer={float(getattr(intent, 'steer_norm', 0.0) or 0.0):.3f} "
+                    f"thr={float(getattr(intent, 'throttle_norm', 0.0) or 0.0):.3f} "
+                    f"brk={float(getattr(intent, 'brake_norm', 0.0) or 0.0):.3f}"
+                )
             await self.submit_ai_intent(intent)
 
     async def submit_ai_intent(self, intent: ControlIntent) -> None:

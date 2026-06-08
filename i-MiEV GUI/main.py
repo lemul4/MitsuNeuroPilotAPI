@@ -7,6 +7,7 @@ import subprocess
 import json
 import os
 import time
+import importlib
 import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer, QObject, Slot, QThread, Signal, qInstallMessageHandler 
@@ -74,9 +75,29 @@ except Exception as _gstreamer_udp_import_error:
     UdpH265CameraSpec = None
 
 try:
+    from hardware.opencv_udp_camera import (
+        OpenCvUdpH265ReceiverThread,
+        OpenCvUdpH265CameraSpec,
+    )
+except Exception as _opencv_udp_import_error:
+    OpenCvUdpH265ReceiverThread = None
+    OpenCvUdpH265CameraSpec = None
+
+try:
     from hardware.pose_provider import JsonPoseProviderThread
 except Exception:
     JsonPoseProviderThread = None
+
+try:
+    from vehicle_control.pose_modes import (
+        DeadReckoningPoseState,
+        advance_dead_reckoning_pose,
+        mission_targets_from_dict,
+        parse_xyyaw,
+    )
+except Exception:
+    DeadReckoningPoseState = None
+    advance_dead_reckoning_pose = mission_targets_from_dict = parse_xyyaw = None
 
 # --- MITSU_SAFE_MOCK_READY_PRINT_FILTER_V11B_BEGIN ---
 # Safe duplicate-log filter for mock readiness.
@@ -352,9 +373,17 @@ class AppController(QObject):
         self.real_camera_process = None
         self.real_camera_receivers = []
         self.real_agent_analyzer = None
+        self.real_direct_model_adapter = None
+        self.real_direct_model_frames = {}
+        self.real_direct_model_last_predict_at = 0.0
+        self.real_direct_model_frame_seq = 0
         self.real_camera_status = {"wide_90": False, "narrow_50": False}
         self.real_agent_bridge = RealAgentBridge() if RealAgentBridge is not None else None
         self.real_pose_provider = None
+        self.real_pose_mode = os.environ.get("MITSU_REAL_POSE_MODE", "external").strip().lower() or "external"
+        self.real_dead_reckoning_pose = None
+        self.real_dead_reckoning_targets = ()
+        self.real_dead_reckoning_last_ts = None
         self.real_safety_config = RealVehicleSafetyConfig.load() if RealVehicleSafetyConfig is not None else None
         if self.real_safety_config is not None:
             print(f"REAL SAFETY: {self.real_safety_config.describe()}")
@@ -461,6 +490,11 @@ class AppController(QObject):
 
         self.raw_telemetry_timer = QTimer()
         self.raw_telemetry_timer.timeout.connect(self.poll_ai_telemetry)
+
+        self.real_dead_reckoning_timer = QTimer()
+        self.real_dead_reckoning_timer.setInterval(100)
+        self.real_dead_reckoning_timer.timeout.connect(self._tick_real_dead_reckoning_pose)
+
         self.view.connect_requested.connect(self.handle_connect)
         self.view.disconnect_requested.connect(self.handle_disconnect)
         self.view.control_toggled.connect(self.handle_control_toggle)
@@ -647,6 +681,14 @@ class AppController(QObject):
     def _load_udp_h265_camera_specs(self):
         if UdpH265CameraSpec is None:
             return []
+        return self._build_udp_h265_camera_specs(UdpH265CameraSpec)
+
+    def _load_opencv_udp_h265_camera_specs(self):
+        if OpenCvUdpH265CameraSpec is None:
+            return []
+        return self._build_udp_h265_camera_specs(OpenCvUdpH265CameraSpec)
+
+    def _build_udp_h265_camera_specs(self, spec_cls):
         payload = self._load_real_camera_config()
         decoder = str(
             os.environ.get("MITSU_GSTREAMER_H265_DECODER")
@@ -674,27 +716,63 @@ class AppController(QObject):
                     ui_name = "narrow_50"
                 else:
                     ui_name = str(data.get("ui_name") or f"camera_{index}")
-                specs.append(UdpH265CameraSpec(
+                kwargs = dict(
                     name=ui_name,
                     port=int(port),
                     role=role,
-                    decoder=str(data.get("decoder") or decoder),
                     payload=int(data.get("payload", default_payload) or default_payload),
                     width=int(data.get("width", 1280) or 1280),
                     height=int(data.get("height", 720) or 720),
-                    jitter_latency_ms=int(data.get("jitter_latency_ms", jitter_latency_ms) or 0),
-                ))
+                )
+                if spec_cls is UdpH265CameraSpec:
+                    kwargs["decoder"] = str(data.get("decoder") or decoder)
+                    kwargs["jitter_latency_ms"] = int(data.get("jitter_latency_ms", jitter_latency_ms) or 0)
+                if spec_cls is OpenCvUdpH265CameraSpec:
+                    kwargs["host"] = str(data.get("listen_ip") or data.get("host") or payload.get("listen_ip") or "127.0.0.1")
+                specs.append(spec_cls(**kwargs))
         if specs:
             return specs
+        if spec_cls is OpenCvUdpH265CameraSpec:
+            return [
+                spec_cls("wide_90", 5601, role="front_wide"),
+                spec_cls("narrow_50", 5602, role="front_narrow"),
+                spec_cls("camera_3", 5603, role="aux_3"),
+                spec_cls("camera_4", 5604, role="aux_4"),
+            ]
         return [
-            UdpH265CameraSpec("wide_90", 5601, role="front_wide", decoder=decoder),
-            UdpH265CameraSpec("narrow_50", 5602, role="front_narrow", decoder=decoder),
-            UdpH265CameraSpec("camera_3", 5603, role="aux_3", decoder=decoder),
-            UdpH265CameraSpec("camera_4", 5604, role="aux_4", decoder=decoder),
+            spec_cls("wide_90", 5601, role="front_wide", decoder=decoder),
+            spec_cls("narrow_50", 5602, role="front_narrow", decoder=decoder),
+            spec_cls("camera_3", 5603, role="aux_3", decoder=decoder),
+            spec_cls("camera_4", 5604, role="aux_4", decoder=decoder),
         ]
 
     def _start_real_camera_stack(self):
         backend = self._real_camera_backend()
+        if backend in {"opencv_udp", "opencv_udp_h265", "windows_udp_h265", "cv2_udp_h265"}:
+            if OpenCvUdpH265ReceiverThread is None or OpenCvUdpH265CameraSpec is None:
+                print("REAL CAMERA: opencv_udp module unavailable")
+                return
+            specs = self._load_opencv_udp_h265_camera_specs()
+            if not specs:
+                print("REAL CAMERA: no OpenCV UDP/H265 camera specs")
+                return
+            if not self.real_camera_receivers:
+                for spec in specs:
+                    receiver = OpenCvUdpH265ReceiverThread(spec)
+                    if str(spec.name) in {"wide_90", "narrow_50"}:
+                        receiver.frame_received.connect(self.view.update_real_camera_cell)
+                        if hasattr(receiver, "model_frame_received"):
+                            receiver.model_frame_received.connect(self.handle_real_direct_model_frame)
+                    receiver.status_changed.connect(self.handle_real_camera_cell_status)
+                    self.real_camera_receivers.append(receiver)
+                    receiver.start()
+                print(
+                    "REAL CAMERA: OpenCV UDP/H265 receivers started: "
+                    + ", ".join(f"{spec.name}@:{spec.port}" for spec in specs)
+                )
+                self._ensure_real_direct_model_adapter()
+            return
+
         if backend in {"gstreamer_udp", "udp_h265", "gst_udp_h265", "gstreamer"}:
             if GStreamerUdpH265ReceiverThread is None or UdpH265CameraSpec is None:
                 print("REAL CAMERA: gstreamer_udp module unavailable")
@@ -708,6 +786,8 @@ class AppController(QObject):
                     receiver = GStreamerUdpH265ReceiverThread(spec)
                     if str(spec.name) in {"wide_90", "narrow_50"}:
                         receiver.frame_received.connect(self.view.update_real_camera_cell)
+                        if hasattr(receiver, "model_frame_received"):
+                            receiver.model_frame_received.connect(self.handle_real_direct_model_frame)
                     receiver.status_changed.connect(self.handle_real_camera_cell_status)
                     self.real_camera_receivers.append(receiver)
                     receiver.start()
@@ -715,6 +795,7 @@ class AppController(QObject):
                     "REAL CAMERA: GStreamer UDP/H265 receivers started: "
                     + ", ".join(f"{spec.name}@:{spec.port}" for spec in specs)
                 )
+                self._ensure_real_direct_model_adapter()
             return
 
         if ZmqCameraCellReceiverThread is None or CameraZmqConfig is None:
@@ -757,6 +838,9 @@ class AppController(QObject):
             analyzer.start()
 
     def _start_real_pose_provider(self):
+        if str(getattr(self, "real_pose_mode", "external") or "external").lower() == "dead_reckoning_ab":
+            self._start_real_dead_reckoning_pose()
+            return
         if JsonPoseProviderThread is None or self.real_pose_provider is not None:
             return
         pose_path = os.environ.get("MITSU_REAL_POSE_JSON", "").strip()
@@ -770,6 +854,7 @@ class AppController(QObject):
         print(f"REAL POSE: provider started: {pose_path}")
 
     def _stop_real_pose_provider(self):
+        self._stop_real_dead_reckoning_pose()
         provider = self.real_pose_provider
         self.real_pose_provider = None
         if provider is not None:
@@ -777,6 +862,88 @@ class AppController(QObject):
                 provider.stop()
             except Exception:
                 pass
+
+    def _configure_real_dead_reckoning_pose(self, mission):
+        if (
+            DeadReckoningPoseState is None
+            or mission_targets_from_dict is None
+            or parse_xyyaw is None
+        ):
+            return False
+        mission = dict(mission or {})
+        try:
+            seed = parse_xyyaw(mission.get("start") or "0,0,0")
+            targets = mission_targets_from_dict(mission)
+            if not targets:
+                return False
+            self.real_dead_reckoning_pose = DeadReckoningPoseState(seed.x_m, seed.y_m, seed.yaw_deg)
+            self.real_dead_reckoning_targets = tuple(targets)
+            self.real_dead_reckoning_last_ts = None
+            return True
+        except Exception as exc:
+            print(f"REAL POSE: dead-reckoning setup failed: {exc}")
+            return False
+
+    def _start_real_dead_reckoning_pose(self):
+        if (
+            self.real_dead_reckoning_pose is None
+            and self.real_mission is not None
+            and not self._configure_real_dead_reckoning_pose(self.real_mission)
+        ):
+            return
+        if self.real_dead_reckoning_pose is None:
+            return
+        self.real_dead_reckoning_last_ts = time.monotonic()
+        if not self.real_dead_reckoning_timer.isActive():
+            self.real_dead_reckoning_timer.start()
+        self._submit_real_dead_reckoning_pose()
+        print("REAL POSE: local A→B dead-reckoning provider started")
+
+    def _stop_real_dead_reckoning_pose(self):
+        timer = getattr(self, "real_dead_reckoning_timer", None)
+        try:
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+        self.real_dead_reckoning_last_ts = None
+
+    def _submit_real_dead_reckoning_pose(self):
+        if self.vehicle_control is None or Pose2D is None or self.real_dead_reckoning_pose is None:
+            return
+        state = self.real_dead_reckoning_pose
+        self.vehicle_control.submit_pose(Pose2D(
+            x_m=float(state.x_m),
+            y_m=float(state.y_m),
+            yaw_deg=float(state.yaw_deg),
+            valid=True,
+            source="dead_reckoning_ab_no_gps",
+        ))
+        if hasattr(self.vehicle_control, "update_navigation_preview"):
+            try:
+                self.vehicle_control.update_navigation_preview()
+            except Exception as exc:
+                print(f"REAL POSE: navigation preview update failed: {exc}")
+
+    def _tick_real_dead_reckoning_pose(self):
+        if (
+            self.real_dead_reckoning_pose is None
+            or advance_dead_reckoning_pose is None
+            or not self.real_dead_reckoning_targets
+        ):
+            return
+        now = time.monotonic()
+        last = self.real_dead_reckoning_last_ts or now
+        self.real_dead_reckoning_last_ts = now
+        telemetry = self.vehicle_control.get_telemetry() if self.vehicle_control is not None else None
+        speed_kmh = float(getattr(telemetry, "speed_kmh", 0.0) or 0.0)
+        self.real_dead_reckoning_pose = advance_dead_reckoning_pose(
+            self.real_dead_reckoning_pose,
+            self.real_dead_reckoning_targets,
+            speed_kmh / 3.6,
+            now - last,
+        )
+        self._submit_real_dead_reckoning_pose()
 
     @Slot(dict)
     def handle_real_pose_payload(self, payload):
@@ -791,6 +958,8 @@ class AppController(QObject):
                 source=str(payload.get("source", "json_pose_provider")),
             )
             self.vehicle_control.submit_pose(pose)
+            if hasattr(self.vehicle_control, "update_navigation_preview"):
+                self.vehicle_control.update_navigation_preview()
         except Exception as exc:
             print(f"REAL POSE: payload rejected: {exc}")
 
@@ -808,6 +977,9 @@ class AppController(QObject):
             except Exception:
                 pass
         self.real_camera_receivers = []
+        self.real_direct_model_frames = {}
+        self.real_direct_model_last_predict_at = 0.0
+        self.real_direct_model_adapter = None
         proc = self.real_camera_process
         self.real_camera_process = None
         if proc is not None:
@@ -835,6 +1007,76 @@ class AppController(QObject):
             self.vehicle_control.set_camera_status(bool(ok))
         if hasattr(self.view, "set_real_agent_status"):
             self.view.set_real_agent_status(bool(ok), str(message or ""))
+
+    def _ensure_real_direct_model_adapter(self):
+        if self.real_direct_model_adapter is not None:
+            return self.real_direct_model_adapter
+        spec = os.environ.get(
+            "MITSU_REAL_AGENT_FACTORY",
+            "real_agent_adapters.lead_real_model_0011_adapter:create_agent",
+        ).strip()
+        if not spec:
+            print("REAL MODEL PREVIEW: model factory disabled; PID fallback remains active")
+            return None
+        try:
+            module_name, func_name = spec.split(":", 1)
+            module = importlib.import_module(module_name)
+            factory = getattr(module, func_name)
+            self.real_direct_model_adapter = factory()
+            print(f"REAL MODEL PREVIEW: model connected: {spec}")
+        except Exception as exc:
+            self.real_direct_model_adapter = None
+            print(f"REAL MODEL PREVIEW: model unavailable: {exc}; PID fallback remains active")
+        return self.real_direct_model_adapter
+
+    @Slot(str, object)
+    def handle_real_direct_model_frame(self, camera_name, frame):
+        name = str(camera_name)
+        if name not in {"wide_90", "narrow_50"}:
+            return
+        now = time.monotonic()
+        self.real_direct_model_frames[name] = {"frame": frame, "ts": now}
+        if not self.ai_control_requested:
+            return
+        adapter = self._ensure_real_direct_model_adapter()
+        if adapter is None:
+            return
+        latest = self.real_direct_model_frames
+        if not all(key in latest for key in ("wide_90", "narrow_50")):
+            return
+        max_age_ms = float(os.environ.get("MITSU_REAL_DIRECT_MODEL_STALE_MS", "500") or 500.0)
+        ages = {key: (now - float(latest[key]["ts"])) * 1000.0 for key in ("wide_90", "narrow_50")}
+        if any(age > max_age_ms for age in ages.values()):
+            return
+        min_period = float(os.environ.get("MITSU_REAL_DIRECT_MODEL_PERIOD_SEC", "0.05") or 0.05)
+        if now - float(self.real_direct_model_last_predict_at or 0.0) < min_period:
+            return
+        self.real_direct_model_last_predict_at = now
+        try:
+            frames = {key: latest[key]["frame"] for key in ("wide_90", "narrow_50")}
+            context_payload = self._build_real_agent_context()
+            prediction = adapter.predict(frames, context_payload)
+            if prediction:
+                payload = dict(prediction)
+                self.real_direct_model_frame_seq += 1
+                payload.setdefault("frame_id", self.real_direct_model_frame_seq)
+                payload.setdefault("timestamp_monotonic", now)
+                if os.environ.get("MITSU_DEBUG_REAL_MODEL_PREVIEW", "0").lower() in {"1", "true", "yes", "on"}:
+                    print(
+                        "REAL MODEL PREVIEW: "
+                        f"frame={payload.get('frame_id')} "
+                        f"steer={float(payload.get('steer', payload.get('steer_norm', 0.0))):.3f} "
+                        f"thr={float(payload.get('throttle', payload.get('thr', 0.0))):.3f} "
+                        f"brk={float(payload.get('brake', payload.get('brk', 0.0))):.3f} "
+                        f"pose={context_payload.get('pose_source', 'none')} "
+                        f"target={context_payload.get('target_point')}"
+                    )
+                self.handle_real_agent_prediction(payload)
+        except Exception as exc:
+            last = float(getattr(self, "_last_real_direct_model_error_at", 0.0) or 0.0)
+            if now - last >= 1.0:
+                self._last_real_direct_model_error_at = now
+                print(f"REAL MODEL PREVIEW: inference error: {exc}")
 
     def _build_real_agent_context(self):
         if self.vehicle_control is None or RealAgentBridge is None:
@@ -918,6 +1160,9 @@ class AppController(QObject):
             "goal": goal,
             "speed_kmh": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0),
             "speed_mps": float(getattr(telemetry, "speed_kmh", 0.0) or 0.0) / 3.6,
+            "pose_valid": bool(getattr(telemetry, "pose_valid", False)),
+            "pose_source": str(getattr(telemetry, "pose_source", "none") or "none"),
+            "pose_mode": str(getattr(self, "real_pose_mode", "external") or "external"),
 
             # Ego-local model inputs.
             "target_point_previous": target_point_previous,
@@ -966,6 +1211,7 @@ class AppController(QObject):
             "physics_timer",
             "route_watchdog_timer",
             "_route_force_continue_timer",
+            "real_dead_reckoning_timer",
         ):
             timer = getattr(self, timer_name, None)
             try:
@@ -1163,6 +1409,16 @@ class AppController(QObject):
             return
         self.real_mission_prepared = True
         self.real_mission = dict(mission or {})
+        self.real_pose_mode = str(
+            self.real_mission.get("pose_mode")
+            or os.environ.get("MITSU_REAL_POSE_MODE", "external")
+            or "external"
+        ).strip().lower()
+        if self.real_pose_mode == "dead_reckoning_ab":
+            if self._configure_real_dead_reckoning_pose(self.real_mission) and self.is_connected:
+                self._start_real_dead_reckoning_pose()
+        else:
+            self._stop_real_dead_reckoning_pose()
         if self.vehicle_control is not None and Mission is not None:
             try:
                 metadata = dict(self.real_mission.get("metadata") or {})
@@ -1212,7 +1468,7 @@ class AppController(QObject):
                 self.vehicle_control.set_mission(Mission.default_test_mission())
         self.view.statusBar().showMessage("Mission validated. Enable AI Preview, then Activate Control")
         if hasattr(self.view, "set_real_readiness"):
-            self.view.set_real_readiness(route=True, pose=False, cameras=False, ai=self.ai_control_requested, vehicle=self.is_connected)
+            self.view.set_real_readiness(route=True, pose=self.real_pose_mode == "dead_reckoning_ab", cameras=False, ai=self.ai_control_requested, vehicle=self.is_connected)
 
     @Slot(float)
     def handle_real_speed_cap_changed(self, value):
