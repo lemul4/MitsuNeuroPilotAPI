@@ -1338,7 +1338,13 @@ class TrainingConfig(BaseConfig):
     # --- Hardware configuration ---
     @overridable_property
     def gpu_name(self):
-        """Normalized GPU name for hardware-specific configurations."""
+        """Normalized GPU name for hardware-specific configurations.
+
+        CPU-safe: inference can run on CPU in real-port/model_0011 debug mode.
+        """
+        if not torch.cuda.is_available():
+            return "cpu"
+
         try:
             name = torch.cuda.get_device_name().lower()
             if "rtx 2080 ti" in name:
@@ -1359,12 +1365,11 @@ class TrainingConfig(BaseConfig):
                 return "rtx4090"
             elif "rtx 5090" in name:
                 return "rtx5090"
-            else:
-                raise Exception(
-                    f"Unknown GPU name: {name}. Please register it in the config."
-                )
-        except RuntimeError:
-            return ""
+            return "unknown_cuda"
+        except (RuntimeError, AssertionError):
+            return "cpu"
+
+    
 
     @overridable_property
     def rank(self):

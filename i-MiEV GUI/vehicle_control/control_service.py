@@ -185,9 +185,10 @@ class VehicleControlService(QObject):
 
     def set_manual_mode_enabled(self, enabled: bool) -> None:
         self.manual_mode_enabled = bool(enabled)
-        # Manual mode is an explicit authority mode. It does not require the neural
-        # preview flag, but it still requires mission, pose, cameras and vehicle readiness
-        # before Activate Control can arm Drive.
+        # Manual mode is an explicit local authority mode. It does not require a
+        # mission, pose, camera stream or AI Preview; those are autonomous-control
+        # preconditions. It still requires a connected vehicle controller with a
+        # live heartbeat and normal safety checks before Drive can be armed.
         self._refresh_readiness_state()
         self._log("Manual mode enabled" if enabled else "Manual mode disabled")
 
@@ -216,12 +217,13 @@ class VehicleControlService(QObject):
         telemetry = self.get_telemetry()
         pose_valid = bool(getattr(telemetry, "pose_valid", False))
         pose_fresh = telemetry.age_ms() <= 750.0
+        manual = bool(self.manual_mode_enabled)
         return ReadinessStatus(
             connected=self._connected and telemetry.connected,
-            mission_ok=self.mission is not None and bool(self.mission.waypoints),
-            pose_ok=self.pose_ok and pose_valid and pose_fresh,
-            cameras_ok=self.cameras_ok or self.manual_mode_enabled,
-            ai_preview_ok=self.ai_preview_enabled or self.manual_mode_enabled,
+            mission_ok=manual or (self.mission is not None and bool(self.mission.waypoints)),
+            pose_ok=manual or (self.pose_ok and pose_valid and pose_fresh),
+            cameras_ok=manual or self.cameras_ok,
+            ai_preview_ok=manual or self.ai_preview_enabled,
             vehicle_ok=self.vehicle_ok and telemetry.heartbeat_ok,
             speed_zero=telemetry.speed_kmh <= self.park_speed_threshold_kmh,
             gear_known=telemetry.gear is not None,
@@ -304,24 +306,40 @@ class VehicleControlService(QObject):
             await self._send_raw_command(VehicleCommand(active=False, gear_request=None, accel_pct=0, brake_pct=35, cruise_enabled=False, reason="brake_hold"))
             await asyncio.sleep(0.1)
 
-            self._log("ARMING: requesting Drive")
-            if self.adapter is not None:
-                await self.adapter.request_gear(Gear.D)
-            await asyncio.sleep(self.arming_delay_sec)
-
-            telemetry = self.get_telemetry()
-            if telemetry.gear != Gear.D:
-                reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
-                self.state_machine.on_fault(reason)
-                self._emit_state()
-                self.activation_blocked.emit(reason)
-                self._log(f"Activation failed: {reason}")
-                return False
-
             manual_active = bool(self.manual_mode_enabled and not self.ai_preview_enabled)
+            if manual_active:
+                telemetry = self.get_telemetry()
+                gear_text = telemetry.gear.name if telemetry.gear else "unknown"
+                self._log(f"ARMING: manual mode in current gear {gear_text}")
+            else:
+                self._log("ARMING: requesting Drive")
+                if self.adapter is not None:
+                    await self.adapter.request_gear(Gear.D)
+                await asyncio.sleep(self.arming_delay_sec)
+
+                telemetry = self.get_telemetry()
+                if telemetry.gear != Gear.D:
+                    reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
+                    self.state_machine.on_fault(reason)
+                    self._emit_state()
+                    self.activation_blocked.emit(reason)
+                    self._log(f"Activation failed: {reason}")
+                    return False
+
             self.state_machine.on_gear_drive_confirmed(manual=manual_active)
             self._emit_state()
             if manual_active:
+                await self._send_raw_command(
+                    VehicleCommand(
+                        active=True,
+                        gear_request=None,
+                        accel_pct=0,
+                        brake_pct=0,
+                        cruise_enabled=True,
+                        send_cruise_frame=True,
+                        reason="manual_control_enable",
+                    )
+                )
                 self._log("MANUAL_ACTIVE")
             else:
                 self._log("AI_ACTIVE")
@@ -397,6 +415,17 @@ class VehicleControlService(QObject):
             self._log(f"DISENGAGING: {reason}")
 
             deadline = time.monotonic() + float(self.disengage_timeout_sec)
+            await self._send_raw_command(
+                VehicleCommand(
+                    active=False,
+                    gear_request=None,
+                    accel_pct=0,
+                    brake_pct=0,
+                    cruise_enabled=False,
+                    send_cruise_frame=True,
+                    reason="manual_control_disable",
+                )
+            )
             await self._send_raw_command(VehicleCommand.safe_stop(reason="deactivate"))
             while time.monotonic() < deadline:
                 telemetry = self.get_telemetry()
@@ -552,9 +581,10 @@ class VehicleControlService(QObject):
         throttle = max(0.0, min(1.0, float(accel_pct) / 100.0))
         brake = max(0.0, min(1.0, float(brake_pct) / 100.0))
 
-        # Do not apply throttle in Park/Neutral. User must manually request D/R
-        # first, which is visible and auditable in the event log.
-        if telemetry.gear not in (Gear.D, Gear.R, Gear.E, Gear.B):
+        # Unknown gear feedback is unsafe for throttle. A known Park/Neutral gear
+        # is still valid for bench/manual actuator tests, where the operator may
+        # need to verify pedal commands without moving the vehicle.
+        if telemetry.gear is None:
             throttle = 0.0
 
         intent = ControlIntent(

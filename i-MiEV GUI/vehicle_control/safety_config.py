@@ -21,7 +21,7 @@ class RealVehicleSafetyConfig:
     require_pose: bool = True
     require_two_cameras: bool = True
     require_gear_feedback: bool = True
-    max_speed_kmh: float = 1.0
+    max_speed_kmh: float = 5.0
     max_accel_pct: int = 10
     max_brake_pct: int = 80
     max_steering_raw: int = 60
@@ -41,7 +41,7 @@ class RealVehicleSafetyConfig:
             require_pose=bool(d.get("require_pose", True)),
             require_two_cameras=bool(d.get("require_two_cameras", True)),
             require_gear_feedback=bool(d.get("require_gear_feedback", True)),
-            max_speed_kmh=float(d.get("max_speed_kmh", 1.0)),
+            max_speed_kmh=float(d.get("max_speed_kmh", 5.0)),
             max_accel_pct=int(d.get("max_accel_pct", 10)),
             max_brake_pct=int(d.get("max_brake_pct", 80)),
             max_steering_raw=int(d.get("max_steering_raw", 60)),
@@ -68,6 +68,9 @@ class RealVehicleSafetyConfig:
         env_actuation = os.environ.get("MITSU_REAL_ENABLE_ACTUATION", "").strip().lower()
         if env_actuation:
             cfg = cls.from_dict({**cfg.__dict__, "allow_real_actuation": env_actuation in {"1", "true", "yes", "on"}})
+        env_max_speed = os.environ.get("MITSU_REAL_MAX_SPEED_KMH", "").strip()
+        if env_max_speed:
+            cfg = cls.from_dict({**cfg.__dict__, "max_speed_kmh": float(env_max_speed)})
         env_dry_run = os.environ.get("MITSU_REAL_DRY_RUN", "").strip().lower()
         if env_dry_run:
             cfg = cls.from_dict({**cfg.__dict__, "dry_run": env_dry_run not in {"0", "false", "no", "off"}})

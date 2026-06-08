@@ -958,8 +958,8 @@ class MainWindow(QMainWindow):
         self._append_log(f"REAL MISSION: validated {mission.get('name', 'mission')}")
         self.real_mission_validated.emit(dict(mission or {}))
 
-    def on_device_selection_changed(self, text):
-        text = str(text or "")
+    def on_device_selection_changed(self, text=None):
+        text = self._selected_device_text() if hasattr(self, "combo_ports") else str(text or "")
         if text == "VIRTUAL_DEMO_MODE":
             self.set_ui_mode("carla")
         else:
@@ -1003,6 +1003,128 @@ class MainWindow(QMainWindow):
     def set_real_nav_goal(self, goal):
         if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_nav_goal"):
             self.real_mission_panel.set_nav_goal(goal)
+
+
+    def _special_device_modes(self):
+        return (
+            ("VIRTUAL_DEMO_MODE", "VIRTUAL_DEMO_MODE — CARLA / virtual demo"),
+            ("TEST_MOCK_VEHICLE", "TEST_MOCK_VEHICLE — mock vehicle"),
+            ("TEST_REPLAY_LOG", "TEST_REPLAY_LOG — replay log"),
+            ("TEST_SERIAL_LOOPBACK", "TEST_SERIAL_LOOPBACK — software loopback"),
+        )
+
+    def _selected_device_text(self):
+        combo = getattr(self, "combo_ports", None)
+        if combo is None:
+            return ""
+        try:
+            data = combo.currentData()
+            if data:
+                return str(data)
+        except Exception:
+            pass
+        text = str(combo.currentText() or "").strip()
+        return text.split(" — ", 1)[0].strip()
+
+    @staticmethod
+    def _sort_serial_device_key(port_name):
+        text = str(port_name or "")
+        match = re.match(r"(?i)^COM(\d+)$", text)
+        if match:
+            return ("win", int(match.group(1)), text.lower())
+        match = re.search(r"(\d+)$", text)
+        if match:
+            return ("posix", int(match.group(1)), text.lower())
+        return ("other", 999999, text.lower())
+
+    @staticmethod
+    def _format_serial_port_label(port_info):
+        device = str(getattr(port_info, "device", "") or "").strip()
+        description = str(getattr(port_info, "description", "") or "").strip()
+        manufacturer = str(getattr(port_info, "manufacturer", "") or "").strip()
+        serial_number = str(getattr(port_info, "serial_number", "") or "").strip()
+        hwid = str(getattr(port_info, "hwid", "") or "").strip()
+
+        details = []
+        if description and description not in {device, "n/a", "N/A"}:
+            details.append(description)
+        if manufacturer and manufacturer not in details:
+            details.append(manufacturer)
+        if serial_number:
+            details.append(f"SN:{serial_number}")
+        if not details and hwid:
+            details.append(hwid)
+
+        return device if not details else f"{device} — {' · '.join(details)}"
+
+    def _scan_serial_ports(self):
+        try:
+            import serial.tools.list_ports
+        except Exception as exc:
+            return [], f"pyserial недоступен: {exc}"
+
+        try:
+            ports = list(serial.tools.list_ports.comports())
+        except Exception as exc:
+            return [], f"ошибка сканирования портов: {exc}"
+
+        ports.sort(key=lambda p: self._sort_serial_device_key(getattr(p, "device", "")))
+        return ports, ""
+
+    def refresh_serial_ports(self, preserve_selection=True, log=False):
+        combo = getattr(self, "combo_ports", None)
+        if combo is None:
+            return
+
+        if getattr(self, "btn_connect", None) is not None and self.btn_connect.text() not in ("Connect", "Подключить"):
+            return
+
+        previous = self._selected_device_text() if preserve_selection else ""
+        ports, error = self._scan_serial_ports()
+
+        combo.blockSignals(True)
+        combo.clear()
+
+        special_values = {value for value, _ in self._special_device_modes()}
+        for value, label in self._special_device_modes():
+            combo.addItem(label, value)
+
+        for port in ports:
+            device = str(getattr(port, "device", "") or "").strip()
+            if not device:
+                continue
+            combo.addItem(self._format_serial_port_label(port), device)
+
+        if not ports:
+            combo.addItem("Нет COM/TTY портов — подключите USB-CAN/USB-UART", "")
+
+        selected_index = -1
+        if previous:
+            selected_index = combo.findData(previous)
+
+        if selected_index < 0:
+            first_real_index = -1
+            for i in range(combo.count()):
+                data = str(combo.itemData(i) or "")
+                if data and data not in special_values:
+                    first_real_index = i
+                    break
+            selected_index = first_real_index if first_real_index >= 0 else combo.findData("VIRTUAL_DEMO_MODE")
+
+        if selected_index >= 0:
+            combo.setCurrentIndex(selected_index)
+
+        combo.blockSignals(False)
+        self.on_device_selection_changed(self._selected_device_text())
+
+        if log:
+            if error:
+                self._append_log(f"SERIAL PORTS: {error}")
+            elif ports:
+                names = ", ".join(str(getattr(port, "device", "")) for port in ports)
+                self._append_log(f"SERIAL PORTS: найдено {len(ports)}: {names}")
+            else:
+                self._append_log("SERIAL PORTS: физические COM/TTY порты не найдены")
 
     def _build_left_dashboard(self):
         panel = QFrame()
@@ -1079,15 +1201,24 @@ class MainWindow(QMainWindow):
         conn_layout = QHBoxLayout()
         conn_layout.setSpacing(8)
         self.combo_ports = QComboBox()
-        import serial.tools.list_ports
-        self.combo_ports.addItem("VIRTUAL_DEMO_MODE")
-        self.combo_ports.addItem("TEST_MOCK_VEHICLE")
-        self.combo_ports.addItem("TEST_REPLAY_LOG")
-        self.combo_ports.addItem("TEST_SERIAL_LOOPBACK")
-        for port in serial.tools.list_ports.comports():
-            self.combo_ports.addItem(port.device)
-        self.combo_ports.currentTextChanged.connect(self.on_device_selection_changed)
+        self.combo_ports.setMinimumWidth(320)
+        self.combo_ports.setToolTip("Автообнаружение портов: Windows COMx, Linux /dev/ttyUSB*/ttyACM*, macOS /dev/cu.*")
+        self.combo_ports.currentIndexChanged.connect(
+            lambda *_: self.on_device_selection_changed(self._selected_device_text())
+        )
         conn_layout.addWidget(self.combo_ports, stretch=1)
+
+        self.btn_refresh_ports = QPushButton("↻")
+        self.btn_refresh_ports.setToolTip("Обновить список COM/TTY портов")
+        self.btn_refresh_ports.setFixedWidth(42)
+        self.btn_refresh_ports.clicked.connect(lambda *_: self.refresh_serial_ports(preserve_selection=True, log=True))
+        conn_layout.addWidget(self.btn_refresh_ports)
+
+        self.serial_ports_timer = QTimer(self)
+        self.serial_ports_timer.setInterval(2000)
+        self.serial_ports_timer.timeout.connect(lambda: self.refresh_serial_ports(preserve_selection=True, log=False))
+        self.serial_ports_timer.start()
+        self.refresh_serial_ports(preserve_selection=False, log=False)
 
         self.btn_connect = QPushButton("Подключить")
         self.btn_connect.setMinimumWidth(190)
@@ -1950,9 +2081,13 @@ class MainWindow(QMainWindow):
 
     def on_connect_clicked(self):
         if self.btn_connect.text() in ("Connect", "Подключить"):
-            port = self.combo_ports.currentText()
+            self.refresh_serial_ports(preserve_selection=True, log=False)
+            port = self._selected_device_text()
             if port:
                 self.connect_requested.emit(port)
+            else:
+                self.statusBar().showMessage("COM/TTY порт не найден. Подключите устройство или выберите тестовый режим.")
+                self._append_log("SERIAL PORTS: подключение отменено — порт не выбран")
         else:
             self.disconnect_requested.emit()
 

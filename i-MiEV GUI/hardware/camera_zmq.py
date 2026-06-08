@@ -141,7 +141,10 @@ class RealCameraAgentAnalyzerThread(QThread):
         self.ai_enabled = bool(enabled)
 
     def _load_model_adapter(self):
-        spec = os.environ.get("MITSU_REAL_AGENT_FACTORY", "").strip()
+        spec = os.environ.get(
+            "MITSU_REAL_AGENT_FACTORY",
+            "real_agent_adapters.lead_real_model_0011_adapter:create_agent",
+        ).strip()
         if not spec:
             self.analyzer_status_changed.emit("модель не задана; используется маршрутный PID fallback")
             return None
