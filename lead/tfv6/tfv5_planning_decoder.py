@@ -39,12 +39,14 @@ class TFv5PlanningDecoder(nn.Module):
             decoder_layer=nn.TransformerDecoderLayer(
                 self.config.transfuser_token_dim,
                 self.config.transfuser_num_bev_cross_attention_heads,
+                dropout=self.config.planner_dropout,
                 activation=nn.GELU(),
                 batch_first=True,
             ),
             num_layers=self.config.transfuser_num_bev_cross_attention_layers,
             norm=nn.LayerNorm(self.config.transfuser_token_dim),
         )
+        self.dropout = nn.Dropout(self.config.planner_dropout)
 
         self.tp_encoder = nn.Linear(2, config.gru_hidden_size)
 
@@ -68,6 +70,7 @@ class TFv5PlanningDecoder(nn.Module):
                 self.config.transfuser_token_dim,
             ),
             nn.ReLU(inplace=True),
+            nn.Dropout(self.config.planner_dropout),
             nn.Linear(self.config.transfuser_token_dim, len(self.config.target_speeds)),
         )
 
@@ -112,6 +115,10 @@ class TFv5PlanningDecoder(nn.Module):
             values[:, self.config.num_route_points_prediction : -1],
             values[:, -1],
         )
+        route_values = self.dropout(route_values)
+        waypoints_values = self.dropout(waypoints_values)
+        speed_value = self.dropout(speed_value)
+
         target_point = data["target_point"].to(
             device=self.device, dtype=self.input_dtype, non_blocking=True
         )
@@ -309,6 +316,7 @@ class PlanningContextEncoder(nn.Module):
         self.dimension_adapter = nn.Conv2d(
             input_bev_channels, self.config.transfuser_token_dim, kernel_size=1
         )
+        self.dropout = nn.Dropout(self.config.planner_dropout)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -387,7 +395,7 @@ class PlanningContextEncoder(nn.Module):
                 [context_tokens, status_tokens], dim=1
             )  # (bs, height * width + num_status_tokens, transfuser_token_dim)
 
-        return context_tokens
+        return self.dropout(context_tokens)
 
 
 class PositionEmbeddingSine(nn.Module):

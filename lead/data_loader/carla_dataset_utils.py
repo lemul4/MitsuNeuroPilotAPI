@@ -96,7 +96,7 @@ def image_augmenter(config: TrainingConfig, prob: float = 0.2):
     import imgaug
     from imgaug import augmenters as ia
 
-    imgaug.imgaug.seed(config.seed)
+    imgaug.imgaug.seed(config.runtime_seed())
     perturbations = [
         ia.Sometimes(prob, ia.GaussianBlur((0, 0.25))),
         ia.Sometimes(
