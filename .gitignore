@@ -218,3 +218,4 @@ telemetry_*
 *.bak_*
 *.orig
 *.rej
+*.pth

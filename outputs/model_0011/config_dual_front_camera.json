@@ -22,7 +22,7 @@
     "num_used_cameras": 2,
     "rgb_camera_ids": [
         1,
-        3
+        2
     ],
     "use_lidar": false,
     "use_radars": false,
