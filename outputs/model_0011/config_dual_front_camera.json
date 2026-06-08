@@ -182,7 +182,7 @@
     "train_drop_last": true,
     "validation_drop_last": true,
     "dataloader_start_method": "fork",
-    "jit_compile": true,
+    "jit_compile": false,
     "jit_compile_mode": "reduce-overhead",
     "jit_compile_warmup_steps": 1,
     "reset_route_timer_after_first_agent_tick": true,
