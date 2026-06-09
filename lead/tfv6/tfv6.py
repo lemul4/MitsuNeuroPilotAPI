@@ -128,7 +128,7 @@ class TFv6(nn.Module):
         fullgraph: bool = True,
         dynamic: bool = False,
         backend: str = "inductor",
-        mode: str = "max-autotune-no-cudagraphs",
+        mode: str | None = "max-autotune-no-cudagraphs",
     ) -> None:
         forward_core = self._forward_core
         self._compiled_forward_core_is_dual_static = False
@@ -142,6 +142,10 @@ class TFv6(nn.Module):
             backend=backend,
             mode=mode,
         )
+
+    def disable_compile(self) -> None:
+        self._compiled_forward_core = None
+        self._compiled_forward_core_is_dual_static = False
 
     def forward(self, data: dict[str, typing.Any]) -> Prediction:
         self.log = {}

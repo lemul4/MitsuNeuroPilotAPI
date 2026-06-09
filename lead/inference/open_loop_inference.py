@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from importlib.util import find_spec
 
 import jaxtyping as jt
 import numpy as np
@@ -157,6 +158,11 @@ class OpenLoopInference:
         if self.device.type != "cuda":
             LOG.warning("Skipping torch.compile because inference device is not CUDA.")
             return
+        if find_spec("triton") is None:
+            LOG.warning(
+                "Skipping torch.compile because Triton is not installed in the active Python environment."
+            )
+            return
         jit_compile_mode = self._jit_compile_mode()
         net.prepare_compile(
             fullgraph=False,
@@ -268,7 +274,17 @@ class OpenLoopInference:
             for step_index in range(warmup_steps):
                 for net_index, net in enumerate(self.nets):
                     step_start = time.perf_counter()
-                    net(data)
+                    try:
+                        net(data)
+                    except Exception as exc:
+                        for fallback_net in self.nets:
+                            fallback_net.disable_compile()
+                        self.config_training.jit_compile = False
+                        LOG.warning(
+                            "Disabling torch.compile after warmup failed; falling back to eager inference. Error: %s",
+                            exc,
+                        )
+                        return
                     self._sync_device()
                     self._log_startup_timing(
                         "jit_compile_warmup_forward",
