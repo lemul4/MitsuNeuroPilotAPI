@@ -204,11 +204,7 @@ conda install -c conda-forge ffmpeg parallel tree gcc zip unzip
 pre-commit install
 ```
 
-Install CARLA into `3rd_party/CARLA_0915`:
-
-```bash
-bash scripts/setup_carla.sh
-```
+Install CARLA
 
 Copy `DefaultEngine.ini` into the CARLA configuration directory:
 
@@ -222,61 +218,6 @@ Typical CARLA startup parameters:
 -quality-level=Epic -world-port=2000 -nosound -carla-streaming-port=2001
 ```
 
-## Environment Variables
-
-Linux/macOS Conda activation hook:
-
-```bash
-mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
-mkdir -p "$CONDA_PREFIX/etc/conda/deactivate.d"
-
-cat > "$CONDA_PREFIX/etc/conda/activate.d/mitsu_neuropilot.sh" <<EOF
-export LEAD_PROJECT_ROOT="$(pwd)"
-export SCENARIO_RUNNER_ROOT="\${LEAD_PROJECT_ROOT}/3rd_party/scenario_runner_autopilot"
-export CARLA_VERSION="0915"
-export CARLA_ROOT="\${LEAD_PROJECT_ROOT}/3rd_party/CARLA_\${CARLA_VERSION}"
-export PYTHONPATH="\${CARLA_ROOT}/PythonAPI/carla:\${LEAD_PROJECT_ROOT}:\${PYTHONPATH}"
-EOF
-
-cat > "$CONDA_PREFIX/etc/conda/deactivate.d/mitsu_neuropilot.sh" <<EOF
-unset LEAD_PROJECT_ROOT
-unset SCENARIO_RUNNER_ROOT
-unset CARLA_VERSION
-unset CARLA_ROOT
-EOF
-
-conda deactivate
-conda activate lead
-```
-
-Windows PowerShell setup:
-
-```powershell
-conda activate lead
-$PROJECT_ROOT = (Get-Location).Path
-
-New-Item -ItemType Directory -Force "$env:CONDA_PREFIX\etc\conda\activate.d" | Out-Null
-New-Item -ItemType Directory -Force "$env:CONDA_PREFIX\etc\conda\deactivate.d" | Out-Null
-
-@"
-`$env:LEAD_PROJECT_ROOT = '$PROJECT_ROOT'
-`$env:SCENARIO_RUNNER_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\scenario_runner_autopilot"
-`$env:CARLA_VERSION = '0915'
-`$env:CARLA_ROOT = "`$env:LEAD_PROJECT_ROOT\3rd_party\CARLA_`$env:CARLA_VERSION"
-`$env:PYTHONPATH = "`$env:CARLA_ROOT\PythonAPI\carla;`$env:LEAD_PROJECT_ROOT;`$env:PYTHONPATH"
-"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\activate.d\mitsu_neuropilot.ps1"
-
-@"
-Remove-Item Env:LEAD_PROJECT_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:SCENARIO_RUNNER_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:CARLA_VERSION -ErrorAction SilentlyContinue
-Remove-Item Env:CARLA_ROOT -ErrorAction SilentlyContinue
-"@ | Set-Content "$env:CONDA_PREFIX\etc\conda\deactivate.d\mitsu_neuropilot.ps1"
-
-conda deactivate
-conda activate lead
-```
-
 ## Checkpoints
 
 Our checkpoint:
@@ -286,10 +227,6 @@ Our checkpoint:
 ## CARLA Evaluation
 
 Start CARLA:
-
-```bash
-bash scripts/start_carla.sh
-```
 
 Run one closed-loop route through the wrapper:
 

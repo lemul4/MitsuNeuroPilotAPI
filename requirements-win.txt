@@ -228,8 +228,12 @@ pyproject_hooks==1.2.0
 PyQt5==5.15.11
 #PyQt5-Qt5==5.15.17
 #PyQt5_sip==12.17.0
+PyQt6==6.11.0
+pyqtgraph==0.14.0
 pyquaternion==0.9.9
 pyrefly==0.30.0
+pyserial==3.5
+pyserial-asyncio==0.6
 python-dateutil==2.9.0.post0
 python-json-logger==3.3.0
 pytictoc==1.5.3
@@ -237,6 +241,7 @@ pytz==2025.2
 PyX==0.16
 PyYAML==6.0
 pyzmq==27.0.0
+qasync==0.28.0
 ray==2.47.1
 rdp==0.8
 referencing==0.36.2
