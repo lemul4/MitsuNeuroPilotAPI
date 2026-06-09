@@ -232,16 +232,29 @@ class VehicleControlService(QObject):
 
     def _gear_confirm_timeout_sec(self) -> float:
         cfg = getattr(self.adapter, "safety_config", None)
-        return max(0.5, float(getattr(cfg, "gear_confirm_timeout_sec", self.arming_delay_sec)))
+        configured = os.environ.get("MITSU_GEAR_CONFIRM_TIMEOUT_SEC", "").strip()
+        if configured:
+            return max(0.5, float(configured))
+        return max(2.5, float(getattr(cfg, "gear_confirm_timeout_sec", self.arming_delay_sec)))
 
-    async def _request_gear_until_confirmed(self, gear: Gear) -> bool:
+    async def _request_gear_until_confirmed(self, gear: Gear, reason: str = "gear_request", brake_pct: int = 35) -> bool:
         if self.adapter is None:
             return False
         deadline = time.monotonic() + self._gear_confirm_timeout_sec()
-        interval = 0.25
         while time.monotonic() <= deadline:
-            await self.adapter.request_gear(gear)
-            await asyncio.sleep(interval)
+            await self._send_raw_command(
+                VehicleCommand(
+                    active=False,
+                    gear_request=gear,
+                    steering_raw=0,
+                    accel_pct=0,
+                    brake_pct=max(0, min(100, int(brake_pct))),
+                    cruise_enabled=False,
+                    send_cruise_frame=True,
+                    reason=reason,
+                )
+            )
+            await asyncio.sleep(0.10)
             telemetry = self.get_telemetry()
             if telemetry.gear == gear:
                 return True
@@ -262,12 +275,53 @@ class VehicleControlService(QObject):
 
     async def _arm_ai_authority(self) -> None:
         self.ai_authority_confirmed = False
+        brake_pct = max(0, min(100, int(os.environ.get("MITSU_AI_AUTHORITY_BRAKE_PCT", "35") or 35)))
         repeats = max(1, int(float(os.environ.get("MITSU_AI_AUTHORITY_ENABLE_SEC", "1.0") or 1.0) / 0.05))
         for _ in range(repeats):
-            await self._send_ai_authority_hold("ai_control_enable")
+            await self._send_ai_authority_hold("ai_control_enable", brake_pct=brake_pct)
             await asyncio.sleep(0.05)
-        self.ai_authority_confirmed = True
-        self._log(f"AI authority enable sent: packets={repeats}")
+        self._log(f"AI authority enable sent: packets={repeats} brake={brake_pct}%")
+
+    async def _send_brake_hold(self, reason: str, brake_pct: int = 35, duration_sec: float = 0.0) -> None:
+        deadline = time.monotonic() + max(0.0, float(duration_sec))
+        first = True
+        while first or time.monotonic() < deadline:
+            first = False
+            await self._send_raw_command(
+                VehicleCommand(
+                    active=False,
+                    gear_request=None,
+                    steering_raw=0,
+                    accel_pct=0,
+                    brake_pct=max(0, min(100, int(brake_pct))),
+                    cruise_enabled=False,
+                    send_cruise_frame=True,
+                    reason=reason,
+                )
+            )
+            await asyncio.sleep(0.05)
+
+    async def _request_park_continuously(self, brake_pct: int = 35) -> bool:
+        duration = max(0.5, float(os.environ.get("MITSU_PARK_REQUEST_SEC", "2.0") or 2.0))
+        deadline = time.monotonic() + duration
+        confirmed = False
+        while time.monotonic() <= deadline:
+            await self._send_raw_command(
+                VehicleCommand(
+                    active=False,
+                    gear_request=Gear.P,
+                    steering_raw=0,
+                    accel_pct=0,
+                    brake_pct=max(0, min(100, int(brake_pct))),
+                    cruise_enabled=False,
+                    send_cruise_frame=True,
+                    reason="park_request",
+                )
+            )
+            telemetry = self.get_telemetry()
+            confirmed = confirmed or telemetry.gear == Gear.P
+            await asyncio.sleep(0.10)
+        return confirmed or self.get_telemetry().gear == Gear.P
 
     async def _send_pedal_release(self, reason: str, repeats: int = 3, interval_sec: float = 0.03) -> None:
         repeats = max(1, int(repeats))
@@ -420,7 +474,7 @@ class VehicleControlService(QObject):
                     self._log("ARMING: enabling AI authority")
                     await self._arm_ai_authority()
                     self._log("ARMING: requesting Drive")
-                    if not await self._request_gear_until_confirmed(Gear.D):
+                    if not await self._request_gear_until_confirmed(Gear.D, reason="drive_request", brake_pct=35):
                         telemetry = self.get_telemetry()
                         reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
                         self.state_machine.on_fault(reason)
@@ -428,6 +482,7 @@ class VehicleControlService(QObject):
                         self.activation_blocked.emit(reason)
                         self._log(f"Activation failed: {reason}")
                         return False
+                    self.ai_authority_confirmed = True
             except Exception as exc:
                 reason = f"arming failed: {exc}"
                 self.ai_authority_confirmed = False
@@ -531,7 +586,9 @@ class VehicleControlService(QObject):
             self._log(f"DISENGAGING: {reason}")
 
             deadline = time.monotonic() + float(self.disengage_timeout_sec)
-            await self._send_pedal_release(reason="manual_control_disable")
+            hold_sec = float(os.environ.get("MITSU_DISENGAGE_BRAKE_HOLD_SEC", "2.0") or 2.0)
+            self._log(f"DISENGAGING: brake hold before Park ({hold_sec:.1f}s)")
+            await self._send_brake_hold(reason="disengage_brake_hold", brake_pct=35, duration_sec=hold_sec)
             while time.monotonic() < deadline:
                 telemetry = self.get_telemetry()
                 if telemetry.speed_kmh <= self.park_speed_threshold_kmh:
@@ -542,9 +599,10 @@ class VehicleControlService(QObject):
             telemetry = self.get_telemetry()
             if telemetry.speed_kmh <= self.park_speed_threshold_kmh:
                 try:
-                    await self.adapter.request_gear(Gear.P)
+                    self._log("DISENGAGING: requesting Park continuously")
+                    park_confirmed = await self._request_park_continuously(brake_pct=35)
                     telemetry = self.get_telemetry()
-                    if telemetry.gear == Gear.P:
+                    if park_confirmed:
                         self._log("Gear P confirmed after stop")
                     else:
                         actual = telemetry.gear.name if telemetry.gear else "unknown"
@@ -554,6 +612,7 @@ class VehicleControlService(QObject):
             else:
                 self._log(f"Park skipped: vehicle still moving ({telemetry.speed_kmh:.2f} km/h)")
 
+            await self._send_pedal_release(reason="disengage_pedal_release")
             self.state_machine.on_manual_ready()
             self._emit_state()
 
