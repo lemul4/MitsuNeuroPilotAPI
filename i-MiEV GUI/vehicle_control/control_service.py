@@ -241,20 +241,22 @@ class VehicleControlService(QObject):
         if self.adapter is None:
             return False
         deadline = time.monotonic() + self._gear_confirm_timeout_sec()
-        while time.monotonic() <= deadline:
-            await self._send_raw_command(
-                VehicleCommand(
-                    active=False,
-                    gear_request=gear,
-                    steering_raw=0,
-                    accel_pct=0,
-                    brake_pct=max(0, min(100, int(brake_pct))),
-                    cruise_enabled=False,
-                    send_cruise_frame=True,
-                    reason=reason,
-                )
+        poll_interval = max(0.05, float(os.environ.get("MITSU_GEAR_CONFIRM_POLL_SEC", "0.10") or 0.10))
+        await self._send_raw_command(
+            VehicleCommand(
+                active=False,
+                gear_request=gear,
+                steering_raw=0,
+                accel_pct=0,
+                brake_pct=max(0, min(100, int(brake_pct))),
+                cruise_enabled=False,
+                send_cruise_frame=False,
+                reason=reason,
             )
-            await asyncio.sleep(0.10)
+        )
+        self._log(f"Gear {gear.name} request sent once; waiting confirmation")
+        while time.monotonic() <= deadline:
+            await asyncio.sleep(poll_interval)
             telemetry = self.get_telemetry()
             if telemetry.gear == gear:
                 return True
@@ -267,7 +269,36 @@ class VehicleControlService(QObject):
                 gear_request=None,
                 accel_pct=0,
                 brake_pct=max(0, min(100, int(brake_pct))),
-                cruise_enabled=True,
+                cruise_enabled=False,
+                send_cruise_frame=False,
+                reason=reason,
+            )
+        )
+
+    async def _send_control_enable(self, reason: str = "control_enable", repeats: int = 1, interval_sec: float = 0.05) -> None:
+        repeats = max(1, int(repeats))
+        for _ in range(repeats):
+            await self._send_raw_command(
+                VehicleCommand(
+                    active=True,
+                    gear_request=None,
+                    accel_pct=0,
+                    brake_pct=0,
+                    cruise_enabled=True,
+                    send_cruise_frame=True,
+                    reason=reason,
+                )
+            )
+            await asyncio.sleep(max(0.0, float(interval_sec)))
+
+    async def _send_control_disable(self, reason: str = "control_disable") -> None:
+        await self._send_raw_command(
+            VehicleCommand(
+                active=False,
+                gear_request=None,
+                accel_pct=0,
+                brake_pct=0,
+                cruise_enabled=False,
                 send_cruise_frame=True,
                 reason=reason,
             )
@@ -275,12 +306,10 @@ class VehicleControlService(QObject):
 
     async def _arm_ai_authority(self) -> None:
         self.ai_authority_confirmed = False
-        brake_pct = max(0, min(100, int(os.environ.get("MITSU_AI_AUTHORITY_BRAKE_PCT", "35") or 35)))
-        repeats = max(1, int(float(os.environ.get("MITSU_AI_AUTHORITY_ENABLE_SEC", "1.0") or 1.0) / 0.05))
-        for _ in range(repeats):
-            await self._send_ai_authority_hold("ai_control_enable", brake_pct=brake_pct)
-            await asyncio.sleep(0.05)
-        self._log(f"AI authority enable sent: packets={repeats} brake={brake_pct}%")
+        repeats = max(1, int(os.environ.get("MITSU_AI_AUTHORITY_ENABLE_PACKETS", "1") or 1))
+        interval = max(0.0, float(os.environ.get("MITSU_AI_AUTHORITY_ENABLE_INTERVAL_SEC", "0.0") or 0.0))
+        await self._send_control_enable("ai_control_enable", repeats=repeats, interval_sec=interval)
+        self._log(f"AI authority enable sent: packets={repeats} mode=manual_like")
 
     async def _send_brake_hold(self, reason: str, brake_pct: int = 35, duration_sec: float = 0.0) -> None:
         deadline = time.monotonic() + max(0.0, float(duration_sec))
@@ -295,33 +324,34 @@ class VehicleControlService(QObject):
                     accel_pct=0,
                     brake_pct=max(0, min(100, int(brake_pct))),
                     cruise_enabled=False,
-                    send_cruise_frame=True,
+                    send_cruise_frame=False,
                     reason=reason,
                 )
             )
             await asyncio.sleep(0.05)
 
-    async def _request_park_continuously(self, brake_pct: int = 35) -> bool:
-        duration = max(0.5, float(os.environ.get("MITSU_PARK_REQUEST_SEC", "2.0") or 2.0))
-        deadline = time.monotonic() + duration
-        confirmed = False
-        while time.monotonic() <= deadline:
-            await self._send_raw_command(
-                VehicleCommand(
-                    active=False,
-                    gear_request=Gear.P,
-                    steering_raw=0,
-                    accel_pct=0,
-                    brake_pct=max(0, min(100, int(brake_pct))),
-                    cruise_enabled=False,
-                    send_cruise_frame=True,
-                    reason="park_request",
-                )
+    async def _request_park_once(self, brake_pct: int = 35) -> bool:
+        timeout = max(0.5, float(os.environ.get("MITSU_PARK_CONFIRM_TIMEOUT_SEC", "2.0") or 2.0))
+        deadline = time.monotonic() + timeout
+        await self._send_raw_command(
+            VehicleCommand(
+                active=False,
+                gear_request=Gear.P,
+                steering_raw=0,
+                accel_pct=0,
+                brake_pct=max(0, min(100, int(brake_pct))),
+                cruise_enabled=False,
+                send_cruise_frame=False,
+                reason="park_request",
             )
+        )
+        self._log("Gear P request sent once; waiting confirmation")
+        while time.monotonic() <= deadline:
             telemetry = self.get_telemetry()
-            confirmed = confirmed or telemetry.gear == Gear.P
+            if telemetry.gear == Gear.P:
+                return True
             await asyncio.sleep(0.10)
-        return confirmed or self.get_telemetry().gear == Gear.P
+        return self.get_telemetry().gear == Gear.P
 
     async def _send_pedal_release(self, reason: str, repeats: int = 3, interval_sec: float = 0.03) -> None:
         repeats = max(1, int(repeats))
@@ -334,12 +364,17 @@ class VehicleControlService(QObject):
                     accel_pct=0,
                     brake_pct=0,
                     cruise_enabled=False,
-                    send_cruise_frame=True,
+                    send_cruise_frame=False,
                     reason=reason,
                 )
             )
             await asyncio.sleep(max(0.0, float(interval_sec)))
         self._reset_manual_pedal_slew()
+        telemetry = self.get_telemetry()
+        telemetry.accel_pct = 0.0
+        telemetry.brake_pct = 0.0
+        telemetry.target_angle_deg = 0.0
+        self.telemetry_changed.emit(telemetry)
 
     def _reset_manual_pedal_slew(self) -> None:
         self._manual_last_update_monotonic = None
@@ -470,9 +505,15 @@ class VehicleControlService(QObject):
                     telemetry = self.get_telemetry()
                     gear_text = telemetry.gear.name if telemetry.gear else "unknown"
                     self._log(f"ARMING: manual mode in current gear {gear_text}")
+                    self._log("ARMING: enabling control authority")
+                    await self._send_control_enable("manual_control_enable", repeats=1, interval_sec=0.0)
+                    await asyncio.sleep(float(os.environ.get("MITSU_MANUAL_AUTHORITY_SETTLE_SEC", "0.25") or 0.25))
                 else:
-                    self._log("ARMING: enabling AI authority")
+                    self._log("ARMING: enabling control authority")
                     await self._arm_ai_authority()
+                    settle = float(os.environ.get("MITSU_AI_AUTHORITY_SETTLE_SEC", "0.45") or 0.45)
+                    self._log(f"ARMING: authority settle {settle:.2f}s")
+                    await asyncio.sleep(settle)
                     self._log("ARMING: requesting Drive")
                     if not await self._request_gear_until_confirmed(Gear.D, reason="drive_request", brake_pct=35):
                         telemetry = self.get_telemetry()
@@ -482,6 +523,9 @@ class VehicleControlService(QObject):
                         self.activation_blocked.emit(reason)
                         self._log(f"Activation failed: {reason}")
                         return False
+                    drive_settle = float(os.environ.get("MITSU_DRIVE_CONFIRM_SETTLE_SEC", "0.25") or 0.25)
+                    self._log(f"ARMING: Drive confirmed, settle {drive_settle:.2f}s")
+                    await asyncio.sleep(drive_settle)
                     self.ai_authority_confirmed = True
             except Exception as exc:
                 reason = f"arming failed: {exc}"
@@ -497,17 +541,6 @@ class VehicleControlService(QObject):
             if manual_active:
                 self.ai_authority_confirmed = False
                 self._reset_manual_pedal_slew()
-                await self._send_raw_command(
-                    VehicleCommand(
-                        active=True,
-                        gear_request=None,
-                        accel_pct=0,
-                        brake_pct=0,
-                        cruise_enabled=True,
-                        send_cruise_frame=True,
-                        reason="manual_control_enable",
-                    )
-                )
                 self._log("MANUAL_ACTIVE")
             else:
                 self._log("AI_ACTIVE")
@@ -581,11 +614,14 @@ class VehicleControlService(QObject):
 
             self._stop_autonomy_loop()
             self.ai_authority_confirmed = False
+            self.manual_mode_enabled = False
+            self._reset_manual_pedal_slew()
             self.state_machine.on_deactivate_requested(park=park)
             self._emit_state()
             self._log(f"DISENGAGING: {reason}")
 
             deadline = time.monotonic() + float(self.disengage_timeout_sec)
+            await self._send_control_disable(reason="control_disable")
             hold_sec = float(os.environ.get("MITSU_DISENGAGE_BRAKE_HOLD_SEC", "2.0") or 2.0)
             self._log(f"DISENGAGING: brake hold before Park ({hold_sec:.1f}s)")
             await self._send_brake_hold(reason="disengage_brake_hold", brake_pct=35, duration_sec=hold_sec)
@@ -599,8 +635,8 @@ class VehicleControlService(QObject):
             telemetry = self.get_telemetry()
             if telemetry.speed_kmh <= self.park_speed_threshold_kmh:
                 try:
-                    self._log("DISENGAGING: requesting Park continuously")
-                    park_confirmed = await self._request_park_continuously(brake_pct=35)
+                    self._log("DISENGAGING: requesting Park")
+                    park_confirmed = await self._request_park_once(brake_pct=35)
                     telemetry = self.get_telemetry()
                     if park_confirmed:
                         self._log("Gear P confirmed after stop")
@@ -613,6 +649,7 @@ class VehicleControlService(QObject):
                 self._log(f"Park skipped: vehicle still moving ({telemetry.speed_kmh:.2f} km/h)")
 
             await self._send_pedal_release(reason="disengage_pedal_release")
+            self.telemetry_changed.emit(self.get_telemetry())
             self.state_machine.on_manual_ready()
             self._emit_state()
 
@@ -743,6 +780,8 @@ class VehicleControlService(QObject):
 
     async def submit_manual_command(self, angle_deg: int, accel_pct: int, brake_pct: int) -> None:
         if self.adapter is None:
+            return
+        if self.state_machine.state != DriveState.MANUAL_ACTIVE:
             return
         if self.state_machine.state == DriveState.AI_ACTIVE:
             # Manual keys should not mix with AI authority. Driver takeover is

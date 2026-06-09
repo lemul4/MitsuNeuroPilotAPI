@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import time
+from datetime import datetime
 from typing import Dict, Optional
 
 from .models import DeviceDescriptor, DeviceKind, VehicleCommand, VehicleTelemetry, Gear
@@ -108,6 +109,10 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
         else:
             self.telemetry.heartbeat_ok = False
 
+    @staticmethod
+    def _ts() -> str:
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
     def handle_can_packet(self, pkt) -> None:
         try:
             can_id = int(pkt.CAN_ID)
@@ -123,7 +128,7 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
                     self._last_rx_debug_at = now
                     values = " ".join(f"{int(x) & 0xFF:02X}" for x in list(data))
                     print(
-                        "CAN RX: "
+                        f"[{self._ts()}] CAN RX: "
                         f"id=0x{can_id:04X} data={values} mapped={mapped} "
                         f"steer={self.telemetry.angle_deg:.1f} "
                         f"accel={self.telemetry.accel_pct:.0f} "

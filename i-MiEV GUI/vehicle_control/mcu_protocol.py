@@ -65,8 +65,6 @@ class McuTelemetryParser:
             TelemetryFieldSpec(0x0003, "speed_kmh", 0, 1, False, 1.0),
             TelemetryFieldSpec(0x0017, "brake_pct", 0, 1, False, 1.0),
             TelemetryFieldSpec(0x0018, "accel_pct", 0, 1, False, 1.0),
-            TelemetryFieldSpec(0x0037, "brake_pct", 1, 1, False, 1.0),
-            TelemetryFieldSpec(0x0038, "accel_pct", 1, 1, False, 1.0),
             TelemetryFieldSpec(0x0004, "gear", 0, 1, False, 1.0, enum="gear_1_6"),
             TelemetryFieldSpec(0x0100, "x_m", 0, 2, True, 0.01),
             TelemetryFieldSpec(0x0100, "y_m", 2, 2, True, 0.01),

@@ -7,15 +7,25 @@ import socket
 import subprocess
 import threading
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
+import builtins as _builtins
 
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "protocol_whitelist;file,rtp,udp,crypto,data")
 
 import cv2
 import numpy as np
 import zmq
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
+def print(*args, **kwargs):  # noqa: A001 - module-local timestamped print
+    return _builtins.print(f"[{_ts()}]", *args, **kwargs)
 
 
 @dataclass(frozen=True)

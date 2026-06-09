@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import List, Optional
 
 from .models import VehicleCommand, Gear
@@ -49,6 +50,8 @@ class VehicleGateway:
 
         # Brake first, then gear, then angle, then accel, then cruise. This order
         # makes stale or partially delivered frames fail safer.
+        if bool(getattr(command, "send_cruise_frame", False)):
+            packets.append(self.can.prepare_packet(self.cmd_cruise, 1 if command.cruise_enabled else 0))
         packets.append(self.can.prepare_packet(self.cmd_brake, max(0, min(100, int(command.brake_pct)))))
 
         if command.gear_request is not None:
@@ -59,8 +62,7 @@ class VehicleGateway:
 
         accel = 0 if int(command.brake_pct) > 0 else int(command.accel_pct)
         packets.append(self.can.prepare_packet(self.cmd_accel, max(0, min(100, accel))))
-        if bool(getattr(command, "send_cruise_frame", False)):
-            packets.append(self.can.prepare_packet(self.cmd_cruise, 1 if command.cruise_enabled else 0))
+
         return packets
 
     @staticmethod
@@ -85,11 +87,15 @@ class VehicleGateway:
     def _tx_debug_enabled() -> bool:
         return os.environ.get("MITSU_CAN_TX_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _ts() -> str:
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
     def write_vehicle_command_now(self, command: VehicleCommand) -> None:
         packets = self.encode_vehicle_command(command)
         if self._tx_debug_enabled():
             for packet in packets:
-                print(f"CAN TX ({command.reason}): {self._packet_debug_text(packet)}")
+                print(f"[{self._ts()}] CAN TX ({command.reason}): {self._packet_debug_text(packet)}")
         if self.serial is None:
             return
         write_now = getattr(self.serial, "write_packet_immediate", None)
@@ -104,7 +110,7 @@ class VehicleGateway:
         packets = self.encode_vehicle_command(command)
         if self._tx_debug_enabled():
             for packet in packets:
-                print(f"CAN TX latest ({command.reason}): {self._packet_debug_text(packet)}")
+                print(f"[{self._ts()}] CAN TX latest ({command.reason}): {self._packet_debug_text(packet)}")
         if self.serial is None:
             return
         send_set = getattr(self.serial, "send_control_packet_set_latest", None)

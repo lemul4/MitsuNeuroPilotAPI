@@ -44,7 +44,7 @@ $GuiEnv = @(
     "set MITSU_AUTO_CONNECT_DEVICE=COM3",
     "set MITSU_AUTO_AI_PREVIEW=1",
     "set MITSU_CAN_TX_DEBUG=1",
-    "set MITSU_CAN_RX_DEBUG=1",
+    "set MITSU_CAN_RX_DEBUG=0",
     "set MITSU_REAL_ENABLE_ACTUATION=1",
     "set MITSU_REAL_DRY_RUN=0",
     "`"$Python`" main.py"

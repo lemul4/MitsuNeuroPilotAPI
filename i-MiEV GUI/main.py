@@ -106,6 +106,7 @@ except Exception:
 # identical console messages in this module.
 
 import builtins as _mitsu_v11b_builtins
+from datetime import datetime as _mitsu_log_datetime
 
 if not hasattr(_mitsu_v11b_builtins, "_mitsu_original_print"):
     _mitsu_v11b_builtins._mitsu_original_print = _mitsu_v11b_builtins.print
@@ -131,7 +132,8 @@ def print(*args, **kwargs):  # noqa: A001 - intentional module-local print wrapp
             _mitsu_v11b_seen_mock_ready_logs.add(prefix)
             break
 
-    return _mitsu_v11b_builtins._mitsu_original_print(*args, **kwargs)
+    timestamp = _mitsu_log_datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    return _mitsu_v11b_builtins._mitsu_original_print(f"[{timestamp}]", *args, **kwargs)
 
 # --- MITSU_SAFE_MOCK_READY_PRINT_FILTER_V11B_END ---
 
@@ -1587,8 +1589,7 @@ class AppController(QObject):
                 "active": False,
                 "message": "Control is not active",
             }
-        park = not (current_state is not None and getattr(current_state, "value", str(current_state)) == "AI_ACTIVE")
-        await self.vehicle_control.deactivate_control(reason="user_requested", park=park)
+        await self.vehicle_control.deactivate_control(reason="user_requested", park=True)
         still_manual = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
         manual_active = still_manual is not None and getattr(still_manual, "value", str(still_manual)) == "MANUAL_ACTIVE"
         return {
