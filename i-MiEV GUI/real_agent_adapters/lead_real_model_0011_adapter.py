@@ -439,14 +439,17 @@ class LeadModel0011RealPortAdapter:
         with open(config_path, "r", encoding="utf-8") as file:
             training_payload = json.load(file)
 
-        # CPU-safe inference overrides. They do not change the weights.
+        # Real-COM preview favors compatibility over throughput. Some Windows
+        # Torch builds cannot convert or run parts of this model in bfloat16.
+        training_payload["compile"] = False
+        training_payload["jit_compile"] = False
+        training_payload["jit_compile_warmup_steps"] = 0
+        training_payload["use_mixed_precision_training"] = False
+        training_payload["channel_last"] = False
+        training_payload["additional_metrics_dtype"] = "float32"
+
         if self.device.type == "cpu":
             training_payload["inference_device"] = "cpu"
-            training_payload["compile"] = False
-            training_payload["jit_compile"] = False
-            training_payload["jit_compile_warmup_steps"] = 0
-            training_payload["use_mixed_precision_training"] = False
-            training_payload["channel_last"] = False
         else:
             training_payload["inference_device"] = str(self.device)
 
@@ -466,15 +469,26 @@ class LeadModel0011RealPortAdapter:
 
         if not self.inference.nets:
             raise RuntimeError(f"ClosedLoopInference loaded no model*.pth files from {checkpoint}")
+        self._force_float32_modules()
 
         self.checkpoint = str(checkpoint)
         self.config_path = str(config_path)
         self._frame_id = 0
 
+    def _force_float32_modules(self) -> None:
+        nets = getattr(self.inference, "nets", None)
+        if not nets:
+            return
+        for net in nets:
+            try:
+                net.float()
+            except Exception:
+                pass
+
     @staticmethod
     def _to_float(value: Any) -> float:
         if hasattr(value, "detach"):
-            value = value.detach().cpu().numpy()
+            value = value.detach().float().cpu().numpy()
         if np is not None:
             value = np.asarray(value).reshape(-1)[0]
         return float(value)
@@ -488,9 +502,9 @@ class LeadModel0011RealPortAdapter:
 
         self._frame_id += 1
 
-        steer = max(-1.0, min(1.0, float(pred.steer)))
-        throttle = max(0.0, min(1.0, float(pred.throttle)))
-        brake = max(0.0, min(1.0, float(pred.brake)))
+        steer = max(-1.0, min(1.0, self._to_float(pred.steer)))
+        throttle = max(0.0, min(1.0, self._to_float(pred.throttle)))
+        brake = max(0.0, min(1.0, self._to_float(pred.brake)))
 
         metadata: Dict[str, Any] = {
             "source": "model_0011_closed_loop",

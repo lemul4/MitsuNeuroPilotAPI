@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import time
 from typing import Optional
 
@@ -87,6 +88,7 @@ class VehicleControlService(QObject):
         self._last_external_intent: Optional[ControlIntent] = None
         self._last_goal = None
         self.external_intent_max_age_ms = 150.0
+        self.ai_authority_confirmed = False
         self._manual_last_update_monotonic: Optional[float] = None
         self._manual_accel_pct = 0.0
         self._manual_brake_pct = 0.0
@@ -228,6 +230,63 @@ class VehicleControlService(QObject):
         cfg = getattr(self.adapter, "safety_config", None)
         return float(getattr(cfg, name, default))
 
+    def _gear_confirm_timeout_sec(self) -> float:
+        cfg = getattr(self.adapter, "safety_config", None)
+        return max(0.5, float(getattr(cfg, "gear_confirm_timeout_sec", self.arming_delay_sec)))
+
+    async def _request_gear_until_confirmed(self, gear: Gear) -> bool:
+        if self.adapter is None:
+            return False
+        deadline = time.monotonic() + self._gear_confirm_timeout_sec()
+        interval = 0.25
+        while time.monotonic() <= deadline:
+            await self.adapter.request_gear(gear)
+            await asyncio.sleep(interval)
+            telemetry = self.get_telemetry()
+            if telemetry.gear == gear:
+                return True
+        return self.get_telemetry().gear == gear
+
+    async def _send_ai_authority_hold(self, reason: str, brake_pct: int = 0) -> None:
+        await self._send_raw_command(
+            VehicleCommand(
+                active=True,
+                gear_request=None,
+                accel_pct=0,
+                brake_pct=max(0, min(100, int(brake_pct))),
+                cruise_enabled=True,
+                send_cruise_frame=True,
+                reason=reason,
+            )
+        )
+
+    async def _arm_ai_authority(self) -> None:
+        self.ai_authority_confirmed = False
+        repeats = max(1, int(float(os.environ.get("MITSU_AI_AUTHORITY_ENABLE_SEC", "1.0") or 1.0) / 0.05))
+        for _ in range(repeats):
+            await self._send_ai_authority_hold("ai_control_enable")
+            await asyncio.sleep(0.05)
+        self.ai_authority_confirmed = True
+        self._log(f"AI authority enable sent: packets={repeats}")
+
+    async def _send_pedal_release(self, reason: str, repeats: int = 3, interval_sec: float = 0.03) -> None:
+        repeats = max(1, int(repeats))
+        for _ in range(repeats):
+            await self._send_raw_command(
+                VehicleCommand(
+                    active=False,
+                    gear_request=None,
+                    steering_raw=0,
+                    accel_pct=0,
+                    brake_pct=0,
+                    cruise_enabled=False,
+                    send_cruise_frame=True,
+                    reason=reason,
+                )
+            )
+            await asyncio.sleep(max(0.0, float(interval_sec)))
+        self._reset_manual_pedal_slew()
+
     def _reset_manual_pedal_slew(self) -> None:
         self._manual_last_update_monotonic = None
         self._manual_accel_pct = 0.0
@@ -336,37 +395,52 @@ class VehicleControlService(QObject):
             if not decision.allowed:
                 self.activation_blocked.emit(decision.reason)
                 self._log(f"Activation blocked: {decision.reason}")
+                self._log(
+                    "Readiness: "
+                    f"connected={readiness.connected} mission={readiness.mission_ok} "
+                    f"pose={readiness.pose_ok} cameras={readiness.cameras_ok} "
+                    f"ai={readiness.ai_preview_ok} vehicle={readiness.vehicle_ok} "
+                    f"speed_zero={readiness.speed_zero} gear_known={readiness.gear_known}"
+                )
                 return False
 
             self.state_machine.on_activate_requested()
             self._emit_state()
-            self._log("ARMING: brake hold")
-            await self._send_raw_command(VehicleCommand(active=False, gear_request=None, accel_pct=0, brake_pct=35, cruise_enabled=False, reason="brake_hold"))
-            await asyncio.sleep(0.1)
+            try:
+                self._log("ARMING: brake hold")
+                await self._send_raw_command(VehicleCommand(active=False, gear_request=None, accel_pct=0, brake_pct=35, cruise_enabled=False, reason="brake_hold"))
+                await asyncio.sleep(0.1)
 
-            manual_active = bool(self.manual_mode_enabled and not self.ai_preview_enabled)
-            if manual_active:
-                telemetry = self.get_telemetry()
-                gear_text = telemetry.gear.name if telemetry.gear else "unknown"
-                self._log(f"ARMING: manual mode in current gear {gear_text}")
-            else:
-                self._log("ARMING: requesting Drive")
-                if self.adapter is not None:
-                    await self.adapter.request_gear(Gear.D)
-                await asyncio.sleep(self.arming_delay_sec)
-
-                telemetry = self.get_telemetry()
-                if telemetry.gear != Gear.D:
-                    reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
-                    self.state_machine.on_fault(reason)
-                    self._emit_state()
-                    self.activation_blocked.emit(reason)
-                    self._log(f"Activation failed: {reason}")
-                    return False
+                manual_active = bool(self.manual_mode_enabled and not self.ai_preview_enabled)
+                if manual_active:
+                    telemetry = self.get_telemetry()
+                    gear_text = telemetry.gear.name if telemetry.gear else "unknown"
+                    self._log(f"ARMING: manual mode in current gear {gear_text}")
+                else:
+                    self._log("ARMING: enabling AI authority")
+                    await self._arm_ai_authority()
+                    self._log("ARMING: requesting Drive")
+                    if not await self._request_gear_until_confirmed(Gear.D):
+                        telemetry = self.get_telemetry()
+                        reason = f"Gear D not confirmed, actual={telemetry.gear.name if telemetry.gear else 'unknown'}"
+                        self.state_machine.on_fault(reason)
+                        self._emit_state()
+                        self.activation_blocked.emit(reason)
+                        self._log(f"Activation failed: {reason}")
+                        return False
+            except Exception as exc:
+                reason = f"arming failed: {exc}"
+                self.ai_authority_confirmed = False
+                self.state_machine.on_fault(reason)
+                self._emit_state()
+                self.activation_blocked.emit(reason)
+                self._log(f"Activation failed: {reason}")
+                return False
 
             self.state_machine.on_gear_drive_confirmed(manual=manual_active)
             self._emit_state()
             if manual_active:
+                self.ai_authority_confirmed = False
                 self._reset_manual_pedal_slew()
                 await self._send_raw_command(
                     VehicleCommand(
@@ -409,10 +483,10 @@ class VehicleControlService(QObject):
             self._stop_autonomy_loop()
             self.manual_mode_enabled = True
 
-            # Drop AI authority and remove throttle immediately. This is not a
-            # Park request and must not wait for full stop; the operator receives
-            # manual authority right away.
-            await self._send_raw_command(VehicleCommand.safe_stop(reason=reason))
+            # Drop AI authority and remove both pedals immediately. This is not
+            # a Park request and must not wait for full stop.
+            self.ai_authority_confirmed = False
+            await self._send_pedal_release(reason=f"{reason}_pedal_release")
 
             telemetry = self.get_telemetry()
             if telemetry.gear != Gear.D and self.adapter is not None:
@@ -442,6 +516,8 @@ class VehicleControlService(QObject):
             # disengage and after the vehicle has stopped.
             if not park and self.state_machine.state == DriveState.AI_ACTIVE:
                 self._stop_autonomy_loop()
+                self.ai_authority_confirmed = False
+                await self._send_pedal_release(reason=f"{reason}_pedal_release")
                 self.manual_mode_enabled = True
                 self.state_machine.on_manual_takeover()
                 self._emit_state()
@@ -449,24 +525,13 @@ class VehicleControlService(QObject):
                 return
 
             self._stop_autonomy_loop()
+            self.ai_authority_confirmed = False
             self.state_machine.on_deactivate_requested(park=park)
             self._emit_state()
             self._log(f"DISENGAGING: {reason}")
 
             deadline = time.monotonic() + float(self.disengage_timeout_sec)
-            await self._send_raw_command(
-                VehicleCommand(
-                    active=False,
-                    gear_request=None,
-                    accel_pct=0,
-                    brake_pct=0,
-                    cruise_enabled=False,
-                    send_cruise_frame=True,
-                    reason="manual_control_disable",
-                )
-            )
-            self._reset_manual_pedal_slew()
-            await self._send_raw_command(VehicleCommand.safe_stop(reason="deactivate"))
+            await self._send_pedal_release(reason="manual_control_disable")
             while time.monotonic() < deadline:
                 telemetry = self.get_telemetry()
                 if telemetry.speed_kmh <= self.park_speed_threshold_kmh:
@@ -513,12 +578,12 @@ class VehicleControlService(QObject):
         while self.state_machine.state == DriveState.AI_ACTIVE and self.adapter is not None:
             telemetry = self.get_telemetry()
             if not telemetry.connected or not telemetry.heartbeat_ok:
-                await self._send_raw_command(VehicleCommand.safe_stop(reason="telemetry_lost"))
+                await self._send_ai_authority_hold("telemetry_lost", brake_pct=35)
                 self._log("Autonomy safe-stop: telemetry/heartbeat lost")
                 await asyncio.sleep(period)
                 continue
             if self.mission is None or not self.mission.waypoints:
-                await self._send_raw_command(VehicleCommand.safe_stop(reason="no_mission"))
+                await self._send_ai_authority_hold("no_mission", brake_pct=35)
                 await asyncio.sleep(period)
                 continue
             pose = telemetry.pose()
@@ -526,7 +591,7 @@ class VehicleControlService(QObject):
             self._last_goal = goal
             self.nav_goal_changed.emit(goal)
             if not goal.is_valid() or goal.maneuver == "pose_lost":
-                await self._send_raw_command(VehicleCommand.safe_stop(reason="pose_lost"))
+                await self._send_ai_authority_hold("pose_lost", brake_pct=35)
                 if time.monotonic() - self._last_autonomy_log_at > 1.0:
                     self._last_autonomy_log_at = time.monotonic()
                     self._log("Autonomy safe-stop: pose lost/stale")
@@ -575,6 +640,8 @@ class VehicleControlService(QObject):
     async def submit_ai_intent(self, intent: ControlIntent) -> None:
         self._last_intent = intent
         if self.state_machine.state != DriveState.AI_ACTIVE:
+            return
+        if not self.ai_authority_confirmed:
             return
         telemetry = self.get_telemetry()
         command = self.arbiter.build_command(intent, telemetry=telemetry, gear=Gear.D, active=True)

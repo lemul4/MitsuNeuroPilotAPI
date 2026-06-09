@@ -100,15 +100,29 @@ class CameraWorker(threading.Thread):
         self.relay_running = True
 
         def _relay():
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, "SIO_UDP_CONNRESET"):
+            sock = None
+            while self.relay_running and sock is None:
                 try:
-                    sock.ioctl(socket.SIO_UDP_CONNRESET, False)
-                except Exception:
-                    pass
-            sock.bind(("0.0.0.0", int(listen_port)))
-            sock.settimeout(0.5)
+                    candidate = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    if hasattr(socket, "SIO_UDP_CONNRESET"):
+                        try:
+                            candidate.ioctl(socket.SIO_UDP_CONNRESET, False)
+                        except Exception:
+                            pass
+                    candidate.bind(("0.0.0.0", int(listen_port)))
+                    candidate.settimeout(0.5)
+                    sock = candidate
+                except OSError as exc:
+                    self.last_error = f"UDP relay bind failed on :{listen_port}: {exc}"
+                    print(f"[REAL_CAMERA] {self.spec.name}: {self.last_error}; retrying", flush=True)
+                    try:
+                        candidate.close()
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+            if sock is None:
+                return
             target = ("127.0.0.1", int(relay_port))
             print(f"[REAL_CAMERA] {self.spec.name}: UDP relay :{listen_port} -> 127.0.0.1:{relay_port}", flush=True)
             count = 0

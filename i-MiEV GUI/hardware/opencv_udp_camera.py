@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -57,6 +58,8 @@ def build_h265_rtp_sdp(spec: OpenCvUdpH265CameraSpec) -> str:
             "t=0 0",
             f"m=video {port} RTP/AVP {payload}",
             f"a=rtpmap:{payload} H265/90000",
+            f"a=rtcp:{port + 1000} IN IP4 {host}",
+            "a=rtcp-mux",
             "a=recvonly",
             "",
         ]
@@ -67,6 +70,29 @@ def write_temp_sdp(spec: OpenCvUdpH265CameraSpec) -> str:
     path = Path(tempfile.gettempdir()) / f"mitsu_camera_{spec.name}_{int(spec.port)}.sdp"
     path.write_text(build_h265_rtp_sdp(spec), encoding="ascii")
     return str(path)
+
+
+def resolve_ffmpeg_executable() -> Optional[str]:
+    env_path = os.environ.get("MITSU_FFMPEG_EXE") or os.environ.get("FFMPEG_EXE")
+    if env_path:
+        expanded = os.path.expandvars(os.path.expanduser(env_path))
+        if Path(expanded).is_file():
+            return expanded
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        if ffmpeg_path and Path(ffmpeg_path).is_file():
+            return ffmpeg_path
+    except Exception:
+        pass
+
+    return None
 
 
 class OpenCvUdpH265ReceiverThread(QThread):
@@ -97,11 +123,19 @@ class OpenCvUdpH265ReceiverThread(QThread):
         width = int(self.spec.width or 1280)
         height = int(self.spec.height or 720)
         frame_size = width * height * 3
+        ffmpeg_exe = resolve_ffmpeg_executable()
+        if not ffmpeg_exe:
+            self.status_changed.emit(
+                self.spec.name,
+                False,
+                "ffmpeg not found; set MITSU_FFMPEG_EXE or add ffmpeg to PATH",
+            )
+            return
 
         try:
             process = subprocess.Popen(
                 [
-                    "ffmpeg",
+                    ffmpeg_exe,
                     "-hide_banner",
                     "-loglevel",
                     "error",

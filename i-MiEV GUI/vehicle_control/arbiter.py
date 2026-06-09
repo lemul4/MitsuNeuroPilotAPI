@@ -94,6 +94,7 @@ class ControlArbiter:
             accel_pct=max(0, min(100, accel_pct)),
             brake_pct=max(0, min(100, brake_pct)),
             cruise_enabled=bool(active),
+            send_cruise_frame=bool(active),
             valid_for_ms=min(max(int(intent.valid_for_ms or 100), 40), 250),
             reason="ai_intent" if active else "inactive",
         )

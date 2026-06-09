@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import argparse
 import asyncio
 import concurrent.futures
@@ -424,9 +424,9 @@ class AppController(QObject):
         self.ai_agent_loading = False
         self.ai_agent_running = False
 
-        # Очередь маршрутов запускается кооперативно: один LeadAgentThread на один XML.
-        # Второй маршрут стартует только после finished текущего thread. Принудительный
-        # переход к следующему маршруту убран, потому что он рвал QThread/CARLA lifecycle.
+        # РћС‡РµСЂРµРґСЊ РјР°СЂС€СЂСѓС‚РѕРІ Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ РєРѕРѕРїРµСЂР°С‚РёРІРЅРѕ: РѕРґРёРЅ LeadAgentThread РЅР° РѕРґРёРЅ XML.
+        # Р’С‚РѕСЂРѕР№ РјР°СЂС€СЂСѓС‚ СЃС‚Р°СЂС‚СѓРµС‚ С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ finished С‚РµРєСѓС‰РµРіРѕ thread. РџСЂРёРЅСѓРґРёС‚РµР»СЊРЅС‹Р№
+        # РїРµСЂРµС…РѕРґ Рє СЃР»РµРґСѓСЋС‰РµРјСѓ РјР°СЂС€СЂСѓС‚Сѓ СѓР±СЂР°РЅ, РїРѕС‚РѕРјСѓ С‡С‚Рѕ РѕРЅ СЂРІР°Р» QThread/CARLA lifecycle.
         self.pending_route_queue = []
         self.current_route_index = -1
         self.queue_mode = None  # None / "single" / "queue"
@@ -505,8 +505,8 @@ class AppController(QObject):
         if hasattr(self.view, "manual_toggled"):
             self.view.manual_toggled.connect(self.handle_manual_toggle)
 
-        # Новый UI отправляет один список: 1 маршрут => одиночный запуск, N маршрутов => очередь.
-        # Старые сигналы single/queue оставлены как fallback, но основной путь — route_launch_requested.
+        # РќРѕРІС‹Р№ UI РѕС‚РїСЂР°РІР»СЏРµС‚ РѕРґРёРЅ СЃРїРёСЃРѕРє: 1 РјР°СЂС€СЂСѓС‚ => РѕРґРёРЅРѕС‡РЅС‹Р№ Р·Р°РїСѓСЃРє, N РјР°СЂС€СЂСѓС‚РѕРІ => РѕС‡РµСЂРµРґСЊ.
+        # РЎС‚Р°СЂС‹Рµ СЃРёРіРЅР°Р»С‹ single/queue РѕСЃС‚Р°РІР»РµРЅС‹ РєР°Рє fallback, РЅРѕ РѕСЃРЅРѕРІРЅРѕР№ РїСѓС‚СЊ вЂ” route_launch_requested.
         if hasattr(self.view, "route_launch_requested"):
             self.view.route_launch_requested.connect(self.handle_route_launch_requested)
         else:
@@ -716,11 +716,17 @@ class AppController(QObject):
                     ui_name = "narrow_50"
                 else:
                     ui_name = str(data.get("ui_name") or f"camera_{index}")
+                source_path = str(data.get("source") or "").strip()
+                if source_path and not os.path.isabs(source_path):
+                    source_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), source_path)
+                sdp_video = self._read_sdp_video(source_path) if source_path else {}
+                sdp_port = sdp_video.get("port")
+                sdp_payload = sdp_video.get("payload")
                 kwargs = dict(
                     name=ui_name,
-                    port=int(port),
+                    port=int(sdp_port or port),
                     role=role,
-                    payload=int(data.get("payload", default_payload) or default_payload),
+                    payload=int(data.get("payload", sdp_payload or default_payload) or default_payload),
                     width=int(data.get("width", 1280) or 1280),
                     height=int(data.get("height", 720) or 720),
                 )
@@ -728,7 +734,7 @@ class AppController(QObject):
                     kwargs["decoder"] = str(data.get("decoder") or decoder)
                     kwargs["jitter_latency_ms"] = int(data.get("jitter_latency_ms", jitter_latency_ms) or 0)
                 if spec_cls is OpenCvUdpH265CameraSpec:
-                    kwargs["host"] = str(data.get("listen_ip") or data.get("host") or payload.get("listen_ip") or "127.0.0.1")
+                    kwargs["host"] = str(data.get("listen_ip") or data.get("host") or payload.get("listen_ip") or "0.0.0.0")
                 specs.append(spec_cls(**kwargs))
         if specs:
             return specs
@@ -745,6 +751,20 @@ class AppController(QObject):
             spec_cls("camera_3", 5603, role="aux_3", decoder=decoder),
             spec_cls("camera_4", 5604, role="aux_4", decoder=decoder),
         ]
+
+    @staticmethod
+    def _read_sdp_video(path):
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                for line in file:
+                    line = line.strip()
+                    if line.startswith("m=video "):
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            return {"port": int(parts[1]), "payload": int(parts[3])}
+        except Exception:
+            return {}
+        return {}
 
     def _start_real_camera_stack(self):
         backend = self._real_camera_backend()
@@ -833,7 +853,7 @@ class AppController(QObject):
             analyzer = RealCameraAgentAnalyzerThread(cfg, context_provider=self._build_real_agent_context)
             analyzer.camera_status_changed.connect(self.handle_real_agent_camera_status)
             analyzer.prediction_ready.connect(self.handle_real_agent_prediction)
-            analyzer.analyzer_status_changed.connect(lambda msg: print(f"REAL AGENT: {msg}"))
+            analyzer.analyzer_status_changed.connect(self.handle_real_agent_analyzer_status)
             self.real_agent_analyzer = analyzer
             analyzer.start()
 
@@ -897,7 +917,7 @@ class AppController(QObject):
         if not self.real_dead_reckoning_timer.isActive():
             self.real_dead_reckoning_timer.start()
         self._submit_real_dead_reckoning_pose()
-        print("REAL POSE: local A→B dead-reckoning provider started")
+        print("REAL POSE: local A->B dead-reckoning provider started")
 
     def _stop_real_dead_reckoning_pose(self):
         timer = getattr(self, "real_dead_reckoning_timer", None)
@@ -1007,6 +1027,11 @@ class AppController(QObject):
             self.vehicle_control.set_camera_status(bool(ok))
         if hasattr(self.view, "set_real_agent_status"):
             self.view.set_real_agent_status(bool(ok), str(message or ""))
+
+    @Slot(str)
+    def handle_real_agent_analyzer_status(self, message):
+        message = str(message or "")
+        print(f"REAL AGENT: {message}")
 
     def _ensure_real_direct_model_adapter(self):
         if self.real_direct_model_adapter is not None:
@@ -1187,12 +1212,58 @@ class AppController(QObject):
         if self.vehicle_control is None or self.real_agent_bridge is None or AgentPrediction is None:
             return
         try:
+            self._log_real_agent_prediction(dict(payload or {}))
             prediction = AgentPrediction.from_dict(dict(payload or {}))
             goal = self.vehicle_control.get_current_goal() if hasattr(self.vehicle_control, "get_current_goal") else None
             intent = self.real_agent_bridge.build_intent(prediction, goal)
             self._schedule_async(self.vehicle_control.submit_external_agent_intent(intent), "real_agent_intent")
         except Exception as exc:
             print(f"REAL AGENT: prediction conversion failed: {exc}")
+
+    def _log_real_agent_prediction(self, payload):
+        now = time.monotonic()
+        period = float(os.environ.get("MITSU_REAL_AGENT_LOG_PERIOD_SEC", "1.0") or 1.0)
+        last = float(getattr(self, "_last_real_agent_prediction_log_at", 0.0) or 0.0)
+        if now - last < period:
+            return
+        self._last_real_agent_prediction_log_at = now
+
+        context = self._build_real_agent_context()
+        goal = context.get("goal")
+
+        def _fmt_pair(value):
+            try:
+                return f"({float(value[0]):.2f},{float(value[1]):.2f})"
+            except Exception:
+                return str(value)
+
+        target_speed = payload.get("pred_target_speed_mps", payload.get("target_speed_mps", "n/a"))
+        try:
+            target_speed_text = f"{float(target_speed):.2f}m/s"
+        except Exception:
+            target_speed_text = str(target_speed)
+
+        goal_text = ""
+        if goal is not None:
+            goal_text = (
+                f" goal=({_fmt_pair([getattr(goal, 'target_x_m', 0.0), getattr(goal, 'target_y_m', 0.0)])})"
+                f" option={getattr(goal, 'command', '-')}"
+            )
+
+        print(
+            "REAL AGENT PRED: "
+            f"frame={payload.get('frame_id', '-')} "
+            f"steer={float(payload.get('steer', 0.0)):.3f} "
+            f"thr={float(payload.get('throttle', 0.0)):.3f} "
+            f"brk={float(payload.get('brake', 0.0)):.3f} "
+            f"target_speed={target_speed_text} "
+            f"speed={float(context.get('speed_mps', 0.0)):.2f}m/s "
+            f"prev={_fmt_pair(context.get('target_point_previous'))} "
+            f"target={_fmt_pair(context.get('target_point'))} "
+            f"next={_fmt_pair(context.get('target_point_next'))} "
+            f"world_target={_fmt_pair(context.get('target_point_world'))}"
+            f"{goal_text}"
+        )
 
     def shutdown(self):
         """Stop background workers before QApplication destroys QThreads.
@@ -1304,7 +1375,7 @@ class AppController(QObject):
             # If a CARLA scenario is actually running, stop only that CARLA scenario.
             try:
                 if self.agent_thread is not None or self.ai_agent_loading or self.ai_agent_running:
-                    self.abort_active_scenario("Переключение в режим реального авто: CARLA-сценарий остановлен", keep_plan=False)
+                    self.abort_active_scenario("РџРµСЂРµРєР»СЋС‡РµРЅРёРµ РІ СЂРµР¶РёРј СЂРµР°Р»СЊРЅРѕРіРѕ Р°РІС‚Рѕ: CARLA-СЃС†РµРЅР°СЂРёР№ РѕСЃС‚Р°РЅРѕРІР»РµРЅ", keep_plan=False)
                 else:
                     self.pending_route_queue = []
                     self.current_route_index = -1
@@ -1313,7 +1384,7 @@ class AppController(QObject):
                     self.queue_stop_requested = False
                     self._clear_route_watchdog()
             except Exception as exc:
-                print(f"MODE GUARD: ошибка очистки CARLA-состояния: {exc}")
+                print(f"MODE GUARD: РѕС€РёР±РєР° РѕС‡РёСЃС‚РєРё CARLA-СЃРѕСЃС‚РѕСЏРЅРёСЏ: {exc}")
 
         if previous_mode == "real" and next_mode == "carla":
             # Do not carry mission/AI authority state into CARLA mode.
@@ -1444,7 +1515,7 @@ class AppController(QObject):
                             f"lane_policy={lane_policy}, offset={lane_offset}m"
                         )
                     except Exception as route_exc:
-                        print(f"REAL CONTROL: road routing failed, fallback to direct A→B: {route_exc}")
+                        print(f"REAL CONTROL: road routing failed, fallback to direct Aв†’B: {route_exc}")
                         m = CoordinateRoutePlanner().build_from_ab(ABRouteRequest.from_dict(self.real_mission))
                 elif self.real_mission.get("start") and self.real_mission.get("goal") and CoordinateRoutePlanner is not None:
                     m = CoordinateRoutePlanner().build_from_ab(ABRouteRequest.from_dict(self.real_mission))
@@ -1483,6 +1554,9 @@ class AppController(QObject):
                 "active": False,
                 "message": "Real vehicle control modules unavailable",
             }
+        current_state = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+        state_text = getattr(current_state, "value", str(current_state)) if current_state is not None else "unknown"
+        print(f"REAL CONTROL: toggle requested={bool(is_active)} state={state_text} control_active={bool(self.control_active)}")
         if is_active:
             manual_enabled = bool(
                 hasattr(self.view, "is_manual_control_enabled")
@@ -1505,7 +1579,14 @@ class AppController(QObject):
                 "active": bool(ok),
                 "message": ("Manual control active" if manual_enabled else "AI control active") if ok else "Activation blocked",
             }
-        current_state = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
+        if not bool(self.control_active) and state_text not in {"AI_ACTIVE", "MANUAL_ACTIVE"}:
+            print(f"REAL CONTROL: OFF toggle ignored because control is not active; state={state_text}")
+            return {
+                "ok": True,
+                "requested": False,
+                "active": False,
+                "message": "Control is not active",
+            }
         park = not (current_state is not None and getattr(current_state, "value", str(current_state)) == "AI_ACTIVE")
         await self.vehicle_control.deactivate_control(reason="user_requested", park=park)
         still_manual = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
@@ -1592,7 +1673,7 @@ class AppController(QObject):
 
     def _reject_control_activation(self, message):
         self.control_active = False
-        print(f"AI CONTROL: запуск отклонен: {message}")
+        print(f"AI CONTROL: Р·Р°РїСѓСЃРє РѕС‚РєР»РѕРЅРµРЅ: {message}")
         self.view.statusBar().showMessage(message)
         if hasattr(self.view, "set_route_runtime_state"):
             state = "prepared" if self.route_plan_prepared else "selected"
@@ -1603,18 +1684,18 @@ class AppController(QObject):
 
     def _validate_control_start_requirements(self):
         if not self.is_connected:
-            return False, "Сначала нажмите Connect"
+            return False, "РЎРЅР°С‡Р°Р»Р° РЅР°Р¶РјРёС‚Рµ Connect"
         if not self.ai_control_requested:
-            return False, "Включите AI Control"
+            return False, "Р’РєР»СЋС‡РёС‚Рµ AI Control"
         if not self.pending_route_queue:
-            return False, "Выберите маршрут и подготовьте запуск"
+            return False, "Р’С‹Р±РµСЂРёС‚Рµ РјР°СЂС€СЂСѓС‚ Рё РїРѕРґРіРѕС‚РѕРІСЊС‚Рµ Р·Р°РїСѓСЃРє"
         if not self.route_plan_prepared:
             count = len(self.pending_route_queue)
             if count > 1:
-                return False, "Нажмите «Подготовить очередь» перед Activate Control"
-            return False, "Нажмите «Подготовить маршрут» перед Activate Control"
+                return False, "РќР°Р¶РјРёС‚Рµ В«РџРѕРґРіРѕС‚РѕРІРёС‚СЊ РѕС‡РµСЂРµРґСЊВ» РїРµСЂРµРґ Activate Control"
+            return False, "РќР°Р¶РјРёС‚Рµ В«РџРѕРґРіРѕС‚РѕРІРёС‚СЊ РјР°СЂС€СЂСѓС‚В» РїРµСЂРµРґ Activate Control"
         if self.agent_thread is not None or self.ai_agent_loading:
-            return False, "Текущий сценарий еще запускается или выполняется"
+            return False, "РўРµРєСѓС‰РёР№ СЃС†РµРЅР°СЂРёР№ РµС‰Рµ Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ РёР»Рё РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ"
         return True, ""
 
     def _send_cruise_state(self, is_active):
@@ -1627,7 +1708,7 @@ class AppController(QObject):
             self.cmd_cruise.store_crc8()
             self.serial.send_command(self.cmd_cruise)
         except Exception as exc:
-            print(f"AI CONTROL: ошибка отправки cruise state: {exc}")
+            print(f"AI CONTROL: РѕС€РёР±РєР° РѕС‚РїСЂР°РІРєРё cruise state: {exc}")
 
     def handle_control_toggle(self, is_active):
         if self.runtime_mode == "real":
@@ -1647,15 +1728,15 @@ class AppController(QObject):
             if hasattr(self.vehicle, "force_drive_gear"):
                 self.vehicle.force_drive_gear()
 
-            print("AI CONTROL: Activate Control включен; запуск подготовленного сценария")
+            print("AI CONTROL: Activate Control РІРєР»СЋС‡РµРЅ; Р·Р°РїСѓСЃРє РїРѕРґРіРѕС‚РѕРІР»РµРЅРЅРѕРіРѕ СЃС†РµРЅР°СЂРёСЏ")
             self.start_pending_route()
             return
 
-        # Повторное нажатие Activate Control выключает активный сценарий. План маршрутов
-        # остается подготовленным, чтобы можно было повторно стартовать с первого маршрута.
+        # РџРѕРІС‚РѕСЂРЅРѕРµ РЅР°Р¶Р°С‚РёРµ Activate Control РІС‹РєР»СЋС‡Р°РµС‚ Р°РєС‚РёРІРЅС‹Р№ СЃС†РµРЅР°СЂРёР№. РџР»Р°РЅ РјР°СЂС€СЂСѓС‚РѕРІ
+        # РѕСЃС‚Р°РµС‚СЃСЏ РїРѕРґРіРѕС‚РѕРІР»РµРЅРЅС‹Рј, С‡С‚РѕР±С‹ РјРѕР¶РЅРѕ Р±С‹Р»Рѕ РїРѕРІС‚РѕСЂРЅРѕ СЃС‚Р°СЂС‚РѕРІР°С‚СЊ СЃ РїРµСЂРІРѕРіРѕ РјР°СЂС€СЂСѓС‚Р°.
         self.control_active = False
         self._send_cruise_state(False)
-        self.abort_active_scenario("Control выключен: сценарий остановлен", keep_plan=True)
+        self.abort_active_scenario("Control РІС‹РєР»СЋС‡РµРЅ: СЃС†РµРЅР°СЂРёР№ РѕСЃС‚Р°РЅРѕРІР»РµРЅ", keep_plan=True)
 
     def handle_ai_toggle(self, is_active):
         self.ai_control_requested = bool(is_active)
@@ -1666,13 +1747,13 @@ class AppController(QObject):
                     self.real_agent_analyzer.set_ai_enabled(True)
                 if self.vehicle_control is not None:
                     self.vehicle_control.set_ai_preview_enabled(True)
-                self.view.statusBar().showMessage("Предпросмотр ИИ включен: агент получает две реальные камеры")
+                self.view.statusBar().showMessage("РџСЂРµРґРїСЂРѕСЃРјРѕС‚СЂ РР РІРєР»СЋС‡РµРЅ: Р°РіРµРЅС‚ РїРѕР»СѓС‡Р°РµС‚ РґРІРµ СЂРµР°Р»СЊРЅС‹Рµ РєР°РјРµСЂС‹")
                 return
 
             # Turning AI Preview off while AI has authority must first disengage
             # control. Do not let the service remain in AI_ACTIVE with preview off.
             if self.control_active:
-                self.view.statusBar().showMessage("Предпросмотр ИИ будет выключен после безопасного отключения управления")
+                self.view.statusBar().showMessage("РџСЂРµРґРїСЂРѕСЃРјРѕС‚СЂ РР Р±СѓРґРµС‚ РІС‹РєР»СЋС‡РµРЅ РїРѕСЃР»Рµ Р±РµР·РѕРїР°СЃРЅРѕРіРѕ РѕС‚РєР»СЋС‡РµРЅРёСЏ СѓРїСЂР°РІР»РµРЅРёСЏ")
                 self._schedule_async(self._disable_real_ai_preview_after_disengage(), "real_ai_preview_disable")
                 return
 
@@ -1680,23 +1761,23 @@ class AppController(QObject):
                 self.real_agent_analyzer.set_ai_enabled(False)
             if self.vehicle_control is not None:
                 self.vehicle_control.set_ai_preview_enabled(False)
-            self.view.statusBar().showMessage("Предпросмотр ИИ выключен")
+            self.view.statusBar().showMessage("РџСЂРµРґРїСЂРѕСЃРјРѕС‚СЂ РР РІС‹РєР»СЋС‡РµРЅ")
             return
         if is_active:
             if self.route_plan_prepared:
-                message = "AI Control включен. Нажмите Activate Control для запуска"
+                message = "AI Control РІРєР»СЋС‡РµРЅ. РќР°Р¶РјРёС‚Рµ Activate Control РґР»СЏ Р·Р°РїСѓСЃРєР°"
                 state = "prepared"
             else:
-                message = "AI Control включен. Подготовьте маршрут/очередь"
+                message = "AI Control РІРєР»СЋС‡РµРЅ. РџРѕРґРіРѕС‚РѕРІСЊС‚Рµ РјР°СЂС€СЂСѓС‚/РѕС‡РµСЂРµРґСЊ"
                 state = "armed"
             self.view.statusBar().showMessage(message)
             if hasattr(self.view, "set_route_runtime_state"):
                 self.view.set_route_runtime_state(state, message)
         else:
-            self.abort_active_scenario("AI Control выключен", keep_plan=True)
-            self.view.statusBar().showMessage("AI Control выключен")
+            self.abort_active_scenario("AI Control РІС‹РєР»СЋС‡РµРЅ", keep_plan=True)
+            self.view.statusBar().showMessage("AI Control РІС‹РєР»СЋС‡РµРЅ")
             if hasattr(self.view, "set_route_runtime_state"):
-                self.view.set_route_runtime_state("selected", "AI Control выключен")
+                self.view.set_route_runtime_state("selected", "AI Control РІС‹РєР»СЋС‡РµРЅ")
 
     def handle_manual_toggle(self, is_active):
         self.manual_control_requested = bool(is_active)
@@ -1735,7 +1816,7 @@ class AppController(QObject):
             try:
                 monitor.stop()
             except Exception as exc:
-                print(f"AI WATCHDOG: ошибка остановки CARLA monitor: {exc}")
+                print(f"AI WATCHDOG: РѕС€РёР±РєР° РѕСЃС‚Р°РЅРѕРІРєРё CARLA monitor: {exc}")
 
     @Slot(object)
     def handle_carla_motion_update(self, info):
@@ -1771,7 +1852,7 @@ class AppController(QObject):
             self._route_last_progress_location = location
             self._route_total_distance_m = 0.0
             print(
-                f"AI WATCHDOG: найден ego actor id={actor_id}, "
+                f"AI WATCHDOG: РЅР°Р№РґРµРЅ ego actor id={actor_id}, "
                 f"type={info.get('type_id', '-')}, role={info.get('role', '-')}, "
                 f"start={location}"
             )
@@ -1855,7 +1936,7 @@ class AppController(QObject):
 
     def _mark_route_progress(self, reason):
         if not self._route_progress_seen:
-            print(f"AI WATCHDOG: маршрут начал движение/прогресс: {reason}")
+            print(f"AI WATCHDOG: РјР°СЂС€СЂСѓС‚ РЅР°С‡Р°Р» РґРІРёР¶РµРЅРёРµ/РїСЂРѕРіСЂРµСЃСЃ: {reason}")
         self._route_progress_seen = True
         self._route_progress_reason = str(reason or "progress")
         self._route_last_physical_progress_monotonic = time.monotonic()
@@ -1982,15 +2063,15 @@ class AppController(QObject):
         if elapsed_ms >= self.route_startup_timeout_ms:
             if not self._route_carla_vehicle_seen:
                 detail = self._route_carla_last_error or "ego vehicle not found"
-                reason = f"CARLA ego vehicle не найден {timeout_s:.0f} секунд ({detail})"
+                reason = f"CARLA ego vehicle РЅРµ РЅР°Р№РґРµРЅ {timeout_s:.0f} СЃРµРєСѓРЅРґ ({detail})"
                 self._skip_current_route_due_to_timeout(reason)
                 return
 
             if self._route_total_distance_m < self.route_startup_min_distance_m:
                 reason = (
-                    f"за {timeout_s:.0f} секунд ego actor проехал только "
-                    f"{self._route_total_distance_m:.1f} м < {self.route_startup_min_distance_m:.1f} м; "
-                    "сценарий считается зависшим"
+                    f"Р·Р° {timeout_s:.0f} СЃРµРєСѓРЅРґ ego actor РїСЂРѕРµС…Р°Р» С‚РѕР»СЊРєРѕ "
+                    f"{self._route_total_distance_m:.1f} Рј < {self.route_startup_min_distance_m:.1f} Рј; "
+                    "СЃС†РµРЅР°СЂРёР№ СЃС‡РёС‚Р°РµС‚СЃСЏ Р·Р°РІРёСЃС€РёРј"
                 )
                 self._skip_current_route_due_to_timeout(reason)
                 return
@@ -2001,9 +2082,9 @@ class AppController(QObject):
             stalled_ms = (now - self._route_last_physical_progress_monotonic) * 1000.0
             if stalled_ms >= self.route_startup_timeout_ms:
                 reason = (
-                    f"нет нового CARLA-смещения {timeout_s:.0f} секунд "
-                    f"после последнего прогресса ({self._route_progress_reason}); "
-                    f"dist_from_start={self._route_total_distance_m:.1f} м"
+                    f"РЅРµС‚ РЅРѕРІРѕРіРѕ CARLA-СЃРјРµС‰РµРЅРёСЏ {timeout_s:.0f} СЃРµРєСѓРЅРґ "
+                    f"РїРѕСЃР»Рµ РїРѕСЃР»РµРґРЅРµРіРѕ РїСЂРѕРіСЂРµСЃСЃР° ({self._route_progress_reason}); "
+                    f"dist_from_start={self._route_total_distance_m:.1f} Рј"
                 )
                 self._skip_current_route_due_to_timeout(reason)
 
@@ -2016,7 +2097,7 @@ class AppController(QObject):
         if idx < 0:
             return
 
-        message = f"Таймаут запуска маршрута {idx + 1}/{total}: {reason}"
+        message = f"РўР°Р№РјР°СѓС‚ Р·Р°РїСѓСЃРєР° РјР°СЂС€СЂСѓС‚Р° {idx + 1}/{total}: {reason}"
         print(f"AI WATCHDOG: {message}")
         self.view.statusBar().showMessage(message)
         if hasattr(self.view, "set_route_loading_status"):
@@ -2033,8 +2114,8 @@ class AppController(QObject):
             self._continue_after_route_skip()
         else:
             print(
-                f"AI WATCHDOG: ждем завершения LeadAgentThread до "
-                f"{self.route_stop_grace_ms / 1000:.1f}s; затем будет принудительный переход"
+                f"AI WATCHDOG: Р¶РґРµРј Р·Р°РІРµСЂС€РµРЅРёСЏ LeadAgentThread РґРѕ "
+                f"{self.route_stop_grace_ms / 1000:.1f}s; Р·Р°С‚РµРј Р±СѓРґРµС‚ РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅС‹Р№ РїРµСЂРµС…РѕРґ"
             )
             self._route_force_continue_timer.start(self.route_stop_grace_ms)
 
@@ -2047,15 +2128,15 @@ class AppController(QObject):
             try:
                 if hasattr(thread, "isRunning") and thread.isRunning():
                     print(
-                        "AI WATCHDOG: LeadAgentThread не завершился после stop(); "
-                        "принудительно завершаем QThread перед переходом к следующему маршруту"
+                        "AI WATCHDOG: LeadAgentThread РЅРµ Р·Р°РІРµСЂС€РёР»СЃСЏ РїРѕСЃР»Рµ stop(); "
+                        "РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ Р·Р°РІРµСЂС€Р°РµРј QThread РїРµСЂРµРґ РїРµСЂРµС…РѕРґРѕРј Рє СЃР»РµРґСѓСЋС‰РµРјСѓ РјР°СЂС€СЂСѓС‚Сѓ"
                     )
                     thread.terminate()
                     thread.wait(5000)
             except RuntimeError:
                 pass
             except Exception as exc:
-                print(f"AI WATCHDOG: ошибка принудительного завершения LeadAgentThread: {exc}")
+                print(f"AI WATCHDOG: РѕС€РёР±РєР° РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕРіРѕ Р·Р°РІРµСЂС€РµРЅРёСЏ LeadAgentThread: {exc}")
             self.agent_thread = None
 
         self._continue_after_route_skip()
@@ -2063,7 +2144,7 @@ class AppController(QObject):
     def _continue_after_route_skip(self):
         total = len(self.pending_route_queue)
         skipped_index = self.current_route_index
-        reason = self._route_skip_reason or "таймаут запуска"
+        reason = self._route_skip_reason or "С‚Р°Р№РјР°СѓС‚ Р·Р°РїСѓСЃРєР°"
         if hasattr(self, "_route_force_continue_timer"):
             self._route_force_continue_timer.stop()
 
@@ -2084,7 +2165,7 @@ class AppController(QObject):
             and skipped_index + 1 < total
         ):
             self.current_route_index = skipped_index + 1
-            msg = f"Маршрут {skipped_index + 1}/{total} пропущен: {reason}. Запуск следующего"
+            msg = f"РњР°СЂС€СЂСѓС‚ {skipped_index + 1}/{total} РїСЂРѕРїСѓС‰РµРЅ: {reason}. Р—Р°РїСѓСЃРє СЃР»РµРґСѓСЋС‰РµРіРѕ"
             print(f"AI WATCHDOG: {msg}")
             self.view.statusBar().showMessage(msg)
             if hasattr(self.view, "set_route_queue_position"):
@@ -2092,7 +2173,7 @@ class AppController(QObject):
             QTimer.singleShot(self.route_transition_delay_ms, self._start_current_route)
         else:
             self._finish_route_queue(
-                f"Маршрут остановлен по таймауту: {reason}. Следующего маршрута нет"
+                f"РњР°СЂС€СЂСѓС‚ РѕСЃС‚Р°РЅРѕРІР»РµРЅ РїРѕ С‚Р°Р№РјР°СѓС‚Сѓ: {reason}. РЎР»РµРґСѓСЋС‰РµРіРѕ РјР°СЂС€СЂСѓС‚Р° РЅРµС‚"
             )
 
     def _route_path_from_record(self, route):
@@ -2126,7 +2207,7 @@ class AppController(QObject):
                 if route_node is not None:
                     route_id = route_node.get("id") or route_id
         except Exception as exc:
-            print(f"AI ROUTES: не удалось разобрать метаданные маршрута: {exc}")
+            print(f"AI ROUTES: РЅРµ СѓРґР°Р»РѕСЃСЊ СЂР°Р·РѕР±СЂР°С‚СЊ РјРµС‚Р°РґР°РЅРЅС‹Рµ РјР°СЂС€СЂСѓС‚Р°: {exc}")
         return scenario_type, route_id
 
     def _build_route_stdout_log_path(self, project_root, route_path):
@@ -2160,8 +2241,8 @@ class AppController(QObject):
         if not self._is_carla_mode():
             self._ignore_non_carla_call("handle_route_queue_updated")
             return
-        # Изменение выбора не запускает и не готовит сценарий. Оно только делает
-        # предыдущий план устаревшим: пользователь должен явно нажать кнопку подготовки.
+        # РР·РјРµРЅРµРЅРёРµ РІС‹Р±РѕСЂР° РЅРµ Р·Р°РїСѓСЃРєР°РµС‚ Рё РЅРµ РіРѕС‚РѕРІРёС‚ СЃС†РµРЅР°СЂРёР№. РћРЅРѕ С‚РѕР»СЊРєРѕ РґРµР»Р°РµС‚
+        # РїСЂРµРґС‹РґСѓС‰РёР№ РїР»Р°РЅ СѓСЃС‚Р°СЂРµРІС€РёРј: РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РґРѕР»Р¶РµРЅ СЏРІРЅРѕ РЅР°Р¶Р°С‚СЊ РєРЅРѕРїРєСѓ РїРѕРґРіРѕС‚РѕРІРєРё.
         if self.ai_agent_loading or self.ai_agent_running:
             return
         queue = list(routes or [])
@@ -2178,8 +2259,8 @@ class AppController(QObject):
         if not self._is_carla_mode():
             self._ignore_non_carla_call("handle_route_launch_requested")
             return
-        # Кнопка маршрута/очереди только подготавливает план. CARLA/LeadAgentThread
-        # стартуют строго по событию Activate Control ON.
+        # РљРЅРѕРїРєР° РјР°СЂС€СЂСѓС‚Р°/РѕС‡РµСЂРµРґРё С‚РѕР»СЊРєРѕ РїРѕРґРіРѕС‚Р°РІР»РёРІР°РµС‚ РїР»Р°РЅ. CARLA/LeadAgentThread
+        # СЃС‚Р°СЂС‚СѓСЋС‚ СЃС‚СЂРѕРіРѕ РїРѕ СЃРѕР±С‹С‚РёСЋ Activate Control ON.
         queue = list(routes or self._fallback_route_queue_from_view())
         queue = [route for route in queue if route]
         self.pending_route_queue = queue
@@ -2192,15 +2273,15 @@ class AppController(QObject):
         self.route_plan_prepared = bool(queue)
 
         if not queue:
-            message = "Маршрут не выбран"
+            message = "РњР°СЂС€СЂСѓС‚ РЅРµ РІС‹Р±СЂР°РЅ"
             print(f"AI ROUTES: {message}")
             self.view.statusBar().showMessage(message)
             if hasattr(self.view, "set_route_error_status"):
                 self.view.set_route_error_status(message)
             return
 
-        label = f"очередь из {len(queue)} маршрутов" if len(queue) > 1 else "маршрут"
-        message = f"Подготовлено: {label}. Нажмите Activate Control для запуска"
+        label = f"РѕС‡РµСЂРµРґСЊ РёР· {len(queue)} РјР°СЂС€СЂСѓС‚РѕРІ" if len(queue) > 1 else "РјР°СЂС€СЂСѓС‚"
+        message = f"РџРѕРґРіРѕС‚РѕРІР»РµРЅРѕ: {label}. РќР°Р¶РјРёС‚Рµ Activate Control РґР»СЏ Р·Р°РїСѓСЃРєР°"
         print(f"AI ROUTES: {message}")
         self.view.statusBar().showMessage(message)
         if hasattr(self.view, "set_route_runtime_state"):
@@ -2213,7 +2294,7 @@ class AppController(QObject):
             self._ignore_non_carla_call("start_pending_route")
             return
         if self.agent_thread is not None or self.ai_agent_loading:
-            self.view.statusBar().showMessage("AI Status: текущий сценарий еще выполняется")
+            self.view.statusBar().showMessage("AI Status: С‚РµРєСѓС‰РёР№ СЃС†РµРЅР°СЂРёР№ РµС‰Рµ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ")
             return
 
         ok, message = self._validate_control_start_requirements()
@@ -2221,13 +2302,13 @@ class AppController(QObject):
             self._reject_control_activation(message)
             return
 
-        # Каждый новый запуск очереди начинается с первого подготовленного маршрута.
+        # РљР°Р¶РґС‹Р№ РЅРѕРІС‹Р№ Р·Р°РїСѓСЃРє РѕС‡РµСЂРµРґРё РЅР°С‡РёРЅР°РµС‚СЃСЏ СЃ РїРµСЂРІРѕРіРѕ РїРѕРґРіРѕС‚РѕРІР»РµРЅРЅРѕРіРѕ РјР°СЂС€СЂСѓС‚Р°.
         self.current_route_index = 0
         self.queue_stop_requested = False
         self._agent_stop_requested = False
         self._start_current_route()
 
-    # Старое имя оставлено для совместимости с прежним flow.
+    # РЎС‚Р°СЂРѕРµ РёРјСЏ РѕСЃС‚Р°РІР»РµРЅРѕ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃ РїСЂРµР¶РЅРёРј flow.
     def start_ai_agent(self):
         self.start_pending_route()
 
@@ -2240,13 +2321,13 @@ class AppController(QObject):
         if self.agent_thread is not None or self.ai_agent_loading:
             return
         if not (0 <= self.current_route_index < len(self.pending_route_queue)):
-            self._finish_route_queue("Очередь завершена")
+            self._finish_route_queue("РћС‡РµСЂРµРґСЊ Р·Р°РІРµСЂС€РµРЅР°")
             return
 
         route_record = self.pending_route_queue[self.current_route_index]
         selected_route_path = self._route_path_from_record(route_record)
         if not selected_route_path:
-            self.handle_agent_error("У выбранного маршрута нет XML path")
+            self.handle_agent_error("РЈ РІС‹Р±СЂР°РЅРЅРѕРіРѕ РјР°СЂС€СЂСѓС‚Р° РЅРµС‚ XML path")
             return
 
         gui_dir = os.path.dirname(os.path.abspath(__file__))
@@ -2286,13 +2367,13 @@ class AppController(QObject):
                     index=idx,
                     total=total,
                     state="loading",
-                    message=f"Загрузка сценария {idx + 1} / {total}",
+                    message=f"Р—Р°РіСЂСѓР·РєР° СЃС†РµРЅР°СЂРёСЏ {idx + 1} / {total}",
                 )
             elif hasattr(self.view, "set_route_loading_status"):
-                self.view.set_route_loading_status(f"Загрузка сценария {idx + 1} / {total}")
+                self.view.set_route_loading_status(f"Р—Р°РіСЂСѓР·РєР° СЃС†РµРЅР°СЂРёСЏ {idx + 1} / {total}")
 
             self.view.statusBar().showMessage(f"AI Status: loading route {idx + 1}/{total}")
-            print(f"AI ROUTES: старт маршрута {idx + 1}/{total}: {selected_route_path}")
+            print(f"AI ROUTES: СЃС‚Р°СЂС‚ РјР°СЂС€СЂСѓС‚Р° {idx + 1}/{total}: {selected_route_path}")
             self._reset_route_watchdog()
 
             self.agent_thread = LeadAgentThread(config)
@@ -2326,7 +2407,7 @@ class AppController(QObject):
             self.vehicle.accel = 0
             self.vehicle.brake = 0
         except Exception as exc:
-            print(f"AI CONTROL: ошибка сброса локального состояния: {exc}")
+            print(f"AI CONTROL: РѕС€РёР±РєР° СЃР±СЂРѕСЃР° Р»РѕРєР°Р»СЊРЅРѕРіРѕ СЃРѕСЃС‚РѕСЏРЅРёСЏ: {exc}")
 
     def _request_stop_current_agent(self, message="Lead Agent: stopping"):
         self.raw_telemetry_timer.stop()
@@ -2343,14 +2424,14 @@ class AppController(QObject):
         try:
             thread.stop()
         except Exception as exc:
-            print(f"AI ROUTES: ошибка stop(): {exc}")
+            print(f"AI ROUTES: РѕС€РёР±РєР° stop(): {exc}")
 
-        # Не обнуляем self.agent_thread здесь. Иначе Qt может уничтожить QThread,
-        # пока он еще завершает CARLA/ScenarioRunner: это и давало
+        # РќРµ РѕР±РЅСѓР»СЏРµРј self.agent_thread Р·РґРµСЃСЊ. РРЅР°С‡Рµ Qt РјРѕР¶РµС‚ СѓРЅРёС‡С‚РѕР¶РёС‚СЊ QThread,
+        # РїРѕРєР° РѕРЅ РµС‰Рµ Р·Р°РІРµСЂС€Р°РµС‚ CARLA/ScenarioRunner: СЌС‚Рѕ Рё РґР°РІР°Р»Рѕ
         # 'QThread: Destroyed while thread is still running'.
         try:
             if hasattr(thread, "isRunning") and thread.isRunning():
-                print("AI ROUTES: ожидаем штатного завершения LeadAgentThread")
+                print("AI ROUTES: РѕР¶РёРґР°РµРј С€С‚Р°С‚РЅРѕРіРѕ Р·Р°РІРµСЂС€РµРЅРёСЏ LeadAgentThread")
                 return False
         except RuntimeError:
             pass
@@ -2361,9 +2442,9 @@ class AppController(QObject):
     def stop_ai_agent(self):
         self.abort_active_scenario("Lead Agent: stopping", keep_plan=True)
 
-    def abort_active_scenario(self, message="Сценарий остановлен", keep_plan=True):
-        # Безопасная остановка: просим LeadAgentThread завершиться, но не уничтожаем
-        # объект QThread до сигнала finished.
+    def abort_active_scenario(self, message="РЎС†РµРЅР°СЂРёР№ РѕСЃС‚Р°РЅРѕРІР»РµРЅ", keep_plan=True):
+        # Р‘РµР·РѕРїР°СЃРЅР°СЏ РѕСЃС‚Р°РЅРѕРІРєР°: РїСЂРѕСЃРёРј LeadAgentThread Р·Р°РІРµСЂС€РёС‚СЊСЃСЏ, РЅРѕ РЅРµ СѓРЅРёС‡С‚РѕР¶Р°РµРј
+        # РѕР±СЉРµРєС‚ QThread РґРѕ СЃРёРіРЅР°Р»Р° finished.
         self.queue_stop_requested = True
         self.current_route_index = -1
         if not keep_plan:
@@ -2376,11 +2457,11 @@ class AppController(QObject):
         self._reset_local_vehicle_state()
         self._request_stop_current_agent(message)
         if hasattr(self.view, "set_route_stopped_status"):
-            suffix = " Очередь остается подготовленной." if keep_plan and self.route_plan_prepared else ""
+            suffix = " РћС‡РµСЂРµРґСЊ РѕСЃС‚Р°РµС‚СЃСЏ РїРѕРґРіРѕС‚РѕРІР»РµРЅРЅРѕР№." if keep_plan and self.route_plan_prepared else ""
             self.view.set_route_stopped_status(f"{message}.{suffix}")
 
-    # Старое имя оставлено для совместимости.
-    def stop_route_queue(self, message="Очередь остановлена"):
+    # РЎС‚Р°СЂРѕРµ РёРјСЏ РѕСЃС‚Р°РІР»РµРЅРѕ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё.
+    def stop_route_queue(self, message="РћС‡РµСЂРµРґСЊ РѕСЃС‚Р°РЅРѕРІР»РµРЅР°"):
         self.abort_active_scenario(message, keep_plan=True)
 
     @Slot()
@@ -2412,10 +2493,10 @@ class AppController(QObject):
                 if self.route_plan_prepared and self.pending_route_queue:
                     self.view.set_route_runtime_state(
                         "prepared",
-                        "Сценарий прерван. CARLA очищена, можно снова нажать Activate Control",
+                        "РЎС†РµРЅР°СЂРёР№ РїСЂРµСЂРІР°РЅ. CARLA РѕС‡РёС‰РµРЅР°, РјРѕР¶РЅРѕ СЃРЅРѕРІР° РЅР°Р¶Р°С‚СЊ Activate Control",
                     )
                 else:
-                    self.view.set_route_runtime_state("stopped", "Сценарий прерван")
+                    self.view.set_route_runtime_state("stopped", "РЎС†РµРЅР°СЂРёР№ РїСЂРµСЂРІР°РЅ")
             return
 
         total = len(self.pending_route_queue)
@@ -2423,7 +2504,7 @@ class AppController(QObject):
         if total <= 0 or finished_index < 0:
             return
 
-        print(f"AI ROUTES: маршрут {finished_index + 1}/{total} завершен")
+        print(f"AI ROUTES: РјР°СЂС€СЂСѓС‚ {finished_index + 1}/{total} Р·Р°РІРµСЂС€РµРЅ")
 
         if (
             self.queue_mode == "queue"
@@ -2440,7 +2521,7 @@ class AppController(QObject):
             )
             QTimer.singleShot(self.route_transition_delay_ms, self._start_current_route)
         else:
-            self._finish_route_queue("Очередь завершена" if self.queue_mode == "queue" else "Маршрут завершен")
+            self._finish_route_queue("РћС‡РµСЂРµРґСЊ Р·Р°РІРµСЂС€РµРЅР°" if self.queue_mode == "queue" else "РњР°СЂС€СЂСѓС‚ Р·Р°РІРµСЂС€РµРЅ")
 
     def _finish_route_queue(self, message):
         self.pending_route_queue = []
@@ -2473,51 +2554,51 @@ class AppController(QObject):
                 self.ai_agent_loading = False
                 self.ai_agent_running = True
                 if hasattr(self.view, "set_route_running_status"):
-                    self.view.set_route_running_status("Сценарий выполняется: телеметрия получена")
+                    self.view.set_route_running_status("РЎС†РµРЅР°СЂРёР№ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ: С‚РµР»РµРјРµС‚СЂРёСЏ РїРѕР»СѓС‡РµРЅР°")
                 self.view.statusBar().showMessage("AI Status: scenario running")
-            # Извлекаем значения
+            # РР·РІР»РµРєР°РµРј Р·РЅР°С‡РµРЅРёСЏ
             steer = data.get("steer", 0.0)
             throttle = data.get("throttle", 0.0)
             brake = data.get("brake", 0.0)
             
-            # Преобразуем для модели
+            # РџСЂРµРѕР±СЂР°Р·СѓРµРј РґР»СЏ РјРѕРґРµР»Рё
             target_angle = int(steer * 630)
             target_accel = int(throttle * 100)
             target_brake = int(brake * 100)
             
-            # --- ВЫВОД ЛОГОВ В КОНСОЛЬ (как на скриншоте) ---
-            # Используем f-строки для выравнивания
+            # --- Р’Р«Р’РћР” Р›РћР“РћР’ Р’ РљРћРќРЎРћР›Р¬ (РєР°Рє РЅР° СЃРєСЂРёРЅС€РѕС‚Рµ) ---
+            # РСЃРїРѕР»СЊР·СѓРµРј f-СЃС‚СЂРѕРєРё РґР»СЏ РІС‹СЂР°РІРЅРёРІР°РЅРёСЏ
             log_line = (
                 f"[AI TELEMETRY] "
                 f"Steer: {steer:>6.2f} | "
                 f"Thr: {throttle:>5.2f} | "
                 f"Brk: {brake:>5.2f} | "
-                f"Target Angle: {target_angle:>4}°"
+                f"Target Angle: {target_angle:>4}В°"
             )
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             print(f"[{timestamp}] {log_line}")  
 
-            # Обновляем состояние модели
-            # Обновляем состояние модели
+            # РћР±РЅРѕРІР»СЏРµРј СЃРѕСЃС‚РѕСЏРЅРёРµ РјРѕРґРµР»Рё
+            # РћР±РЅРѕРІР»СЏРµРј СЃРѕСЃС‚РѕСЏРЅРёРµ РјРѕРґРµР»Рё
             self.vehicle.target_angle = target_angle
             self.vehicle.target_accel = target_accel
             self.vehicle.target_brake = target_brake
 
-            # Агент не переключает передачи. Для AI-сценария держим локальную модель в D.
+            # РђРіРµРЅС‚ РЅРµ РїРµСЂРµРєР»СЋС‡Р°РµС‚ РїРµСЂРµРґР°С‡Рё. Р”Р»СЏ AI-СЃС†РµРЅР°СЂРёСЏ РґРµСЂР¶РёРј Р»РѕРєР°Р»СЊРЅСѓСЋ РјРѕРґРµР»СЊ РІ D.
             if hasattr(self.vehicle, "force_drive_gear"):
                 self.vehicle.force_drive_gear()
             else:
                 self.vehicle.target_gear = 4
                 self.vehicle.gear = 4
 
-            # Если trace_log.jsonl содержит реальную скорость CARLA, используем ее.
-            # Если скорости нет, обновляем fallback-физику.
+            # Р•СЃР»Рё trace_log.jsonl СЃРѕРґРµСЂР¶РёС‚ СЂРµР°Р»СЊРЅСѓСЋ СЃРєРѕСЂРѕСЃС‚СЊ CARLA, РёСЃРїРѕР»СЊР·СѓРµРј РµРµ.
+            # Р•СЃР»Рё СЃРєРѕСЂРѕСЃС‚Рё РЅРµС‚, РѕР±РЅРѕРІР»СЏРµРј fallback-С„РёР·РёРєСѓ.
             if hasattr(self.vehicle, "apply_telemetry") and self.vehicle.apply_telemetry(data):
                 pass
             else:
                 self.vehicle.update_physics(dt=0.05)
 
-            # Если управление активно, отправляем в CAN
+            # Р•СЃР»Рё СѓРїСЂР°РІР»РµРЅРёРµ Р°РєС‚РёРІРЅРѕ, РѕС‚РїСЂР°РІР»СЏРµРј РІ CAN
             if self.control_active:
                 self.handle_manual_input(target_angle, target_accel, target_brake)
 
@@ -2606,7 +2687,7 @@ class AppController(QObject):
                 now = time.monotonic()
                 if now - self._last_real_gear_ignore_log_at > 1.0:
                     self._last_real_gear_ignore_log_at = now
-                    print("REAL CONTROL: ручная передача заблокирована: сначала отключите Activate Control")
+                    print("REAL CONTROL: СЂСѓС‡РЅР°СЏ РїРµСЂРµРґР°С‡Р° Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅР°: СЃРЅР°С‡Р°Р»Р° РѕС‚РєР»СЋС‡РёС‚Рµ Activate Control")
                 return
             self._schedule_async(self.vehicle_control.request_manual_gear(gear_idx), "real_gear_request")
             return
@@ -2688,7 +2769,7 @@ def _mitsu_set_route_loading_text(self, text):
 
 def _mitsu_set_route_waiting_motion_status(self, message=None):
     self._route_lifecycle_phase = "waiting_motion"
-    text = message or "Сценарий загружен: ожидание физического движения ego"
+    text = message or "РЎС†РµРЅР°СЂРёР№ Р·Р°РіСЂСѓР¶РµРЅ: РѕР¶РёРґР°РЅРёРµ С„РёР·РёС‡РµСЃРєРѕРіРѕ РґРІРёР¶РµРЅРёСЏ ego"
     if hasattr(self.view, "set_route_loading_status"):
         self.view.set_route_loading_status(text)
     elif hasattr(self.view, "set_route_runtime_state"):
@@ -2705,7 +2786,7 @@ def _mitsu_arm_motion_watchdog_if_ready(self, reason=""):
         return
 
     self._route_motion_watchdog_armed_at = time.monotonic()
-    self._set_route_waiting_motion_status("Сценарий загружен: ожидание начала движения ego")
+    self._set_route_waiting_motion_status("РЎС†РµРЅР°СЂРёР№ Р·Р°РіСЂСѓР¶РµРЅ: РѕР¶РёРґР°РЅРёРµ РЅР°С‡Р°Р»Р° РґРІРёР¶РµРЅРёСЏ ego")
     print(f"AI WATCHDOG: motion watchdog armed ({reason})")
 
 def _mitsu_reset_route_watchdog(self):
@@ -2736,7 +2817,7 @@ def _mitsu_reset_route_watchdog(self):
     self._route_debug_last_log_monotonic = None
 
     self._zero_visual_controls()
-    self._set_route_loading_text("Загрузка мира и сценария")
+    self._set_route_loading_text("Р—Р°РіСЂСѓР·РєР° РјРёСЂР° Рё СЃС†РµРЅР°СЂРёСЏ")
 
     if hasattr(self, "_route_force_continue_timer"):
         self._route_force_continue_timer.stop()
@@ -2773,7 +2854,7 @@ def _mitsu_clear_route_watchdog(self):
 
 def _mitsu_mark_route_progress(self, reason):
     if not getattr(self, "_route_progress_seen", False):
-        print(f"AI WATCHDOG: маршрут начал физическое движение: {reason}")
+        print(f"AI WATCHDOG: РјР°СЂС€СЂСѓС‚ РЅР°С‡Р°Р» С„РёР·РёС‡РµСЃРєРѕРµ РґРІРёР¶РµРЅРёРµ: {reason}")
         self._route_progress_seen = True
 
         self.ai_agent_loading = False
@@ -2781,9 +2862,9 @@ def _mitsu_mark_route_progress(self, reason):
         self._route_lifecycle_phase = "running"
 
         if hasattr(self.view, "set_route_running_status"):
-            self.view.set_route_running_status("Сценарий выполняется: ego начал движение")
+            self.view.set_route_running_status("РЎС†РµРЅР°СЂРёР№ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ: ego РЅР°С‡Р°Р» РґРІРёР¶РµРЅРёРµ")
         elif hasattr(self.view, "set_route_runtime_state"):
-            self.view.set_route_runtime_state("running", "Сценарий выполняется: ego начал движение")
+            self.view.set_route_runtime_state("running", "РЎС†РµРЅР°СЂРёР№ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ: ego РЅР°С‡Р°Р» РґРІРёР¶РµРЅРёРµ")
 
         try:
             self.view.statusBar().showMessage("AI Status: scenario running; ego is moving")
@@ -2825,7 +2906,7 @@ def _mitsu_handle_carla_motion_update(self, info):
         self._route_last_progress_location = location
         self._route_total_distance_m = 0.0
         print(
-            f"AI WATCHDOG: найден ego actor id={actor_id}, "
+            f"AI WATCHDOG: РЅР°Р№РґРµРЅ ego actor id={actor_id}, "
             f"type={info.get('type_id', '-')}, role={info.get('role', '-')}, "
             f"start={location}"
         )
@@ -2841,7 +2922,7 @@ def _mitsu_handle_carla_motion_update(self, info):
 
     if not getattr(self, "_route_progress_seen", False):
         self._zero_visual_controls()
-        self._set_route_waiting_motion_status("Сценарий загружен: ожидание движения ego")
+        self._set_route_waiting_motion_status("РЎС†РµРЅР°СЂРёР№ Р·Р°РіСЂСѓР¶РµРЅ: РѕР¶РёРґР°РЅРёРµ РґРІРёР¶РµРЅРёСЏ ego")
 
     self._arm_motion_watchdog_if_ready("hero actor visible")
 
@@ -2903,9 +2984,9 @@ def _mitsu_check_route_startup_watchdog(self):
         waiting_ms = (now - armed_at) * 1000.0
         if waiting_ms >= self.route_startup_timeout_ms:
             reason = (
-                f"после загрузки сценария ego actor не начал движение за {timeout_s:.0f} секунд; "
-                f"dist_from_start={getattr(self, '_route_total_distance_m', 0.0):.1f} м "
-                f"< {getattr(self, 'route_startup_min_distance_m', 5.0):.1f} м"
+                f"РїРѕСЃР»Рµ Р·Р°РіСЂСѓР·РєРё СЃС†РµРЅР°СЂРёСЏ ego actor РЅРµ РЅР°С‡Р°Р» РґРІРёР¶РµРЅРёРµ Р·Р° {timeout_s:.0f} СЃРµРєСѓРЅРґ; "
+                f"dist_from_start={getattr(self, '_route_total_distance_m', 0.0):.1f} Рј "
+                f"< {getattr(self, 'route_startup_min_distance_m', 5.0):.1f} Рј"
             )
             self._skip_current_route_due_to_timeout(reason)
         return
@@ -2916,9 +2997,9 @@ def _mitsu_check_route_startup_watchdog(self):
         stalled_ms = (now - last_progress) * 1000.0
         if stalled_ms >= self.route_startup_timeout_ms:
             reason = (
-                f"нет нового физического движения ego {timeout_s:.0f} секунд "
-                f"после последнего прогресса ({getattr(self, '_route_progress_reason', '')}); "
-                f"dist_from_start={getattr(self, '_route_total_distance_m', 0.0):.1f} м"
+                f"РЅРµС‚ РЅРѕРІРѕРіРѕ С„РёР·РёС‡РµСЃРєРѕРіРѕ РґРІРёР¶РµРЅРёСЏ ego {timeout_s:.0f} СЃРµРєСѓРЅРґ "
+                f"РїРѕСЃР»Рµ РїРѕСЃР»РµРґРЅРµРіРѕ РїСЂРѕРіСЂРµСЃСЃР° ({getattr(self, '_route_progress_reason', '')}); "
+                f"dist_from_start={getattr(self, '_route_total_distance_m', 0.0):.1f} Рј"
             )
             self._skip_current_route_due_to_timeout(reason)
 
@@ -2948,7 +3029,7 @@ def _mitsu_poll_ai_telemetry(self):
         f"Steer: {steer:>6.2f} | "
         f"Thr: {throttle:>5.2f} | "
         f"Brk: {brake:>5.2f} | "
-        f"Target Angle: {target_angle:>4}°"
+        f"Target Angle: {target_angle:>4}В°"
     )
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"[{timestamp}] {log_line}")
@@ -2960,9 +3041,9 @@ def _mitsu_poll_ai_telemetry(self):
         self._zero_visual_controls()
 
         if getattr(self, "_route_carla_vehicle_seen", False):
-            self._set_route_waiting_motion_status("Сценарий загружен: ожидание движения ego")
+            self._set_route_waiting_motion_status("РЎС†РµРЅР°СЂРёР№ Р·Р°РіСЂСѓР¶РµРЅ: РѕР¶РёРґР°РЅРёРµ РґРІРёР¶РµРЅРёСЏ ego")
         else:
-            self._set_route_loading_text("Загрузка мира и сценария")
+            self._set_route_loading_text("Р—Р°РіСЂСѓР·РєР° РјРёСЂР° Рё СЃС†РµРЅР°СЂРёСЏ")
         return
 
     # RUNNING phase: only after CARLA physical displacement has been confirmed.
@@ -3019,7 +3100,7 @@ _mitsu_original_handle_agent_finished = AppController.handle_agent_finished
 
 def _mitsu_is_success_finish_message(message):
     low = str(message or "").lower()
-    bad = ("таймаут", "ошиб", "error", "failed", "останов", "прерван", "stop", "abort")
+    bad = ("С‚Р°Р№РјР°СѓС‚", "РѕС€РёР±", "error", "failed", "РѕСЃС‚Р°РЅРѕРІ", "РїСЂРµСЂРІР°РЅ", "stop", "abort")
     return not any(token in low for token in bad)
 
 def _mitsu_success_message_for_finish(self, message, total_before):
@@ -3027,11 +3108,11 @@ def _mitsu_success_message_for_finish(self, message, total_before):
     if not _mitsu_is_success_finish_message(text):
         return text
 
-    if getattr(self, "queue_mode", None) == "queue" or total_before > 1 or "очеред" in text.lower():
+    if getattr(self, "queue_mode", None) == "queue" or total_before > 1 or "РѕС‡РµСЂРµРґ" in text.lower():
         done = max(1, total_before)
-        return f"Очередь завершена успешно: {done}/{done} маршрутов"
+        return f"РћС‡РµСЂРµРґСЊ Р·Р°РІРµСЂС€РµРЅР° СѓСЃРїРµС€РЅРѕ: {done}/{done} РјР°СЂС€СЂСѓС‚РѕРІ"
 
-    return "Маршрут успешно завершён"
+    return "РњР°СЂС€СЂСѓС‚ СѓСЃРїРµС€РЅРѕ Р·Р°РІРµСЂС€С‘РЅ"
 
 def _mitsu_finish_route_queue(self, message):
     total_before = len(getattr(self, "pending_route_queue", []) or [])
@@ -3058,11 +3139,11 @@ def _mitsu_handle_agent_finished(self):
     stop = getattr(self, "_agent_stop_requested", False) or getattr(self, "queue_stop_requested", False)
 
     if not skip and not stop and total > 0 and idx >= 0:
-        print(f"AI ROUTES: маршрут {idx + 1}/{total} завершён штатно")
+        print(f"AI ROUTES: РјР°СЂС€СЂСѓС‚ {idx + 1}/{total} Р·Р°РІРµСЂС€С‘РЅ С€С‚Р°С‚РЅРѕ")
         try:
-            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён", 5000)
+            self.view.statusBar().showMessage(f"РњР°СЂС€СЂСѓС‚ {idx + 1}/{total} Р·Р°РІРµСЂС€С‘РЅ", 5000)
         except TypeError:
-            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён")
+            self.view.statusBar().showMessage(f"РњР°СЂС€СЂСѓС‚ {idx + 1}/{total} Р·Р°РІРµСЂС€С‘РЅ")
         except Exception:
             pass
 
@@ -3081,7 +3162,7 @@ _mitsu_v4_original_handle_agent_finished = AppController.handle_agent_finished
 
 def _mitsu_v4_is_success_finish_message(message):
     low = str(message or "").lower()
-    bad = ("таймаут", "ошиб", "error", "failed", "останов", "прерван", "stop", "abort")
+    bad = ("С‚Р°Р№РјР°СѓС‚", "РѕС€РёР±", "error", "failed", "РѕСЃС‚Р°РЅРѕРІ", "РїСЂРµСЂРІР°РЅ", "stop", "abort")
     return not any(token in low for token in bad)
 
 def _mitsu_v4_success_message_for_finish(self, message, total_before):
@@ -3089,11 +3170,11 @@ def _mitsu_v4_success_message_for_finish(self, message, total_before):
     if not _mitsu_v4_is_success_finish_message(text):
         return text
 
-    if getattr(self, "queue_mode", None) == "queue" or total_before > 1 or "очеред" in text.lower():
+    if getattr(self, "queue_mode", None) == "queue" or total_before > 1 or "РѕС‡РµСЂРµРґ" in text.lower():
         done = max(1, total_before)
-        return f"Очередь завершена успешно: {done}/{done} маршрутов"
+        return f"РћС‡РµСЂРµРґСЊ Р·Р°РІРµСЂС€РµРЅР° СѓСЃРїРµС€РЅРѕ: {done}/{done} РјР°СЂС€СЂСѓС‚РѕРІ"
 
-    return "Маршрут успешно завершён"
+    return "РњР°СЂС€СЂСѓС‚ СѓСЃРїРµС€РЅРѕ Р·Р°РІРµСЂС€С‘РЅ"
 
 def _mitsu_v4_finish_route_queue(self, message):
     total_before = len(getattr(self, "pending_route_queue", []) or [])
@@ -3120,11 +3201,11 @@ def _mitsu_v4_handle_agent_finished(self):
     stop = getattr(self, "_agent_stop_requested", False) or getattr(self, "queue_stop_requested", False)
 
     if not skip and not stop and total > 0 and idx >= 0:
-        print(f"AI ROUTES: маршрут {idx + 1}/{total} завершён штатно")
+        print(f"AI ROUTES: РјР°СЂС€СЂСѓС‚ {idx + 1}/{total} Р·Р°РІРµСЂС€С‘РЅ С€С‚Р°С‚РЅРѕ")
         try:
-            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён", 5000)
+            self.view.statusBar().showMessage(f"РњР°СЂС€СЂСѓС‚ {idx + 1}/{total} Р·Р°РІРµСЂС€С‘РЅ", 5000)
         except TypeError:
-            self.view.statusBar().showMessage(f"Маршрут {idx + 1}/{total} завершён")
+            self.view.statusBar().showMessage(f"РњР°СЂС€СЂСѓС‚ {idx + 1}/{total} Р·Р°РІРµСЂС€С‘РЅ")
         except Exception:
             pass
 
@@ -3246,8 +3327,8 @@ def _mitsu_v18_apply_state_to_ui(controller, previous_state=""):
     if state == "AI_ACTIVE":
         controller.control_active = True
         controller.manual_control_requested = False
-        _mitsu_v18_set_button(controller, True, "Отключить ИИ / ручное")
-        _mitsu_v18_set_authority(controller, "ai", "Автономное управление активно")
+        _mitsu_v18_set_button(controller, True, "РћС‚РєР»СЋС‡РёС‚СЊ РР / СЂСѓС‡РЅРѕРµ")
+        _mitsu_v18_set_authority(controller, "ai", "РђРІС‚РѕРЅРѕРјРЅРѕРµ СѓРїСЂР°РІР»РµРЅРёРµ Р°РєС‚РёРІРЅРѕ")
         return
 
     if state == "MANUAL_ACTIVE":
@@ -3256,11 +3337,11 @@ def _mitsu_v18_apply_state_to_ui(controller, previous_state=""):
         controller.manual_control_requested = True
 
         takeover = bool(getattr(controller, "_mitsu_v18_takeover_latched", False)) or previous_state == "AI_ACTIVE"
-        _mitsu_v18_set_button(controller, True, "Ручное управление активно")
+        _mitsu_v18_set_button(controller, True, "Р СѓС‡РЅРѕРµ СѓРїСЂР°РІР»РµРЅРёРµ Р°РєС‚РёРІРЅРѕ")
         _mitsu_v18_set_authority(
             controller,
             "manual_takeover" if takeover else "manual",
-            "Перехват ИИ: ручное управление активно" if takeover else "Ручное управление активно",
+            "РџРµСЂРµС…РІР°С‚ РР: СЂСѓС‡РЅРѕРµ СѓРїСЂР°РІР»РµРЅРёРµ Р°РєС‚РёРІРЅРѕ" if takeover else "Р СѓС‡РЅРѕРµ СѓРїСЂР°РІР»РµРЅРёРµ Р°РєС‚РёРІРЅРѕ",
         )
         return
 
@@ -3273,8 +3354,8 @@ def _mitsu_v18_apply_state_to_ui(controller, previous_state=""):
             controller.ai_control_requested = False
             controller.manual_control_requested = False
             controller._mitsu_v18_takeover_latched = False
-            _mitsu_v18_set_button(controller, False, "Активировать управление")
-            _mitsu_v18_set_authority(controller, "off", "Миссия подготовлена")
+            _mitsu_v18_set_button(controller, False, "РђРєС‚РёРІРёСЂРѕРІР°С‚СЊ СѓРїСЂР°РІР»РµРЅРёРµ")
+            _mitsu_v18_set_authority(controller, "off", "РњРёСЃСЃРёСЏ РїРѕРґРіРѕС‚РѕРІР»РµРЅР°")
 
 
 if hasattr(AppController, "_start_real_camera_stack") and not hasattr(AppController, "_mitsu_v18_original_start_real_camera_stack"):
@@ -3322,8 +3403,8 @@ if hasattr(AppController, "_handle_real_control_toggle") and not hasattr(AppCont
 
         if takeover:
             self._mitsu_v18_takeover_latched = True
-            _mitsu_v18_set_authority(self, "manual_takeover", "Перехват ИИ: ручное управление активно")
-            _mitsu_v18_set_button(self, True, "Переход в ручное")
+            _mitsu_v18_set_authority(self, "manual_takeover", "РџРµСЂРµС…РІР°С‚ РР: СЂСѓС‡РЅРѕРµ СѓРїСЂР°РІР»РµРЅРёРµ Р°РєС‚РёРІРЅРѕ")
+            _mitsu_v18_set_button(self, True, "РџРµСЂРµС…РѕРґ РІ СЂСѓС‡РЅРѕРµ")
 
         result = await AppController._mitsu_v18_original_handle_real_control_toggle(self, is_active)
         if not isinstance(result, dict):
@@ -3338,7 +3419,7 @@ if hasattr(AppController, "_handle_real_control_toggle") and not hasattr(AppCont
                 result["requested"] = True
                 result["active"] = True
                 result["authority"] = "manual_takeover"
-                result["message"] = "Перехват ИИ: ручное управление активно"
+                result["message"] = "РџРµСЂРµС…РІР°С‚ РР: СЂСѓС‡РЅРѕРµ СѓРїСЂР°РІР»РµРЅРёРµ Р°РєС‚РёРІРЅРѕ"
                 self.control_active = True
                 self.ai_control_requested = False
                 self.manual_control_requested = True
@@ -3444,6 +3525,18 @@ if __name__ == "__main__":
     host = str(getattr(args, "carla_host", "") or "").strip()
     if host:
         controller.carla_watchdog_host = host
+    auto_device = os.environ.get("MITSU_AUTO_CONNECT_DEVICE", "").strip()
+    if auto_device:
+        def _auto_connect_real_device():
+            controller._set_runtime_mode_from_device(auto_device)
+            controller._schedule_async(
+                controller._connect_vehicle_control_device(auto_device),
+                "connect_vehicle_control_device",
+            )
+            if os.environ.get("MITSU_AUTO_AI_PREVIEW", "").strip().lower() in {"1", "true", "yes", "on"}:
+                controller.handle_ai_toggle(True)
+
+        QTimer.singleShot(500, _auto_connect_real_device)
     app.aboutToQuit.connect(controller.shutdown)
     main_window.show()
     sys.exit(app.exec())

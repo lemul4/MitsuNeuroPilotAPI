@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import time
 from typing import Dict, Optional
 
@@ -45,6 +46,7 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
         self._rx_packet_count = 0
         self._mapped_packet_count = 0
         self._last_packet_can_id: Optional[int] = None
+        self._last_rx_debug_at = 0.0
         try:
             self.serial.data_received.connect(self.handle_can_packet)
             self.serial.connection_status.connect(self._handle_connection_status)
@@ -112,12 +114,31 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
             data = pkt.CAN_DATA.DATA
             self._rx_packet_count += 1
             self._last_packet_can_id = can_id
-            if self.telemetry_parser.apply_packet(can_id, data, self.telemetry):
+            mapped = self.telemetry_parser.apply_packet(can_id, data, self.telemetry)
+            if mapped:
                 self._mapped_packet_count += 1
+            if self._rx_debug_enabled(can_id):
+                now = time.monotonic()
+                if now - self._last_rx_debug_at >= 0.2:
+                    self._last_rx_debug_at = now
+                    values = " ".join(f"{int(x) & 0xFF:02X}" for x in list(data))
+                    print(
+                        "CAN RX: "
+                        f"id=0x{can_id:04X} data={values} mapped={mapped} "
+                        f"steer={self.telemetry.angle_deg:.1f} "
+                        f"accel={self.telemetry.accel_pct:.0f} "
+                        f"brake={self.telemetry.brake_pct:.0f}"
+                    )
             self.telemetry.last_rx_monotonic = time.monotonic()
             self.telemetry.heartbeat_ok = True
         except Exception as exc:
             self.telemetry.fault = str(exc)
+
+    @staticmethod
+    def _rx_debug_enabled(can_id: int) -> bool:
+        if os.environ.get("MITSU_CAN_RX_DEBUG", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return False
+        return int(can_id) in {0x0001, 0x0017, 0x0018, 0x0037, 0x0038}
 
     def get_diagnostics(self) -> Dict[str, object]:
         return {

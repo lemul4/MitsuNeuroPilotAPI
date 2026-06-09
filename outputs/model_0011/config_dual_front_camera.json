@@ -173,7 +173,7 @@
     "keep_all_model_checkpoints": true,
     "is_pretraining": false,
     "sync_batchnorm": false,
-    "compile": true,
+    "compile": false,
     "channel_last": true,
     "skip_first": 4,
     "skip_last": 2,
