@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 import jaxtyping as jt
@@ -47,30 +48,98 @@ class OpenLoopInference:
         self.config_training = config_training
         self.config_open_loop = config_open_loop
         self.device = device
+        self._startup_timing_enabled = bool(
+            getattr(self.config_training, "model_startup_timing", False)
+        )
+        startup_total_start = time.perf_counter()
 
         # Loading models
         self.nets: list[TFv6] = []
-        for file in sorted(os.listdir(model_path)):
-            if file.startswith(prefix) and file.endswith(".pth"):
-                LOG.info(f"Loading model weight from {os.path.join(model_path, file)}")
-                net = TFv6(self.device, self.config_training)
-                if self.config_training.sync_batchnorm:
-                    net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
-                state_dict = torch.load(
-                    os.path.join(model_path, file),
-                    map_location=self.device,
-                    weights_only=True,
-                )
-                net.load_state_dict(
-                    state_dict, strict=config_open_loop.strict_weight_load
-                )
-                net.to(device=self.device).eval()
-                if self.config_training.channel_last:
-                    net.to(memory_format=torch.channels_last)
-                self._prepare_jit_compile(net)
-                self.nets.append(net)
+        model_files = [
+            file
+            for file in sorted(os.listdir(model_path))
+            if file.startswith(prefix) and file.endswith(".pth")
+        ]
+        self._log_startup_timing(
+            "scan_model_files",
+            startup_total_start,
+            files=len(model_files),
+            model_path=model_path,
+            prefix=prefix,
+        )
+        for file in model_files:
+            model_file_path = os.path.join(model_path, file)
+            model_start = time.perf_counter()
+            LOG.info(f"Loading model weight from {model_file_path}")
+
+            step_start = time.perf_counter()
+            net = TFv6(self.device, self.config_training)
+            self._log_startup_timing(file, step_start, stage="build_model")
+
+            if self.config_training.sync_batchnorm:
+                step_start = time.perf_counter()
+                net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(net)
+                self._log_startup_timing(file, step_start, stage="sync_batchnorm")
+
+            step_start = time.perf_counter()
+            state_dict = torch.load(
+                model_file_path,
+                map_location=self.device,
+                weights_only=True,
+            )
+            self._log_startup_timing(file, step_start, stage="load_weights_from_disk")
+
+            step_start = time.perf_counter()
+            net.load_state_dict(state_dict, strict=config_open_loop.strict_weight_load)
+            self._log_startup_timing(file, step_start, stage="load_state_dict")
+
+            step_start = time.perf_counter()
+            net.to(device=self.device).eval()
+            self._sync_device()
+            self._log_startup_timing(
+                file,
+                step_start,
+                stage="move_to_device_and_eval",
+                device=str(self.device),
+            )
+
+            if self.config_training.channel_last:
+                step_start = time.perf_counter()
+                net.to(memory_format=torch.channels_last)
+                self._sync_device()
+                self._log_startup_timing(file, step_start, stage="channels_last")
+
+            step_start = time.perf_counter()
+            self._prepare_jit_compile(net)
+            self._log_startup_timing(file, step_start, stage="prepare_jit_compile")
+
+            self.nets.append(net)
+            self._log_startup_timing(file, model_start, stage="model_total")
+
+        step_start = time.perf_counter()
         self._warmup_jit_compile()
+        self._log_startup_timing("warmup_jit_compile", step_start)
+        self._log_startup_timing("open_loop_inference_total", startup_total_start)
         self.step = 4  # Constant so produced images start with 5, not really important
+
+    def _sync_device(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _log_startup_timing(
+        self,
+        name: str,
+        start_s: float,
+        **fields: object,
+    ) -> None:
+        if not getattr(self, "_startup_timing_enabled", False):
+            return
+        self._sync_device()
+        elapsed_ms = (time.perf_counter() - start_s) * 1000.0
+        suffix = ""
+        if fields:
+            suffix = " " + " ".join(f"{key}={value}" for key, value in fields.items())
+        LOG.info("[ModelStartupTiming] %s elapsed=%.3f ms%s", name, elapsed_ms, suffix)
 
     def _jit_compile_mode(self) -> str:
         configured_mode = getattr(self.config_training, "jit_compile_mode", None)
@@ -196,11 +265,18 @@ class OpenLoopInference:
             dtype=self.config_training.torch_float_type,
             enabled=use_autocast,
         ):
-            for _ in range(warmup_steps):
-                for net in self.nets:
+            for step_index in range(warmup_steps):
+                for net_index, net in enumerate(self.nets):
+                    step_start = time.perf_counter()
                     net(data)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+                    self._sync_device()
+                    self._log_startup_timing(
+                        "jit_compile_warmup_forward",
+                        step_start,
+                        step=step_index + 1,
+                        net=net_index,
+                    )
+        self._sync_device()
 
     def _uses_autocast(self) -> bool:
         return (

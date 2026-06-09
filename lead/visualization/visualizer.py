@@ -1,6 +1,8 @@
+# ruff: noqa: I001
 import io
 import os
 from copy import deepcopy
+from pathlib import Path
 
 import cv2
 import matplotlib
@@ -28,6 +30,20 @@ from lead.tfv6.center_net_decoder import PredictedBoundingBox
 from lead.tfv6.tfv6 import Prediction
 from lead.training.config_training import TrainingConfig
 from lead.visualization import viz_utils
+
+
+def _load_visualizer_font(file_name: str, size: int):
+    candidates = [
+        Path("3rd_party") / file_name,
+        Path(__file__).resolve().parents[2] / "3rd_party" / file_name,
+    ]
+    for path in candidates:
+        try:
+            if path.exists():
+                return ImageFont.truetype(str(path), size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
 
 
 class Visualizer:
@@ -422,10 +438,7 @@ class Visualizer:
                     img_pil = Image.fromarray(perspective_image)
                     draw = ImageDraw.Draw(img_pil)
 
-                    try:
-                        font = ImageFont.truetype("3rd_party/Roboto-Bold.ttf", 20)
-                    except:
-                        font = ImageFont.load_default()
+                    font = _load_visualizer_font("Roboto-Bold.ttf", 20)
 
                     # Get text size
                     bbox = draw.textbbox((0, 0), text, font=font)
@@ -1247,8 +1260,8 @@ class Visualizer:
         text_lines = sorted(text_lines)
 
         # Load fonts once
-        font_regular = ImageFont.truetype("3rd_party/Roboto-Regular.ttf", 17)
-        font_bold = ImageFont.truetype("3rd_party/Roboto-Bold.ttf", 17)
+        font_regular = _load_visualizer_font("Roboto-Regular.ttf", 17)
+        font_bold = _load_visualizer_font("Roboto-Bold.ttf", 17)
 
         img_pil = Image.fromarray(self.meta_panel)
         draw = ImageDraw.Draw(img_pil)

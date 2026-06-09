@@ -48,6 +48,18 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
 
 
+def _log_model_startup_timing(
+    enabled: bool, name: str, start_s: float, **fields
+) -> None:
+    if not enabled:
+        return
+    elapsed_ms = (time.perf_counter() - start_s) * 1000.0
+    suffix = ""
+    if fields:
+        suffix = " " + " ".join(f"{key}={value}" for key, value in fields.items())
+    LOG.info("[ModelStartupTiming] %s elapsed=%.3f ms%s", name, elapsed_ms, suffix)
+
+
 def get_entry_point():  # dead: disable
     return "SensorAgent"
 
@@ -72,6 +84,8 @@ def resolve_checkpoint_config_path(checkpoint_path: str | os.PathLike) -> pathli
 class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
     @beartype
     def setup(self, path_to_conf_file: str, _=None, __=None):
+        setup_start = time.perf_counter()
+        startup_timing_enabled = False
         # Set up test time training default parameters
         self.config_closed_loop = ClosedLoopConfig()
         super().setup(sensor_agent=True)
@@ -95,21 +109,44 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             path_to_conf_file = path_to_conf_file.split("+")[0]
         config_path = resolve_checkpoint_config_path(path_to_conf_file)
         LOG.info("[SensorAgent] Loading model config from %s", config_path)
+        step_start = time.perf_counter()
         with open(config_path, encoding="utf-8") as f:
             json_config = f.read()
             json_config = json.loads(json_config)
+        startup_timing_enabled = bool(json_config.get("model_startup_timing", False))
+        _log_model_startup_timing(
+            startup_timing_enabled,
+            "read_model_config",
+            step_start,
+            config_path=config_path,
+        )
 
         # Generate new config for the case that it has new variables.
+        step_start = time.perf_counter()
         self.training_config = TrainingConfig(json_config)
+        _log_model_startup_timing(
+            startup_timing_enabled,
+            "build_training_config",
+            step_start,
+        )
+
+        step_start = time.perf_counter()
         self.device = self._resolve_inference_device()
         self._apply_inference_device_runtime_overrides()
         self._apply_model_runtime_overrides()
+        _log_model_startup_timing(
+            startup_timing_enabled,
+            "apply_runtime_overrides",
+            step_start,
+            device=self.device,
+        )
         LOG.info("[SensorAgent] Using inference device: %s", self.device)
 
         # Store training config in base class for Kalman filter decision
         # This is accessed by BaseAgent._use_kalman_filter()
 
         # Load model files
+        step_start = time.perf_counter()
         self.closed_loop_inference = ClosedLoopInference(
             config_training=self.training_config,
             config_closed_loop=self.config_closed_loop,
@@ -117,6 +154,11 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             model_path=path_to_conf_file,
             device=self.device,
             prefix="model",
+        )
+        _log_model_startup_timing(
+            startup_timing_enabled,
+            "create_closed_loop_inference",
+            step_start,
         )
 
         # Post-processing heuristics
@@ -165,6 +207,11 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self._telemetry_file = None
         self._telemetry_enabled = False
         self._setup_raw_telemetry()
+        _log_model_startup_timing(
+            startup_timing_enabled,
+            "sensor_agent_setup_total",
+            setup_start,
+        )
 
     def _setup_inference_dataset_saving(self) -> None:
         if not self._inference_dataset_save_enabled:
@@ -483,6 +530,18 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
                     "produce_input_image": False,
                     "produce_input_video": False,
                     "produce_grid_image": False,
+                    "produce_grid_video": False,
+                }
+            )
+        elif bool(
+            getattr(self.training_config, "disable_image_to_video_conversion", False)
+            or getattr(self.training_config, "disable_visual_video_artifacts", False)
+        ):
+            loaded_config.update(
+                {
+                    "produce_demo_video": False,
+                    "produce_debug_video": False,
+                    "produce_input_video": False,
                     "produce_grid_video": False,
                 }
             )
@@ -1183,6 +1242,12 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         # Save input images as PNG and video
         if (
             self.config_closed_loop.save_path is not None
+            and (
+                self.config_closed_loop.produce_input_image
+                or self.config_closed_loop.produce_input_video
+                or self.config_closed_loop.produce_grid_image
+                or self.config_closed_loop.produce_grid_video
+            )
             and self.step % self.config_closed_loop.produce_frame_frequency == 0
         ):
             # Get the RGB image for visualization (before JPEG compression)
@@ -1196,6 +1261,12 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         # Save demo images
         if (
             self.config_closed_loop.save_path is not None
+            and (
+                self.config_closed_loop.produce_demo_image
+                or self.config_closed_loop.produce_demo_video
+                or self.config_closed_loop.produce_grid_image
+                or self.config_closed_loop.produce_grid_video
+            )
             and self.step % self.config_closed_loop.produce_frame_frequency == 0
         ):
             # Get predicted route and waypoints (if available)

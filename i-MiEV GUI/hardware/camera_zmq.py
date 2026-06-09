@@ -145,17 +145,48 @@ class RealCameraAgentAnalyzerThread(QThread):
             "MITSU_REAL_AGENT_FACTORY",
             "real_agent_adapters.lead_real_model_0011_adapter:create_agent",
         ).strip()
+        timing_enabled = os.environ.get("MITSU_REAL_MODEL_TIMING", "1").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        total_start = time.perf_counter()
         if not spec:
             self.analyzer_status_changed.emit("модель не задана; используется маршрутный PID fallback")
             return None
         try:
             module_name, func_name = spec.split(":", 1)
+            if timing_enabled:
+                self.analyzer_status_changed.emit(f"model timing: factory import start spec={spec}")
+            step_start = time.perf_counter()
             module = importlib.import_module(module_name)
+            if timing_enabled:
+                self.analyzer_status_changed.emit(
+                    f"model timing: factory import {(time.perf_counter() - step_start) * 1000.0:.1f} ms"
+                )
+            step_start = time.perf_counter()
             factory = getattr(module, func_name)
+            if timing_enabled:
+                self.analyzer_status_changed.emit(
+                    f"model timing: factory lookup {(time.perf_counter() - step_start) * 1000.0:.1f} ms"
+                )
+            step_start = time.perf_counter()
             adapter = factory()
+            if timing_enabled:
+                self.analyzer_status_changed.emit(
+                    f"model timing: factory create {(time.perf_counter() - step_start) * 1000.0:.1f} ms"
+                )
+                self.analyzer_status_changed.emit(
+                    f"model timing: adapter total {(time.perf_counter() - total_start) * 1000.0:.1f} ms"
+                )
             self.analyzer_status_changed.emit(f"модель подключена: {spec}")
             return adapter
         except Exception as exc:
+            if timing_enabled:
+                self.analyzer_status_changed.emit(
+                    f"model timing: adapter failed after {(time.perf_counter() - total_start) * 1000.0:.1f} ms"
+                )
             self.analyzer_status_changed.emit(f"модель не подключена: {exc}; PID fallback")
             return None
 
@@ -228,6 +259,13 @@ class RealCameraAgentAnalyzerThread(QThread):
                         self.analyzer_status_changed.emit(f"ошибка инференса: {exc}")
                         time.sleep(0.2)
         finally:
+            if self._model_adapter is not None:
+                close = getattr(self._model_adapter, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as exc:
+                        self.analyzer_status_changed.emit(f"model cleanup failed: {exc}")
             for socket in (wide, narrow):
                 try:
                     socket.close(0)

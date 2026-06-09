@@ -5,6 +5,13 @@ import math
 import os
 import sys
 import time
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -384,29 +391,60 @@ class LeadModel0011RealPortAdapter:
     responsible for safety gating and command arbitration.
     """
 
+    @staticmethod
+    def _timing_enabled() -> bool:
+        return os.environ.get("MITSU_REAL_MODEL_TIMING", "1").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @classmethod
+    def _log_timing(cls, stage: str, start_s: float, **fields: Any) -> None:
+        if not cls._timing_enabled():
+            return
+        elapsed_ms = (time.perf_counter() - start_s) * 1000.0
+        suffix = ""
+        if fields:
+            suffix = " " + " ".join(f"{key}={value}" for key, value in fields.items())
+        print(f"REAL MODEL TIMING: {stage} {elapsed_ms:.1f} ms{suffix}", flush=True)
+
     def __init__(
         self,
         builder: Optional[RealModel0011InputBuilder] = None,
         checkpoint_dir: Optional[str] = None,
     ):
+        total_start = time.perf_counter()
         if torch is None:
             raise RuntimeError("torch is required for model_0011 inference")
 
+        step_start = time.perf_counter()
         root = _ensure_project_import_paths()
-
         _mitsu_install_carla_shims()
+        self._log_timing("project_paths_and_carla_shims", step_start)
 
+        step_start = time.perf_counter()
         from lead.expert.config_expert import ExpertConfig
         _mitsu_install_carla_shims()
 
         from lead.inference.closed_loop_inference import ClosedLoopInference
         from lead.inference.config_closed_loop import ClosedLoopConfig
         from lead.training.config_training import TrainingConfig
+        try:
+            from lead.visualization.visualizer import Visualizer
+        except Exception as exc:
+            Visualizer = None
+            print(f"REAL MODEL VIS: visualizer import failed: {exc}", flush=True)
+        self._log_timing("lead_imports", step_start)
 
         self.root = root
+        step_start = time.perf_counter()
         self.device = _select_device()
+        self._log_timing("select_device", step_start, device=self.device)
         self.builder = builder or RealModel0011InputBuilder()
 
+        step_start = time.perf_counter()
         checkpoint = Path(
             checkpoint_dir
             or os.environ.get("MITSU_REAL_MODEL_CHECKPOINT", "")
@@ -429,35 +467,64 @@ class LeadModel0011RealPortAdapter:
         model_files = sorted(checkpoint.glob("model*.pth"))
         if not model_files:
             raise RuntimeError(f"No model*.pth weights found in checkpoint directory: {checkpoint}")
+        self._log_timing(
+            "resolve_checkpoint",
+            step_start,
+            checkpoint=checkpoint,
+            config=config_path.name,
+            model_files=len(model_files),
+        )
 
+        step_start = time.perf_counter()
         os.environ.setdefault("SAVE_PATH", str(root / "outputs" / "real_model_inference"))
         os.environ.setdefault("BENCHMARK_ROUTE_ID", "real_serial")
         os.environ.setdefault("ROUTE_NUMBER", "real_serial")
         os.environ.setdefault("IS_BENCH2DRIVE", "0")
         os.environ.setdefault("LEAD_PROJECT_ROOT", str(root))
+        self._log_timing("runtime_env_defaults", step_start)
 
+        step_start = time.perf_counter()
         with open(config_path, "r", encoding="utf-8") as file:
             training_payload = json.load(file)
+        self._log_timing("read_training_config_json", step_start, config=config_path)
 
         # Real-COM preview favors compatibility over throughput. Some Windows
         # Torch builds cannot convert or run parts of this model in bfloat16.
+        step_start = time.perf_counter()
         training_payload["compile"] = False
         training_payload["jit_compile"] = False
         training_payload["jit_compile_warmup_steps"] = 0
         training_payload["use_mixed_precision_training"] = False
         training_payload["channel_last"] = False
         training_payload["additional_metrics_dtype"] = "float32"
+        training_payload["visualize_lidar_bev"] = False
 
         if self.device.type == "cpu":
             training_payload["inference_device"] = "cpu"
         else:
             training_payload["inference_device"] = str(self.device)
+        self._log_timing(
+            "apply_real_runtime_overrides",
+            step_start,
+            inference_device=training_payload["inference_device"],
+        )
 
+        step_start = time.perf_counter()
         self.training_config = TrainingConfig(training_payload)
         self.builder.configure_from_training(self.training_config)
+        self.visualizer_cls = Visualizer
+        self._log_timing(
+            "build_training_config",
+            step_start,
+            image=f"{self.builder.image_width}x{self.builder.image_height}",
+        )
 
+        step_start = time.perf_counter()
         self.closed_loop_config = ClosedLoopConfig()
         self.expert_config = ExpertConfig()
+        self._log_timing("build_control_configs", step_start)
+
+        step_start = time.perf_counter()
         self.inference = ClosedLoopInference(
             config_training=self.training_config,
             config_closed_loop=self.closed_loop_config,
@@ -466,14 +533,23 @@ class LeadModel0011RealPortAdapter:
             device=self.device,
             prefix="model",
         )
+        self._log_timing("closed_loop_inference", step_start, nets=len(self.inference.nets))
 
         if not self.inference.nets:
             raise RuntimeError(f"ClosedLoopInference loaded no model*.pth files from {checkpoint}")
+        step_start = time.perf_counter()
         self._force_float32_modules()
+        self._log_timing("force_float32_modules", step_start)
 
         self.checkpoint = str(checkpoint)
         self.config_path = str(config_path)
         self._frame_id = 0
+        self._visualization_executor = ThreadPoolExecutor(
+            max_workers=self._visualization_save_workers(),
+            thread_name_prefix="real-visual-save",
+        )
+        self._visualization_futures: list[Future] = []
+        self._log_timing("real_adapter_total", total_start, checkpoint=self.checkpoint)
 
     def _force_float32_modules(self) -> None:
         nets = getattr(self.inference, "nets", None)
@@ -493,6 +569,144 @@ class LeadModel0011RealPortAdapter:
             value = np.asarray(value).reshape(-1)[0]
         return float(value)
 
+    def _visualization_enabled(self) -> bool:
+        if getattr(self, "visualizer_cls", None) is None:
+            return False
+        if bool(getattr(self.training_config, "disable_visual_artifacts", False)):
+            return False
+        value = os.environ.get("MITSU_REAL_VISUALIZATION", "").strip().lower()
+        if value:
+            return value in {"1", "true", "yes", "on"}
+        return bool(getattr(self.closed_loop_config, "produce_debug_image", True))
+
+    def _visualization_frequency(self) -> int:
+        value = os.environ.get("MITSU_REAL_VISUALIZATION_FREQUENCY", "").strip()
+        if value:
+            return max(1, int(value))
+        return max(1, int(getattr(self.training_config, "real_visualization_frequency", 5)))
+
+    def _visualization_scale(self) -> float:
+        return float(getattr(self.training_config, "visual_artifact_resolution_scale", 1.0))
+
+    def _visualization_save_workers(self) -> int:
+        return max(1, int(getattr(self.training_config, "visual_artifact_save_workers", 2)))
+
+    def _visualization_dir(self) -> Path:
+        save_path = os.environ.get("SAVE_PATH", "").strip()
+        if save_path:
+            root = Path(save_path)
+        else:
+            root = self.root / "outputs" / "real_model_inference"
+        path = root / "real_debug_images"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _resize_visualization(self, image: "np.ndarray") -> "np.ndarray":
+        scale = self._visualization_scale()
+        if scale == 1.0:
+            return image
+        height, width = image.shape[:2]
+        target = (
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        )
+        if target == (width, height):
+            return image
+        return cv2.resize(image, target, interpolation=cv2.INTER_AREA)
+
+    @staticmethod
+    def _write_visualization(path: str, image: "np.ndarray") -> None:
+        ok = cv2.imwrite(
+            path,
+            cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+            [int(cv2.IMWRITE_PNG_COMPRESSION), 0],
+        )
+        if not ok:
+            raise OSError(f"Failed to write visualization: {path}")
+
+    def _prune_visualization_saves(self) -> None:
+        pending = []
+        for future in self._visualization_futures:
+            if future.done():
+                try:
+                    future.result()
+                except Exception as exc:
+                    print(f"REAL MODEL VIS: async save failed: {exc}", flush=True)
+            else:
+                pending.append(future)
+        self._visualization_futures = pending
+
+    def _submit_visualization_save(self, path: Path, image: "np.ndarray") -> None:
+        self._prune_visualization_saves()
+        max_pending = self._visualization_save_workers() * 8
+        if len(self._visualization_futures) >= max_pending:
+            done, pending = wait(
+                self._visualization_futures,
+                return_when=FIRST_COMPLETED,
+            )
+            for future in done:
+                try:
+                    future.result()
+                except Exception as exc:
+                    print(f"REAL MODEL VIS: async save failed: {exc}", flush=True)
+            self._visualization_futures = list(pending)
+        self._visualization_futures.append(
+            self._visualization_executor.submit(
+                self._write_visualization,
+                str(path),
+                image.copy(),
+            )
+        )
+
+    def _visualization_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        visual_data = dict(data)
+        left = visual_data.get("rgb_left")
+        right = visual_data.get("rgb_right")
+        if left is not None and right is not None:
+            visual_data["rgb"] = torch.cat([left, right], dim=3)
+        elif left is not None:
+            visual_data["rgb"] = left
+        elif right is not None:
+            visual_data["rgb"] = right
+        return visual_data
+
+    def _maybe_save_visualization(self, data: Dict[str, Any], prediction: Any) -> None:
+        if cv2 is None or np is None or not self._visualization_enabled():
+            return
+        if self._frame_id % self._visualization_frequency() != 0:
+            return
+        try:
+            image = self.visualizer_cls(
+                config=self.training_config,
+                data=self._visualization_data(data),
+                prediction=prediction,
+                config_test_time=self.closed_loop_config,
+                test_time=True,
+            ).visualize_inference_prediction()
+            image = self._resize_visualization(np.asarray(image, dtype=np.uint8))
+            out_path = self._visualization_dir() / f"{self._frame_id:06}.png"
+            self._submit_visualization_save(out_path, image)
+        except Exception as exc:
+            print(f"REAL MODEL VIS: skipped frame {self._frame_id}: {exc}", flush=True)
+
+    def close(self) -> None:
+        futures = list(getattr(self, "_visualization_futures", []) or [])
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                print(f"REAL MODEL VIS: async save failed: {exc}", flush=True)
+        self._visualization_futures = []
+        executor = getattr(self, "_visualization_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def predict(self, frames: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         context = dict(context or {})
         data = self.builder.build_torch(frames, context, self.device)
@@ -501,6 +715,7 @@ class LeadModel0011RealPortAdapter:
             pred = self.inference.forward(data)
 
         self._frame_id += 1
+        self._maybe_save_visualization(data, pred)
 
         steer = max(-1.0, min(1.0, self._to_float(pred.steer)))
         throttle = max(0.0, min(1.0, self._to_float(pred.throttle)))

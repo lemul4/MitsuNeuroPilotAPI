@@ -1,15 +1,21 @@
 """Video recording and processing utilities for CARLA agent evaluation."""
 
-import copy
 import logging
 import os
+import subprocess
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 
 import carla
 import cv2
 import jaxtyping as jt
 import numpy as np
 import numpy.typing as npt
-import PIL.Image
 import torch
 from beartype import beartype
 
@@ -47,6 +53,21 @@ DEMO_CAMERAS = [
         "yaw": 0.0,
     },
 ]
+
+
+def _scaled_dimension(value: str | int, scale: float) -> str:
+    return str(max(1, int(round(int(value) * scale))))
+
+
+def _write_png(path: str, image: npt.NDArray, *, rgb: bool) -> None:
+    output_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if rgb else image
+    ok = cv2.imwrite(
+        path,
+        output_image,
+        [int(cv2.IMWRITE_PNG_COMPRESSION), 0],
+    )
+    if not ok:
+        raise OSError(f"Failed to write image: {path}")
 
 
 class VideoRecorder:
@@ -97,21 +118,125 @@ class VideoRecorder:
         # Store last images for grid creation
         self._last_demo_image = None
         self._last_input_image = None
+        self._image_save_executor = ThreadPoolExecutor(
+            max_workers=self._visual_artifact_save_workers(),
+            thread_name_prefix="visual-save",
+        )
+        self._image_save_futures: list[Future] = []
 
         # Initialize demo cameras if needed
         if self.config.save_path is not None and (
             self.config.produce_demo_video or self.config.produce_demo_image
+            or self.config.produce_grid_video or self.config.produce_grid_image
         ):
             self._setup_demo_cameras()
+
+    def _visual_artifact_resolution_scale(self) -> float:
+        if self.training_config is not None:
+            return float(
+                getattr(self.training_config, "visual_artifact_resolution_scale", 1.0)
+            )
+        return float(getattr(self.config, "visual_artifact_resolution_scale", 1.0))
+
+    def _resize_visual_artifact(self, image: npt.NDArray) -> npt.NDArray:
+        scale = self._visual_artifact_resolution_scale()
+        if scale == 1.0:
+            return image
+
+        height, width = image.shape[:2]
+        target_size = (
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        )
+        if target_size == (width, height):
+            return image
+        return cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
+
+    def _visual_video_compression_preset(self) -> str:
+        if self.training_config is not None:
+            return str(
+                getattr(
+                    self.training_config,
+                    "visual_video_compression_preset",
+                    "veryfast",
+                )
+            )
+        return str(getattr(self.config, "visual_video_compression_preset", "veryfast"))
+
+    def _visual_artifact_save_workers(self) -> int:
+        if self.training_config is not None:
+            workers = getattr(self.training_config, "visual_artifact_save_workers", 4)
+        else:
+            workers = getattr(self.config, "visual_artifact_save_workers", 4)
+        return max(1, int(workers))
+
+    def _visual_video_compression_workers(self, job_count: int) -> int:
+        if job_count <= 0:
+            return 1
+        if self.training_config is not None:
+            workers = getattr(
+                self.training_config,
+                "visual_video_compression_workers",
+                2,
+            )
+        else:
+            workers = getattr(self.config, "visual_video_compression_workers", 2)
+        return max(1, min(int(workers), job_count))
+
+    def _submit_png_save(self, path: str, image: npt.NDArray, *, rgb: bool) -> None:
+        self._prune_finished_image_saves()
+        self._apply_image_save_backpressure()
+        self._image_save_futures.append(
+            self._image_save_executor.submit(_write_png, path, image.copy(), rgb=rgb)
+        )
+
+    def _apply_image_save_backpressure(self) -> None:
+        max_pending = max(1, self._visual_artifact_save_workers() * 8)
+        if len(self._image_save_futures) < max_pending:
+            return
+        done, pending = wait(self._image_save_futures, return_when=FIRST_COMPLETED)
+        for future in done:
+            try:
+                future.result()
+            except Exception as exc:
+                LOG.warning("[VideoRecorder] Async image save failed: %s", exc)
+        self._image_save_futures = list(pending)
+
+    def _prune_finished_image_saves(self) -> None:
+        pending = []
+        for future in self._image_save_futures:
+            if future.done():
+                try:
+                    future.result()
+                except Exception as exc:
+                    LOG.warning("[VideoRecorder] Async image save failed: %s", exc)
+            else:
+                pending.append(future)
+        self._image_save_futures = pending
+
+    def _wait_for_image_saves(self) -> None:
+        for future in as_completed(self._image_save_futures):
+            try:
+                future.result()
+            except Exception as exc:
+                LOG.warning("[VideoRecorder] Async image save failed: %s", exc)
+        self._image_save_futures = []
 
     @beartype
     def _setup_demo_cameras(self) -> None:
         """Set up demo cameras for cinematic and BEV views."""
         bp_lib = self.world.get_blueprint_library()
+        resolution_scale = self._visual_artifact_resolution_scale()
         for idx, camera_config in enumerate(DEMO_CAMERAS, start=1):
             camera_bp = bp_lib.find("sensor.camera.rgb")
-            camera_bp.set_attribute("image_size_x", camera_config["image_size_x"])
-            camera_bp.set_attribute("image_size_y", camera_config["image_size_y"])
+            camera_bp.set_attribute(
+                "image_size_x",
+                _scaled_dimension(camera_config["image_size_x"], resolution_scale),
+            )
+            camera_bp.set_attribute(
+                "image_size_y",
+                _scaled_dimension(camera_config["image_size_y"], resolution_scale),
+            )
             camera_bp.set_attribute("fov", camera_config["fov"])
             camera_bp.set_attribute("motion_blur_intensity", "0.0")
 
@@ -138,11 +263,10 @@ class VideoRecorder:
             # Create callback to store image in buffer
             def _make_image_callback(camera_idx):
                 def _store_image(image):
-                    array = np.frombuffer(image.raw_data, dtype=np.uint8)
-                    array = copy.deepcopy(array)
-                    array = np.reshape(array, (image.height, image.width, 4))
-                    bgr = array[:, :, :3]
-                    self._demo_camera_images[camera_idx] = bgr
+                    array = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(
+                        (image.height, image.width, 4)
+                    )
+                    self._demo_camera_images[camera_idx] = array[:, :, :3].copy()
 
                 return _store_image
 
@@ -170,6 +294,7 @@ class VideoRecorder:
         """Update demo camera transforms to follow ego vehicle position and orientation."""
         if self.config.save_path is None or not (
             self.config.produce_demo_video or self.config.produce_demo_image
+            or self.config.produce_grid_video or self.config.produce_grid_image
         ):
             return
 
@@ -208,6 +333,7 @@ class VideoRecorder:
         """
         if self.config.save_path is None or not (
             self.config.produce_demo_video or self.config.produce_demo_image
+            or self.config.produce_grid_video or self.config.produce_grid_image
         ):
             return
 
@@ -248,10 +374,10 @@ class VideoRecorder:
         if self.config.produce_demo_image:
             save_path_demo = str(self.config.save_path / "demo_images")
             os.makedirs(save_path_demo, exist_ok=True)
-            PIL.Image.fromarray(cv2.cvtColor(concatenated, cv2.COLOR_BGR2RGB)).save(
+            self._submit_png_save(
                 f"{save_path_demo}/{str(self.step).zfill(5)}.png",
-                optimize=False,
-                compress_level=0,  # Really space expensive, do this local only.
+                concatenated,
+                rgb=False,
             )
 
         # Add to demo video if enabled
@@ -469,11 +595,11 @@ class VideoRecorder:
 
         save_path_input = str(self.config.save_path / "input_images")
         os.makedirs(save_path_input, exist_ok=True)
-        input_image_rgb = cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB)
-        PIL.Image.fromarray(input_image_rgb).save(
+        output_image = self._resize_visual_artifact(input_image)
+        self._submit_png_save(
             f"{save_path_input}/{str(self.step).zfill(5)}.png",
-            optimize=True,
-            compress_level=0,
+            output_image,
+            rgb=False,
         )
 
     @beartype
@@ -490,15 +616,16 @@ class VideoRecorder:
         ):
             return
 
+        output_image = self._resize_visual_artifact(input_image)
         if self.input_video_writer is None:
             os.makedirs(os.path.dirname(self.config.input_video_path), exist_ok=True)
             self.input_video_writer = cv2.VideoWriter(
                 self.config.input_video_path,
                 cv2.VideoWriter_fourcc(*"mp4v"),
                 self.config.video_fps,
-                (input_image.shape[1], input_image.shape[0]),
+                (output_image.shape[1], output_image.shape[0]),
             )
-        self.input_video_writer.write(input_image)
+        self.input_video_writer.write(output_image)
 
     @beartype
     def save_debug_image(self, image: npt.NDArray) -> None:
@@ -516,10 +643,11 @@ class VideoRecorder:
 
         save_dir = self.config.save_path / "debug_images"
         os.makedirs(save_dir, exist_ok=True)
-        PIL.Image.fromarray(image).save(
+        output_image = self._resize_visual_artifact(image)
+        self._submit_png_save(
             f"{save_dir}/{str(self.step).zfill(5)}.png",
-            optimize=False,
-            compress_level=0,
+            output_image,
+            rgb=True,
         )
 
     @beartype
@@ -536,16 +664,17 @@ class VideoRecorder:
         ):
             return
 
+        output_image = self._resize_visual_artifact(image)
         if self.debug_video_writer is None:
             os.makedirs(os.path.dirname(self.config.debug_video_path), exist_ok=True)
             self.debug_video_writer = cv2.VideoWriter(
                 str(self.config.debug_video_path),
                 cv2.VideoWriter_fourcc(*"mp4v"),
                 self.config.video_fps,
-                (image.shape[1], image.shape[0]),
+                (output_image.shape[1], output_image.shape[0]),
             )
 
-        self.debug_video_writer.write(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        self.debug_video_writer.write(cv2.cvtColor(output_image, cv2.COLOR_RGB2BGR))
 
     @beartype
     def save_grid_image_and_video(
@@ -683,15 +812,16 @@ class VideoRecorder:
 
         # Stack vertically: demo on top, input on bottom
         grid_image = np.vstack([demo_resized, input_cropped])
+        grid_image = self._resize_visual_artifact(grid_image)
 
         # Save as PNG for grid image
         if self.config.produce_grid_image:
             save_path_grid = str(self.config.save_path / "grid_images")
             os.makedirs(save_path_grid, exist_ok=True)
-            PIL.Image.fromarray(cv2.cvtColor(grid_image, cv2.COLOR_BGR2RGB)).save(
+            self._submit_png_save(
                 f"{save_path_grid}/{str(self.step).zfill(5)}.png",
-                optimize=False,
-                compress_level=0,
+                grid_image,
+                rgb=False,
             )
 
         # Add to grid video
@@ -718,9 +848,21 @@ class VideoRecorder:
             crf: Constant Rate Factor for ffmpeg compression (lower is better quality).
             preset: Preset for ffmpeg compression speed/quality trade-off.
         """
-        # Check if ffmpeg is installed
-        command = f"ffmpeg -i {final_path} -c:v libx264 -crf {crf} -preset {preset} -an {temp_path} -y"
-        os.system(command)
+        command = [
+            "ffmpeg",
+            "-i",
+            final_path,
+            "-c:v",
+            "libx264",
+            "-crf",
+            str(crf),
+            "-preset",
+            preset,
+            "-an",
+            temp_path,
+            "-y",
+        ]
+        subprocess.run(command, check=True)
         os.replace(temp_path, final_path)
         LOG.info(f"Compressed video: {final_path}")
 
@@ -735,44 +877,78 @@ class VideoRecorder:
                     demo_cam_info["camera"].destroy()
                     LOG.info(f"Destroyed demo camera {demo_cam_info['index']}")
 
+        self._wait_for_image_saves()
+        self._image_save_executor.shutdown(wait=True)
+
         # Clean up video writers
         if self.config.save_path is not None:
+            compression_jobs = []
+            preset = self._visual_video_compression_preset()
+
             # Input video - high quality for presentation
             if self.config.produce_input_video and self.input_video_writer is not None:
                 self.input_video_writer.release()
-                self.compress_video(
-                    temp_path=self.config.temp_input_video_path,
-                    final_path=self.config.input_video_path,
-                    crf=18,
-                    preset="slow",
+                compression_jobs.append(
+                    (
+                        self.config.temp_input_video_path,
+                        self.config.input_video_path,
+                        18,
+                        preset,
+                    )
                 )
 
             if self.config.produce_debug_video and self.debug_video_writer is not None:
                 # Debug video - low quality for disk space
                 self.debug_video_writer.release()
-                self.compress_video(
-                    temp_path=self.config.temp_debug_video_path,
-                    final_path=self.config.debug_video_path,
-                    crf=28,
-                    preset="slower",
+                compression_jobs.append(
+                    (
+                        self.config.temp_debug_video_path,
+                        self.config.debug_video_path,
+                        28,
+                        preset,
+                    )
                 )
 
             # Demo video - high quality for presentation
             if self.config.produce_demo_video and self.demo_video_writer is not None:
                 self.demo_video_writer.release()
-                self.compress_video(
-                    temp_path=self.config.temp_demo_video_path,
-                    final_path=self.config.demo_video_path,
-                    crf=18,
-                    preset="slow",
+                compression_jobs.append(
+                    (
+                        self.config.temp_demo_video_path,
+                        self.config.demo_video_path,
+                        18,
+                        preset,
+                    )
                 )
 
             # Grid video - high quality for presentation
             if self.config.produce_grid_video and self.grid_video_writer is not None:
                 self.grid_video_writer.release()
-                self.compress_video(
-                    temp_path=self.config.temp_grid_video_path,
-                    final_path=self.config.grid_video_path,
-                    crf=18,
-                    preset="slow",
+                compression_jobs.append(
+                    (
+                        self.config.temp_grid_video_path,
+                        self.config.grid_video_path,
+                        18,
+                        preset,
+                    )
                 )
+
+            if compression_jobs:
+                with ThreadPoolExecutor(
+                    max_workers=self._visual_video_compression_workers(
+                        len(compression_jobs)
+                    ),
+                    thread_name_prefix="visual-compress",
+                ) as executor:
+                    futures = [
+                        executor.submit(
+                            self.compress_video,
+                            temp_path,
+                            final_path,
+                            crf,
+                            job_preset,
+                        )
+                        for temp_path, final_path, crf, job_preset in compression_jobs
+                    ]
+                    for future in as_completed(futures):
+                        future.result()

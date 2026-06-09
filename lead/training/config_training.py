@@ -436,6 +436,7 @@ class TrainingConfig(BaseConfig):
     # Inference device for CARLA simulation: "cuda", "cuda:0", "cpu", or "auto".
     # Training still uses the device property below.
     inference_device = "cuda"
+    model_startup_timing = False
     model_inference_timing = False
     model_inference_timing_warmup_steps = 0
     save_inference_dataset = False
@@ -952,6 +953,19 @@ class TrainingConfig(BaseConfig):
     use_lidar = True
     use_radars = False
     disable_visual_artifacts = False
+    # If true keep visual images enabled, but disable all visual MP4 outputs.
+    disable_image_to_video_conversion = False
+    disable_visual_video_artifacts = False
+    # Scale for saved visual artifacts. 0.5 halves both width and height.
+    visual_artifact_resolution_scale = 0.5
+    # ffmpeg preset for visual MP4 compression. Faster presets finish routes sooner.
+    visual_video_compression_preset = "veryfast"
+    # Thread pool size for PNG visual artifact writes.
+    visual_artifact_save_workers = 4
+    # Max concurrent ffmpeg compression jobs during cleanup.
+    visual_video_compression_workers = 2
+    # Save every Nth real-vehicle prediction visualization frame.
+    real_visualization_frequency = 5
     debug_boxes_visualization = True
     preserve_scenario_weather = False
     camera_lidar_sensor_tick_from_data_save_freq = False

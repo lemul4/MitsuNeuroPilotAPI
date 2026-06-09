@@ -1001,7 +1001,15 @@ class AppController(QObject):
         self.real_camera_receivers = []
         self.real_direct_model_frames = {}
         self.real_direct_model_last_predict_at = 0.0
+        adapter = self.real_direct_model_adapter
         self.real_direct_model_adapter = None
+        if adapter is not None:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    print(f"REAL MODEL PREVIEW: cleanup failed: {exc}")
         proc = self.real_camera_process
         self.real_camera_process = None
         if proc is not None:
