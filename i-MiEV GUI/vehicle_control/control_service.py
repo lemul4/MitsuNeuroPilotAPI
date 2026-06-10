@@ -93,6 +93,18 @@ class VehicleControlService(QObject):
         self._manual_accel_pct = 0.0
         self._manual_brake_pct = 0.0
 
+    def clear_external_agent_state(self, reason: str = "clear_external_agent_state") -> None:
+        self._last_external_intent = None
+        self._last_intent = None
+        self._last_ai_command_log_at = 0.0
+        try:
+            self.arbiter._last_steering_raw = 0
+            self.arbiter._last_command_time = 0.0
+        except Exception:
+            pass
+        if reason:
+            self._log(f"Model intent buffer cleared: {reason}")
+
     def _schedule_coro_threadsafe(self, coro, label="vehicle control task"):
         try:
             loop = asyncio.get_running_loop()
@@ -177,19 +189,19 @@ class VehicleControlService(QObject):
     def set_ai_preview_enabled(self, enabled: bool) -> None:
         self.ai_preview_enabled = bool(enabled)
         self.external_agent_enabled = bool(enabled)
-        if not enabled:
-            self._last_external_intent = None
+        self.clear_external_agent_state("ai_preview_enabled" if enabled else "ai_preview_disabled")
         self.state_machine.on_ai_preview(self.ai_preview_enabled, self._build_readiness())
         self._emit_state()
         self._log("AI Preview enabled" if enabled else "AI Preview disabled")
 
     def set_external_agent_enabled(self, enabled: bool) -> None:
         self.external_agent_enabled = bool(enabled)
-        if not enabled:
-            self._last_external_intent = None
+        self.clear_external_agent_state("external_agent_enabled" if enabled else "external_agent_disabled")
 
     def set_manual_mode_enabled(self, enabled: bool) -> None:
         self.manual_mode_enabled = bool(enabled)
+        if enabled:
+            self.clear_external_agent_state("manual_mode_enabled")
         # Manual mode is an explicit local authority mode. It does not require a
         # mission, pose, camera stream or AI Preview; those are autonomous-control
         # preconditions. It still requires a connected vehicle controller with a
@@ -479,6 +491,7 @@ class VehicleControlService(QObject):
 
     async def activate_control(self) -> bool:
         async with self._mode_lock:
+            self.clear_external_agent_state("activate_control")
             readiness = self._build_readiness()
             decision = self.state_machine.can_activate(readiness)
             if not decision.allowed:
@@ -569,6 +582,7 @@ class VehicleControlService(QObject):
                 return False
 
             self._stop_autonomy_loop()
+            self.clear_external_agent_state("transfer_ai_to_manual")
             self.manual_mode_enabled = True
 
             # Drop AI authority and remove both pedals immediately. This is not
@@ -604,6 +618,7 @@ class VehicleControlService(QObject):
             # disengage and after the vehicle has stopped.
             if not park and self.state_machine.state == DriveState.AI_ACTIVE:
                 self._stop_autonomy_loop()
+                self.clear_external_agent_state(f"{reason}_manual_takeover")
                 self.ai_authority_confirmed = False
                 await self._send_pedal_release(reason=f"{reason}_pedal_release")
                 self.manual_mode_enabled = True
@@ -613,6 +628,7 @@ class VehicleControlService(QObject):
                 return
 
             self._stop_autonomy_loop()
+            self.clear_external_agent_state(reason)
             self.ai_authority_confirmed = False
             self.manual_mode_enabled = False
             self._reset_manual_pedal_slew()
@@ -720,18 +736,20 @@ class VehicleControlService(QObject):
             await asyncio.sleep(period)
 
     async def submit_external_agent_intent(self, intent: ControlIntent) -> None:
+        if self.state_machine.state != DriveState.AI_ACTIVE or not self.ai_authority_confirmed:
+            self._last_external_intent = None
+            return
         self._last_external_intent = intent
-        if self.state_machine.state == DriveState.AI_ACTIVE:
-            if time.monotonic() - self._last_autonomy_log_at > 0.25:
-                self._last_autonomy_log_at = time.monotonic()
-                self._log(
-                    "MODEL->CAN: "
-                    f"frame={int(getattr(intent, 'frame_id', 0) or 0)} "
-                    f"steer={float(getattr(intent, 'steer_norm', 0.0) or 0.0):.3f} "
-                    f"thr={float(getattr(intent, 'throttle_norm', 0.0) or 0.0):.3f} "
-                    f"brk={float(getattr(intent, 'brake_norm', 0.0) or 0.0):.3f}"
-                )
-            await self.submit_ai_intent(intent)
+        if time.monotonic() - self._last_autonomy_log_at > 0.25:
+            self._last_autonomy_log_at = time.monotonic()
+            self._log(
+                "MODEL->CAN: "
+                f"frame={int(getattr(intent, 'frame_id', 0) or 0)} "
+                f"steer={float(getattr(intent, 'steer_norm', 0.0) or 0.0):.3f} "
+                f"thr={float(getattr(intent, 'throttle_norm', 0.0) or 0.0):.3f} "
+                f"brk={float(getattr(intent, 'brake_norm', 0.0) or 0.0):.3f}"
+            )
+        await self.submit_ai_intent(intent)
 
     async def submit_ai_intent(self, intent: ControlIntent) -> None:
         self._last_intent = intent
@@ -741,6 +759,16 @@ class VehicleControlService(QObject):
             return
         telemetry = self.get_telemetry()
         command = self.arbiter.build_command(intent, telemetry=telemetry, gear=Gear.D, active=True)
+        if time.monotonic() - getattr(self, "_last_ai_command_log_at", 0.0) > 0.25:
+            self._last_ai_command_log_at = time.monotonic()
+            self._log(
+                "AI COMMAND: "
+                f"steer_norm={float(getattr(intent, 'steer_norm', 0.0) or 0.0):.3f} "
+                f"steering_raw={int(getattr(command, 'steering_raw', 0) or 0)} "
+                f"accel={int(getattr(command, 'accel_pct', 0) or 0)} "
+                f"brake={int(getattr(command, 'brake_pct', 0) or 0)} "
+                f"active={bool(getattr(command, 'active', False))}"
+            )
         await self._send_raw_command(command)
 
     async def request_manual_gear(self, gear_value: int) -> None:

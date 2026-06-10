@@ -1,0 +1,23 @@
+{
+  "profile_name": "real_vehicle_enabled",
+  "dry_run": false,
+  "allow_real_actuation": true,
+  "require_heartbeat": true,
+  "require_pose": true,
+  "require_two_cameras": true,
+  "require_gear_feedback": true,
+  "max_accel_pct": 8,
+  "max_brake_pct": 80,
+  "max_steering_raw": 84,
+  "max_steering_rate_raw_per_sec": 60.0,
+  "steering_output_gain": 3.0,
+  "min_effective_steering_raw": 64,
+  "steering_deadband_norm": 0.015,
+  "steering_center_offset_raw": -3,
+  "command_timeout_ms": 100,
+  "gear_confirm_timeout_sec": 2.0,
+  "park_speed_threshold_kmh": 0.25,
+  "metadata": {
+    "note": "Real actuation is enabled. AI/manual commands can be sent to the physical vehicle when readiness checks pass."
+  }
+}

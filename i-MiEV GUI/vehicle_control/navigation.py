@@ -133,16 +133,12 @@ class CoordinateRoutePlanner:
                 y = y0 + (y1 - y0) * t
                 command = cmd0 if i == 0 else NavCommand.STRAIGHT.value
                 speed = request.speed_cap_kmh if sp0 is None else sp0
-                if command in (NavCommand.TURN_LEFT.value, NavCommand.TURN_RIGHT.value, NavCommand.INTERSECTION.value):
-                    speed = min(speed, request.turn_speed_kmh)
                 waypoints.append(Waypoint(x, y, seg_heading, speed, command, command, hold0))
 
             final_speed = request.speed_cap_kmh if sp1 is None else sp1
             final_cmd = cmd1
             if final_cmd == NavCommand.GOAL.value and request.stop_at_goal:
                 final_cmd = NavCommand.STOP.value
-            if final_cmd in (NavCommand.TURN_LEFT.value, NavCommand.TURN_RIGHT.value, NavCommand.INTERSECTION.value):
-                final_speed = min(final_speed, request.turn_speed_kmh)
             waypoints.append(Waypoint(x1, y1, seg_heading, final_speed, final_cmd, final_cmd, hold1))
 
         waypoints = self._annotate_implicit_turns(waypoints, request.turn_speed_kmh)
@@ -174,12 +170,10 @@ class CoordinateRoutePlanner:
             outgoing = heading_deg(wp.x_m, wp.y_m, next_wp.x_m, next_wp.y_m)
             delta = wrap_deg(outgoing - incoming)
             command = wp.command
-            speed = wp.speed_limit_kmh
             if NavCommand.normalize(command) in (NavCommand.STRAIGHT, NavCommand.LANE_FOLLOW) and abs(delta) >= threshold:
                 command = NavCommand.TURN_LEFT.value if delta > 0 else NavCommand.TURN_RIGHT.value
-                speed = min(speed, float(turn_speed_kmh))
             yaw = outgoing if abs(delta) >= threshold else wp.yaw_deg
-            out.append(Waypoint(wp.x_m, wp.y_m, yaw, speed, command, command, wp.hold_sec, wp.metadata))
+            out.append(Waypoint(wp.x_m, wp.y_m, yaw, wp.speed_limit_kmh, command, command, wp.hold_sec, wp.metadata))
         out.append(waypoints[-1])
         return out
 
@@ -223,9 +217,9 @@ class NavigatorService:
         desired_heading = heading_deg(pose.x_m, pose.y_m, target.x_m, target.y_m) if target_dist > 1e-6 else target.yaw_deg
         heading_error = wrap_deg(desired_heading - pose.yaw_deg)
         xtrack = self._cross_track_error(prev, target, pose)
-        speed_cap = max(0.0, min(float(mission.speed_cap_kmh), float(target.speed_limit_kmh)))
+        desired_target_speed = max(0.0, float(target.speed_limit_kmh))
         stop_required = target.nav_command in (NavCommand.STOP, NavCommand.GOAL) or goal_dist <= self.goal_reached_m
-        desired_speed = 0.0 if stop_required else speed_cap
+        desired_speed = 0.0 if stop_required else desired_target_speed
         progress = 100.0 * float(target_idx) / max(1.0, float(len(wps) - 1))
 
         current_road_option = target.road_option
@@ -253,7 +247,7 @@ class NavigatorService:
             next_road_option=int(next_road_option),
             next_road_option_name=road_option_name(next_road_option),
             desired_speed_kmh=desired_speed,
-            speed_cap_kmh=speed_cap,
+            speed_cap_kmh=desired_speed,
             stop_required=stop_required,
             valid_until_monotonic=time.monotonic() + 0.25,
         )

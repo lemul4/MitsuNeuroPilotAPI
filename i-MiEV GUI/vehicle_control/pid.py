@@ -82,7 +82,7 @@ class WaypointPIDController:
         steer_norm = self.steering_pid.step(steer_error)
         target_angle_deg = clamp(steer_norm * self.max_target_angle_deg, -self.max_target_angle_deg, self.max_target_angle_deg)
 
-        desired_speed = clamp(float(goal.desired_speed_kmh), 0.0, float(goal.speed_cap_kmh or 0.0))
+        desired_speed = max(0.0, float(goal.desired_speed_kmh))
         if goal.stop_required or goal.distance_to_goal_m <= self.stop_distance_m:
             desired_speed = 0.0
 
@@ -98,12 +98,6 @@ class WaypointPIDController:
             throttle = clamp(speed_cmd, 0.0, 1.0)
         elif speed_error < -self.brake_deadband_kmh:
             brake = clamp(-speed_cmd, 0.0, 1.0)
-
-        # Do not accelerate aggressively during turns or when steering is large.
-        if abs(steer_norm) > 0.55:
-            throttle = min(throttle, 0.25)
-        if goal.maneuver in {"turn_left", "turn_right", "intersection", "slow"}:
-            throttle = min(throttle, 0.35)
 
         return ControlIntent(
             seq=self._seq,

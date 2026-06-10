@@ -1,11 +1,13 @@
 import asyncio
 import unittest
 
-from vehicle_control.models import DeviceDescriptor, Gear, ControlIntent, Mission
+import main
+from vehicle_control.models import DeviceDescriptor, Gear, DriveState, ControlIntent, Mission, Pose2D, VehicleTelemetry, Waypoint
 from vehicle_control.adapters import MockVehicleAdapter, VehicleAdapterFactory
 from vehicle_control.vehicle_gateway import VehicleGateway
 from vehicle_control.control_service import VehicleControlService
 from vehicle_control.arbiter import ControlArbiter
+from vehicle_control.navigation import NavigatorService
 
 
 class DummyGateway:
@@ -13,6 +15,22 @@ class DummyGateway:
         self.commands = []
     def write_vehicle_command_now(self, command):
         self.commands.append(command)
+
+
+class _StatusBar:
+    def __init__(self):
+        self.messages = []
+
+    def showMessage(self, message, *_args):
+        self.messages.append(str(message))
+
+
+class _View:
+    def __init__(self):
+        self._status = _StatusBar()
+
+    def statusBar(self):
+        return self._status
 
 
 class VehicleControlTests(unittest.IsolatedAsyncioTestCase):
@@ -29,6 +47,119 @@ class VehicleControlTests(unittest.IsolatedAsyncioTestCase):
         ok = await service.activate_control()
         self.assertTrue(ok)
         self.assertEqual(service.get_telemetry().gear, Gear.D)
+
+    async def test_ui_pid_update_changes_real_steering_pid(self):
+        mock = MockVehicleAdapter()
+        service = VehicleControlService(VehicleAdapterFactory(real_adapter=None, mock_adapter=mock), ControlArbiter())
+        controller = main.AppController.__new__(main.AppController)
+        controller.view = _View()
+        controller.vehicle_control = service
+        pid = service.waypoint_controller.steering_pid
+        pid._integral = 10.0
+        pid._last_error = 5.0
+
+        controller.handle_pid_update(0.015, 0.02, 0.003)
+
+        self.assertEqual(pid.kp, 0.015)
+        self.assertEqual(pid.ki, 0.02)
+        self.assertEqual(pid.kd, 0.003)
+        self.assertEqual(pid._integral, 0.0)
+        self.assertIsNone(pid._last_error)
+        self.assertAlmostEqual(service.arbiter.steering_output_gain, 0.5)
+        self.assertAlmostEqual(service.arbiter.max_steering_rate_raw_per_sec, 70.0)
+        command = service.arbiter.build_command(ControlIntent(steer_norm=0.5, confidence=1.0, prediction_age_ms=0.0))
+        self.assertEqual(command.steering_raw, 25)
+        self.assertIn("Steering PID updated", controller.view.statusBar().messages[-1])
+
+    async def test_arbiter_does_not_brake_on_speed_cap(self):
+        arbiter = ControlArbiter(max_accel_pct=25, max_brake_pct=80)
+        intent = ControlIntent(throttle_norm=1.0, brake_norm=0.0, speed_cap_kmh=1.0, confidence=1.0, prediction_age_ms=0.0)
+        telemetry = VehicleTelemetry(speed_kmh=20.0)
+
+        command = arbiter.build_command(intent, telemetry=telemetry, active=True)
+
+        self.assertEqual(command.accel_pct, 25)
+        self.assertEqual(command.brake_pct, 0)
+
+    async def test_physical_steering_gain_and_minimum_raw_are_applied(self):
+        arbiter = ControlArbiter(
+            max_steering_raw=100,
+            steering_output_gain=3.0,
+            min_effective_steering_raw=15,
+            steering_deadband_norm=0.015,
+        )
+
+        model_command = arbiter.build_command(ControlIntent(steer_norm=-0.061, confidence=1.0, prediction_age_ms=0.0))
+        self.assertEqual(model_command.steering_raw, -18)
+
+        arbiter = ControlArbiter(
+            max_steering_raw=100,
+            steering_output_gain=3.0,
+            min_effective_steering_raw=15,
+            steering_deadband_norm=0.015,
+        )
+        small_command = arbiter.build_command(ControlIntent(steer_norm=0.02, confidence=1.0, prediction_age_ms=0.0))
+        self.assertEqual(small_command.steering_raw, 15)
+
+        arbiter = ControlArbiter(
+            max_steering_raw=100,
+            steering_output_gain=3.0,
+            min_effective_steering_raw=15,
+            steering_deadband_norm=0.015,
+        )
+        deadband_command = arbiter.build_command(ControlIntent(steer_norm=0.01, confidence=1.0, prediction_age_ms=0.0))
+        self.assertEqual(deadband_command.steering_raw, 0)
+
+    async def test_physical_steering_minimum_is_rate_limited(self):
+        arbiter = ControlArbiter(
+            max_steering_raw=100,
+            max_steering_rate_raw_per_sec=1.0,
+            steering_output_gain=3.0,
+            min_effective_steering_raw=64,
+            steering_deadband_norm=0.015,
+        )
+        arbiter.build_command(ControlIntent(steer_norm=0.0, confidence=1.0, prediction_age_ms=0.0))
+
+        command = arbiter.build_command(ControlIntent(steer_norm=-0.059, confidence=1.0, prediction_age_ms=0.0))
+
+        self.assertEqual(command.steering_raw, -1)
+
+    async def test_navigation_uses_waypoint_speed_without_mission_cap(self):
+        mission = Mission(
+            mission_id="speed_unlimited",
+            name="speed_unlimited",
+            speed_cap_kmh=1.0,
+            waypoints=(
+                Waypoint(0.0, 0.0, 0.0, 20.0, "straight"),
+                Waypoint(10.0, 0.0, 0.0, 20.0, "straight"),
+            ),
+        )
+        navigator = NavigatorService(lookahead_m=1.0)
+
+        goal = navigator.update(mission, Pose2D(0.0, 0.0, 0.0, valid=True), speed_kmh=0.0)
+
+        self.assertEqual(goal.desired_speed_kmh, 20.0)
+
+    async def test_manual_takeover_clears_model_intent_buffer(self):
+        mock = MockVehicleAdapter()
+        service = VehicleControlService(VehicleAdapterFactory(real_adapter=None, mock_adapter=mock), ControlArbiter())
+        service._last_external_intent = ControlIntent(steer_norm=0.5)
+        service._last_intent = ControlIntent(steer_norm=0.5)
+
+        service.set_manual_mode_enabled(True)
+
+        self.assertIsNone(service._last_external_intent)
+        self.assertIsNone(service._last_intent)
+
+    async def test_external_model_intent_is_ignored_outside_ai_authority(self):
+        mock = MockVehicleAdapter()
+        service = VehicleControlService(VehicleAdapterFactory(real_adapter=None, mock_adapter=mock), ControlArbiter())
+        service.state_machine.state = DriveState.MANUAL_ACTIVE
+        service.ai_authority_confirmed = False
+
+        await service.submit_external_agent_intent(ControlIntent(steer_norm=0.5, confidence=1.0, prediction_age_ms=0.0))
+
+        self.assertIsNone(service._last_external_intent)
 
     async def test_deactivate_parks_after_stop(self):
         mock = MockVehicleAdapter()

@@ -50,7 +50,6 @@ class RealMissionPanel(QGroupBox):
 
     mission_validated = Signal(dict)
     mission_record_requested = Signal()
-    speed_cap_changed = Signal(float)
 
     FIXED_PANEL_HEIGHT = 104
 
@@ -100,13 +99,6 @@ class RealMissionPanel(QGroupBox):
         self.btn_map_picker_main.clicked.connect(self._open_map_picker)
         root.addWidget(self.btn_map_picker_main)
 
-        root.addWidget(QLabel("Скорость"))
-        self.speed_cap_combo = QComboBox()
-        for value in (1.0, 3.0, 5.0, 10.0):
-            self.speed_cap_combo.addItem(f"{value:.0f} km/h", value)
-        self.speed_cap_combo.currentIndexChanged.connect(self._on_speed_cap_changed)
-        root.addWidget(self.speed_cap_combo)
-
         self.btn_validate = MarqueeButton("Проверить маршрут")
         self.btn_validate.setObjectName("PrimaryButton")
         self.btn_validate.clicked.connect(self._emit_validated)
@@ -137,11 +129,9 @@ class RealMissionPanel(QGroupBox):
         self.lbl_goal = self._value_box("Цель", "Точка B")
         self.lbl_next = self._value_box("Далее", "не проверено")
         self.lbl_maneuver = self._value_box("Маневр", "ожидание")
-        self.lbl_speed_cap = self._value_box("Лимит", "3.0 км/ч")
         info.addWidget(self.lbl_goal, 0, 0)
         info.addWidget(self.lbl_next, 0, 1)
         info.addWidget(self.lbl_maneuver, 1, 0)
-        info.addWidget(self.lbl_speed_cap, 1, 1)
         layout.addLayout(info)
 
         coord_grid = QGridLayout()
@@ -268,7 +258,7 @@ class RealMissionPanel(QGroupBox):
 
     def _current_mission(self):
         data = dict(self.combo_mission.currentData() or {})
-        speed = float(self.speed_cap_combo.currentData() or data.get("speed_cap_kmh", 3.0))
+        speed = float(data.get("speed_cap_kmh", 3.0))
         data["speed_cap_kmh"] = speed
         if data.get("mode") == "ab":
             sx, sy, syaw = self._parse_xyz(self.input_start.text())
@@ -318,7 +308,7 @@ class RealMissionPanel(QGroupBox):
                 "goal_label": goal_label,
                 "pose_mode": pose_mode,
                 "spacing_m": float(self.input_spacing.text() or 2.0),
-                "turn_speed_kmh": min(1.2, speed),
+                "turn_speed_kmh": speed,
                 "hints": hints,
                 "metadata": metadata_payload,
             })
@@ -327,11 +317,8 @@ class RealMissionPanel(QGroupBox):
     def _sync_preview_from_controls(self):
         mission = self._current_mission()
         goal = str(mission.get("goal_label", "-"))
-        speed = float(mission.get("speed_cap_kmh", 3.0))
         if hasattr(self, "lbl_goal"):
             self.lbl_goal.value_label.setText(goal)
-        if hasattr(self, "lbl_speed_cap"):
-            self.lbl_speed_cap.value_label.setText(f"{speed:.1f} км/ч")
 
     def _emit_validated(self):
         mission = self._current_mission()
@@ -343,14 +330,8 @@ class RealMissionPanel(QGroupBox):
         else:
             self.lbl_next.value_label.setText("WP 1 / test")
             self.lbl_maneuver.value_label.setText("ready")
-        self.lbl_speed_cap.value_label.setText(f"{float(mission.get('speed_cap_kmh', 3.0)):.1f} км/ч")
         self.set_readiness(route=True, pose=True, cameras=True, ai=False, vehicle=False)
         self.mission_validated.emit(mission)
-
-    def _on_speed_cap_changed(self):
-        value = float(self.speed_cap_combo.currentData() or 3.0)
-        self.lbl_speed_cap.value_label.setText(f"{value:.1f} км/ч")
-        self.speed_cap_changed.emit(value)
 
     def set_readiness(self, route=False, pose=False, cameras=False, ai=False, vehicle=False):
         def mark(ok):

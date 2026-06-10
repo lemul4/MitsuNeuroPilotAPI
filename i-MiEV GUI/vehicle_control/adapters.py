@@ -86,15 +86,16 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
                 print(
                     "REAL CONTROL: host dry-run blocked physical command "
                     f"reason={command.reason}; "
+                    f"requested_steering_raw={int(getattr(command, 'steering_raw', 0) or 0)}; "
                     f"actuation_allowed={self.safety_config.actuation_allowed}; "
                     f"dry_run={self.safety_config.dry_run}"
                 )
             command_to_send = VehicleCommand.safe_stop(seq=command.seq, brake_pct=max(25, int(command.brake_pct)), reason="host_dry_run_guard")
         self.gateway.write_vehicle_command_now(command_to_send)
-        self.telemetry.requested_gear = command.gear_request or self.telemetry.requested_gear
+        self.telemetry.requested_gear = command_to_send.gear_request or self.telemetry.requested_gear
         self.telemetry.target_angle_deg = float(command.steering_raw) / 100.0 * 630.0
-        self.telemetry.accel_pct = float(command.accel_pct)
-        self.telemetry.brake_pct = float(command.brake_pct)
+        self.telemetry.accel_pct = float(command_to_send.accel_pct)
+        self.telemetry.brake_pct = float(command_to_send.brake_pct)
 
     def get_telemetry(self) -> VehicleTelemetry:
         return self.telemetry

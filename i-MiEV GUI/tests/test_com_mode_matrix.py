@@ -444,11 +444,11 @@ class ComModeAdapterMatrixTests(unittest.IsolatedAsyncioTestCase):
             command = sink.commands[-1]
             self.assertEqual(command.reason, "ai_intent")
             self.assertTrue(command.active)
-            self.assertEqual(command.gear_request, Gear.D)
+            self.assertIsNone(command.gear_request)
             self.assertGreater(command.steering_raw, 0)
             self.assertEqual(command.accel_pct, 10)
             self.assertEqual(command.brake_pct, 0)
-            self.assertTrue(command.cruise_enabled)
+            self.assertFalse(command.cruise_enabled)
         finally:
             await service.disconnect()
 
@@ -479,8 +479,10 @@ class ComModeAdapterMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sent.active)
         self.assertIsNone(sent.gear_request)
         self.assertEqual(sent.accel_pct, 0)
+        self.assertEqual(sent.steering_raw, 0)
         self.assertGreaterEqual(sent.brake_pct, 25)
-        self.assertEqual(adapter.get_telemetry().requested_gear, Gear.D)
+        self.assertEqual(adapter.get_telemetry().requested_gear, Gear.P)
+        self.assertEqual(adapter.get_telemetry().target_angle_deg, 0.0)
 
     async def test_actuation_allowed_passes_real_command_to_gateway(self):
         sink = _CommandSink()
@@ -506,6 +508,32 @@ class ComModeAdapterMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sink.commands, [command])
         self.assertEqual(adapter.get_telemetry().target_angle_deg, -189.0)
         self.assertEqual(adapter.get_telemetry().accel_pct, 8.0)
+
+    async def test_real_adapter_preserves_small_steering_commands(self):
+        sink = _CommandSink()
+        adapter = RealSerialVehicleAdapter(
+            _FakeSerialManager(),
+            sink,
+            safety_config=RealVehicleSafetyConfig(
+                allow_real_actuation=True,
+                dry_run=False,
+                min_effective_steering_raw=64,
+            ),
+            telemetry_parser=_parser(),
+        )
+        command = VehicleCommand(
+            seq=12,
+            active=True,
+            steering_raw=11,
+            accel_pct=0,
+            brake_pct=0,
+            reason="manual",
+        )
+
+        await adapter.send_command(command)
+
+        self.assertEqual(sink.commands[-1].steering_raw, 11)
+        self.assertAlmostEqual(adapter.get_telemetry().target_angle_deg, 69.3)
 
 
 class ComModeGatewayMatrixTests(unittest.TestCase):

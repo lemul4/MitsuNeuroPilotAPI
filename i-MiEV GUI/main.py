@@ -514,6 +514,8 @@ class AppController(QObject):
         self.view.manual_input_updated.connect(self.handle_manual_input)
         self.view.telemetry_toggled.connect(self.handle_telemetry_toggle)
         self.view.ai_toggled.connect(self.handle_ai_toggle)
+        if hasattr(self.view, "pid_update_requested"):
+            self.view.pid_update_requested.connect(self.handle_pid_update)
         if hasattr(self.view, "manual_toggled"):
             self.view.manual_toggled.connect(self.handle_manual_toggle)
 
@@ -530,8 +532,6 @@ class AppController(QObject):
             self.view.route_queue_updated.connect(self.handle_route_queue_updated)
         if hasattr(self.view, "real_mission_validated"):
             self.view.real_mission_validated.connect(self.handle_real_mission_validated)
-        if hasattr(self.view, "real_speed_cap_changed"):
-            self.view.real_speed_cap_changed.connect(self.handle_real_speed_cap_changed)
         
         self.serial.connection_status.connect(self.view.set_connection_status)
         self.serial.connection_status.connect(self.handle_serial_connection_status)
@@ -569,6 +569,40 @@ class AppController(QObject):
 
         future.add_done_callback(_done)
         return future
+
+    @Slot(float, float, float)
+    def handle_pid_update(self, kp, ki, kd):
+        if self.vehicle_control is None:
+            self.view.statusBar().showMessage("PID update ignored: vehicle control is not initialized")
+            return
+        controller = getattr(self.vehicle_control, "waypoint_controller", None)
+        steering_pid = getattr(controller, "steering_pid", None)
+        if steering_pid is None:
+            self.view.statusBar().showMessage("PID update ignored: steering PID is unavailable")
+            return
+        try:
+            steering_pid.kp = float(kp)
+            steering_pid.ki = float(ki)
+            steering_pid.kd = float(kd)
+            if hasattr(steering_pid, "reset"):
+                steering_pid.reset()
+            arbiter = getattr(self.vehicle_control, "arbiter", None)
+            if arbiter is not None:
+                base_kp = 0.030
+                gain = max(0.0, min(3.0, float(kp) / base_kp if base_kp > 0.0 else 1.0))
+                gain = max(gain, float(getattr(arbiter, "_min_steering_output_gain", 0.0) or 0.0))
+                arbiter.steering_output_gain = gain
+                if not hasattr(arbiter, "_ui_base_steering_rate_raw_per_sec"):
+                    arbiter._ui_base_steering_rate_raw_per_sec = float(getattr(arbiter, "max_steering_rate_raw_per_sec", 140.0))
+                base_kd = 0.006
+                rate_base = float(getattr(arbiter, "_ui_base_steering_rate_raw_per_sec", 140.0))
+                rate_gain = max(0.25, min(3.0, float(kd) / base_kd if base_kd > 0.0 and float(kd) > 0.0 else 1.0))
+                arbiter.max_steering_rate_raw_per_sec = rate_base * rate_gain
+            self.view.statusBar().showMessage(
+                f"Steering PID updated: Kp={steering_pid.kp:.3f} Ki={steering_pid.ki:.3f} Kd={steering_pid.kd:.3f}"
+            )
+        except Exception as exc:
+            self.view.statusBar().showMessage(f"PID update failed: {exc}")
 
     @Slot(str, object, str)
     def _handle_async_task_completed(self, label, result, error):
@@ -1722,11 +1756,6 @@ class AppController(QObject):
         if hasattr(self.view, "set_real_readiness"):
             self.view.set_real_readiness(route=True, pose=self.real_pose_mode == "dead_reckoning_ab", cameras=False, ai=self.ai_control_requested, vehicle=self.is_connected)
 
-    @Slot(float)
-    def handle_real_speed_cap_changed(self, value):
-        if self.real_mission is not None:
-            self.real_mission["speed_cap_kmh"] = float(value)
-
     async def _handle_real_control_toggle(self, is_active):
         if self.vehicle_control is None:
             return {
@@ -1739,12 +1768,15 @@ class AppController(QObject):
         state_text = getattr(current_state, "value", str(current_state)) if current_state is not None else "unknown"
         print(f"REAL CONTROL: toggle requested={bool(is_active)} state={state_text} control_active={bool(self.control_active)}")
         if is_active:
+            self._reset_real_direct_model_sample()
             manual_enabled = bool(
                 hasattr(self.view, "is_manual_control_enabled")
                 and self.view.is_manual_control_enabled()
             )
             try:
                 self.vehicle_control.set_manual_mode_enabled(manual_enabled)
+                if hasattr(self.vehicle_control, "clear_external_agent_state"):
+                    self.vehicle_control.clear_external_agent_state("real_control_toggle_on")
             except Exception:
                 pass
             if manual_enabled:
@@ -1768,6 +1800,13 @@ class AppController(QObject):
                 "active": False,
                 "message": "Control is not active",
             }
+        self._stop_real_direct_model_worker()
+        self._reset_real_direct_model_sample()
+        try:
+            if hasattr(self.vehicle_control, "clear_external_agent_state"):
+                self.vehicle_control.clear_external_agent_state("real_control_toggle_off")
+        except Exception:
+            pass
         await self.vehicle_control.deactivate_control(reason="user_requested", park=True)
         still_manual = getattr(getattr(self.vehicle_control, "state_machine", None), "state", None)
         manual_active = still_manual is not None and getattr(still_manual, "value", str(still_manual)) == "MANUAL_ACTIVE"

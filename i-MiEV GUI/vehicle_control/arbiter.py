@@ -24,9 +24,12 @@ class ControlArbiter:
     max_brake_pct: int = 80
     max_steering_raw: int = 100
     max_steering_rate_raw_per_sec: float = 140.0
+    steering_output_gain: float = 1.0
+    min_effective_steering_raw: int = 0
+    steering_deadband_norm: float = 0.0
+    steering_center_offset_raw: int = 0
     stale_prediction_ms: float = 150.0
     min_confidence: float = 0.15
-    default_speed_cap_kmh: float = 3.0
 
     _last_steering_raw: int = 0
     _last_command_time: float = 0.0
@@ -35,13 +38,19 @@ class ControlArbiter:
     @classmethod
     def from_safety_config(cls, config) -> "ControlArbiter":
         """Create conservative command limits from RealVehicleSafetyConfig."""
-        return cls(
+        arbiter = cls(
             max_accel_pct=int(getattr(config, "max_accel_pct", 10)),
             max_brake_pct=int(getattr(config, "max_brake_pct", 80)),
             max_steering_raw=int(getattr(config, "max_steering_raw", 60)),
+            max_steering_rate_raw_per_sec=float(getattr(config, "max_steering_rate_raw_per_sec", 140.0)),
+            steering_output_gain=float(getattr(config, "steering_output_gain", 1.0)),
+            min_effective_steering_raw=int(getattr(config, "min_effective_steering_raw", 0)),
+            steering_deadband_norm=float(getattr(config, "steering_deadband_norm", 0.0)),
+            steering_center_offset_raw=int(getattr(config, "steering_center_offset_raw", 0)),
             stale_prediction_ms=float(getattr(config, "command_timeout_ms", 100)),
-            default_speed_cap_kmh=float(getattr(config, "max_speed_kmh", 1.0)),
         )
+        arbiter._min_steering_output_gain = float(getattr(config, "steering_output_gain", 1.0))
+        return arbiter
 
     def build_command(
         self,
@@ -66,8 +75,11 @@ class ControlArbiter:
         throttle_norm = _clamp(intent.throttle_norm, 0.0, 1.0)
         brake_norm = _clamp(intent.brake_norm, 0.0, 1.0)
 
-        steering_raw = int(round(steer_norm * self.max_steering_raw))
-        steering_raw = self._limit_steering_rate(steering_raw, now)
+        steering_gain = _clamp(getattr(self, "steering_output_gain", 1.0), 0.0, 3.0)
+        target_steering_raw = int(round(steer_norm * steering_gain * self.max_steering_raw))
+        target_steering_raw = self._apply_steering_deadband(steer_norm, target_steering_raw)
+        target_steering_raw = self._apply_steering_center_offset(target_steering_raw)
+        steering_raw = self._limit_steering_rate(target_steering_raw, now)
 
         accel_pct = int(round(throttle_norm * self.max_accel_pct))
         brake_pct = int(round(brake_norm * self.max_brake_pct))
@@ -75,11 +87,6 @@ class ControlArbiter:
         # Brake has absolute priority over throttle.
         if brake_pct > 0:
             accel_pct = 0
-
-        speed_cap = _clamp(intent.speed_cap_kmh or self.default_speed_cap_kmh, 0.0, 50.0)
-        if telemetry is not None and telemetry.speed_kmh > speed_cap + 0.5:
-            accel_pct = 0
-            brake_pct = max(brake_pct, 20)
 
         if not active:
             accel_pct = 0
@@ -98,6 +105,25 @@ class ControlArbiter:
             valid_for_ms=min(max(int(intent.valid_for_ms or 100), 40), 250),
             reason="ai_intent" if active else "inactive",
         )
+
+    def _apply_steering_center_offset(self, steering_raw: int) -> int:
+        offset = int(round(_clamp(getattr(self, "steering_center_offset_raw", 0), -self.max_steering_raw, self.max_steering_raw)))
+        if offset == 0:
+            return int(steering_raw)
+        return int(max(-self.max_steering_raw, min(self.max_steering_raw, int(steering_raw) + offset)))
+
+    def _apply_steering_deadband(self, steer_norm: float, steering_raw: int) -> int:
+        deadband = _clamp(getattr(self, "steering_deadband_norm", 0.0), 0.0, 0.25)
+        if abs(float(steer_norm)) <= deadband:
+            return 0
+
+        min_raw = int(round(_clamp(getattr(self, "min_effective_steering_raw", 0), 0, self.max_steering_raw)))
+        if min_raw <= 0 or steering_raw == 0:
+            return int(max(-self.max_steering_raw, min(self.max_steering_raw, steering_raw)))
+
+        if abs(steering_raw) < min_raw:
+            steering_raw = min_raw if steering_raw > 0 else -min_raw
+        return int(max(-self.max_steering_raw, min(self.max_steering_raw, steering_raw)))
 
     def _limit_steering_rate(self, target_raw: int, now: float) -> int:
         if self._last_command_time <= 0.0:

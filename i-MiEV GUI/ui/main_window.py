@@ -863,7 +863,6 @@ class MainWindow(QMainWindow):
     manual_toggled = Signal(bool)
     telemetry_toggled = Signal(bool)
     real_mission_validated = Signal(dict)
-    real_speed_cap_changed = Signal(float)
 
     # Сигналы маршрутов оставлены как UI-обертка: контроллер может подключиться к нужному.
     # Если в main.py они не используются, ничего в backend-логике не меняется.
@@ -1266,7 +1265,6 @@ class MainWindow(QMainWindow):
         if RealMissionPanel is not None:
             self.real_mission_panel = RealMissionPanel(self)
             self.real_mission_panel.mission_validated.connect(self._on_real_mission_validated)
-            self.real_mission_panel.speed_cap_changed.connect(self.real_speed_cap_changed.emit)
         else:
             self.real_mission_panel = QGroupBox("Navigator / Mission")
             self.real_mission_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1506,8 +1504,8 @@ class MainWindow(QMainWindow):
     def _create_pid_spinbox(self):
         spin = QDoubleSpinBox()
         spin.setRange(0, 100)
-        spin.setDecimals(2)
-        spin.setSingleStep(0.05)
+        spin.setDecimals(5)
+        spin.setSingleStep(0.00001)
         spin.setMinimumHeight(38)
         return spin
 

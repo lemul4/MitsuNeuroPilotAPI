@@ -251,6 +251,5 @@ class OsrmRoadRouteProvider:
                 delta = wrap_deg(outgoing - incoming)
                 if abs(delta) >= 28.0:
                     command = NavCommand.TURN_LEFT.value if delta > 0 else NavCommand.TURN_RIGHT.value
-                    speed = min(speed, float(turn_speed_kmh))
             waypoints.append(Waypoint(x, y, yaw, speed, command, command, 0.0, {"route_source": "road", "trajectory": "control_side"}))
         return waypoints
