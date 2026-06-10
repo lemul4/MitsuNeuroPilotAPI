@@ -615,6 +615,36 @@ class LeadModel0011RealPortAdapter:
         return cv2.resize(image, target, interpolation=cv2.INTER_AREA)
 
     @staticmethod
+    def _format_sample_time(value: Any) -> str:
+        try:
+            sample_ts = float(value)
+        except Exception:
+            sample_ts = 0.0
+        if sample_ts <= 0.0:
+            return "sample: n/a"
+        return f"sample monotonic: {sample_ts:.6f}s"
+
+    @staticmethod
+    def _annotate_visualization(image: "np.ndarray", text: str) -> "np.ndarray":
+        if cv2 is None or np is None or not text:
+            return image
+        annotated = image.copy()
+        if annotated.ndim != 3 or annotated.shape[0] <= 0 or annotated.shape[1] <= 0:
+            return annotated
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.7
+        thickness = 2
+        margin = 10
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, scale, thickness)
+        box_w = min(annotated.shape[1], text_w + margin * 2)
+        box_h = text_h + baseline + margin * 2
+        overlay = annotated.copy()
+        cv2.rectangle(overlay, (0, 0), (box_w, box_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.55, annotated, 0.45, 0, annotated)
+        cv2.putText(annotated, text, (margin, margin + text_h), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        return annotated
+
+    @staticmethod
     def _write_visualization(path: str, image: "np.ndarray") -> None:
         ok = cv2.imwrite(
             path,
@@ -623,6 +653,11 @@ class LeadModel0011RealPortAdapter:
         )
         if not ok:
             raise OSError(f"Failed to write visualization: {path}")
+
+    @staticmethod
+    def _write_json(path: str, payload: Dict[str, Any]) -> None:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2, sort_keys=True)
 
     def _prune_visualization_saves(self) -> None:
         pending = []
@@ -636,7 +671,7 @@ class LeadModel0011RealPortAdapter:
                 pending.append(future)
         self._visualization_futures = pending
 
-    def _submit_visualization_save(self, path: Path, image: "np.ndarray") -> None:
+    def _submit_visualization_save(self, path: Path, image: "np.ndarray", metadata: Optional[Dict[str, Any]] = None) -> None:
         self._prune_visualization_saves()
         max_pending = self._visualization_save_workers() * 8
         if len(self._visualization_futures) >= max_pending:
@@ -657,6 +692,14 @@ class LeadModel0011RealPortAdapter:
                 image.copy(),
             )
         )
+        if metadata is not None:
+            self._visualization_futures.append(
+                self._visualization_executor.submit(
+                    self._write_json,
+                    str(path.with_suffix(".json")),
+                    dict(metadata),
+                )
+            )
 
     def _visualization_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         visual_data = dict(data)
@@ -685,7 +728,24 @@ class LeadModel0011RealPortAdapter:
             ).visualize_inference_prediction()
             image = self._resize_visualization(np.asarray(image, dtype=np.uint8))
             out_path = self._visualization_dir() / f"{self._frame_id:06}.png"
-            self._submit_visualization_save(out_path, image)
+            sample_created_at = data.get("input_sample_created_at_monotonic")
+            label = self._format_sample_time(sample_created_at)
+            image = self._annotate_visualization(image, label)
+            metadata: Dict[str, Any] = {
+                "frame_id": int(self._frame_id),
+                "input_sample_created_at_monotonic": sample_created_at,
+                "input_sample_time_label": label,
+                "visualization_path": str(out_path),
+            }
+            for key in (
+                "input_sample_seq",
+                "input_sample_generation",
+                "input_frame_timestamps_monotonic",
+                "input_frame_part_sequences",
+            ):
+                if key in data:
+                    metadata[key] = data.get(key)
+            self._submit_visualization_save(out_path, image, metadata)
         except Exception as exc:
             print(f"REAL MODEL VIS: skipped frame {self._frame_id}: {exc}", flush=True)
 

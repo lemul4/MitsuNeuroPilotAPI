@@ -354,11 +354,13 @@ class AsyncRuntime:
 
 class AppController(QObject):
     async_task_completed = Signal(str, object, str)
+    real_direct_model_prediction_ready = Signal(dict)
 
     def __init__(self, view: MainWindow):
         super().__init__()
         self.async_runtime = AsyncRuntime()
         self.async_task_completed.connect(self._handle_async_task_completed)
+        self.real_direct_model_prediction_ready.connect(self.handle_real_agent_prediction)
         self.view = view
         self.video_receiver = VideoReceiverThread()
         self.video_receiver.frame_received.connect(self.view.update_camera_frame)
@@ -376,8 +378,16 @@ class AppController(QObject):
         self.real_camera_receivers = []
         self.real_agent_analyzer = None
         self.real_direct_model_adapter = None
-        self.real_direct_model_frames = {}
-        self.real_direct_model_last_predict_at = 0.0
+        self.real_direct_model_frame_parts = {}
+        self.real_direct_model_latest_sample = None
+        self.real_direct_model_sample_seq = 0
+        self.real_direct_model_consumed_sample_seq = 0
+        self.real_direct_model_part_seq = 0
+        self.real_direct_model_sample_generation = 0
+        self.real_direct_model_condition = threading.Condition()
+        self.real_direct_model_worker_thread = None
+        self.real_direct_model_worker_stop = False
+        self.real_direct_model_auto_worker = True
         self.real_direct_model_frame_seq = 0
         self.real_camera_status = {"wide_90": False, "narrow_50": False}
         self.real_agent_bridge = RealAgentBridge() if RealAgentBridge is not None else None
@@ -605,6 +615,15 @@ class AppController(QObject):
                 self._set_control_button_checked_later(False)
             if not requested:
                 self._set_control_button_checked_later(False)
+                if self.real_agent_analyzer is not None:
+                    self.real_agent_analyzer.set_ai_enabled(False)
+                self._stop_real_direct_model_worker()
+                self._reset_real_direct_model_sample()
+            if requested and active:
+                if self.real_agent_analyzer is not None:
+                    self.real_agent_analyzer.set_ai_enabled(True)
+                self._reset_real_direct_model_sample()
+                self._ensure_real_direct_model_worker()
             message = result.get("message")
             if message:
                 self.view.statusBar().showMessage(message)
@@ -613,6 +632,8 @@ class AppController(QObject):
         if label == "real_ai_preview_disable":
             self.control_active = False
             self._set_control_button_checked_later(False)
+            self._stop_real_direct_model_worker()
+            self._reset_real_direct_model_sample()
             if self.real_agent_analyzer is not None:
                 self.real_agent_analyzer.set_ai_enabled(False)
             if self.vehicle_control is not None:
@@ -999,8 +1020,8 @@ class AppController(QObject):
             except Exception:
                 pass
         self.real_camera_receivers = []
-        self.real_direct_model_frames = {}
-        self.real_direct_model_last_predict_at = 0.0
+        self._stop_real_direct_model_worker()
+        self._reset_real_direct_model_sample()
         adapter = self.real_direct_model_adapter
         self.real_direct_model_adapter = None
         if adapter is not None:
@@ -1064,16 +1085,78 @@ class AppController(QObject):
             print(f"REAL MODEL PREVIEW: model unavailable: {exc}; PID fallback remains active")
         return self.real_direct_model_adapter
 
-    def _reset_real_direct_model_frame_cache(self):
-        self.real_direct_model_frames = {}
-        self.real_direct_model_last_predict_at = 0.0
+    def _ensure_real_direct_model_sample_state(self):
+        if not hasattr(self, "real_direct_model_condition"):
+            self.real_direct_model_condition = threading.Condition()
+        if not hasattr(self, "real_direct_model_frame_parts"):
+            self.real_direct_model_frame_parts = {}
+        if not hasattr(self, "real_direct_model_latest_sample"):
+            self.real_direct_model_latest_sample = None
+        if not hasattr(self, "real_direct_model_sample_seq"):
+            self.real_direct_model_sample_seq = 0
+        if not hasattr(self, "real_direct_model_consumed_sample_seq"):
+            self.real_direct_model_consumed_sample_seq = 0
+        if not hasattr(self, "real_direct_model_part_seq"):
+            self.real_direct_model_part_seq = 0
+        if not hasattr(self, "real_direct_model_sample_generation"):
+            self.real_direct_model_sample_generation = 0
+        if not hasattr(self, "real_direct_model_worker_thread"):
+            self.real_direct_model_worker_thread = None
+        if not hasattr(self, "real_direct_model_worker_stop"):
+            self.real_direct_model_worker_stop = False
+        if not hasattr(self, "real_direct_model_auto_worker"):
+            self.real_direct_model_auto_worker = True
 
-    @Slot(str, object)
-    @Slot(str, object, float)
-    def handle_real_direct_model_frame(self, camera_name, frame, captured_at=None):
+    def _real_direct_model_inference_enabled(self):
+        return bool(getattr(self, "control_active", False)) and bool(getattr(self, "ai_control_requested", False))
+
+    def _reset_real_direct_model_sample(self):
+        self._ensure_real_direct_model_sample_state()
+        with self.real_direct_model_condition:
+            self.real_direct_model_frame_parts = {}
+            self.real_direct_model_latest_sample = None
+            self.real_direct_model_sample_seq = 0
+            self.real_direct_model_consumed_sample_seq = 0
+            self.real_direct_model_part_seq = 0
+            self.real_direct_model_sample_generation += 1
+            self.real_direct_model_condition.notify_all()
+
+    def _ensure_real_direct_model_worker(self):
+        self._ensure_real_direct_model_sample_state()
+        if self._ensure_real_direct_model_adapter() is None:
+            return None
+        worker = self.real_direct_model_worker_thread
+        if worker is not None and worker.is_alive():
+            return worker
+        with self.real_direct_model_condition:
+            self.real_direct_model_worker_stop = False
+        worker = threading.Thread(
+            target=self._real_direct_model_worker_loop,
+            name="MitsuRealDirectModelWorker",
+            daemon=True,
+        )
+        self.real_direct_model_worker_thread = worker
+        worker.start()
+        return worker
+
+    def _stop_real_direct_model_worker(self):
+        self._ensure_real_direct_model_sample_state()
+        worker = self.real_direct_model_worker_thread
+        with self.real_direct_model_condition:
+            self.real_direct_model_worker_stop = True
+            self.real_direct_model_condition.notify_all()
+        if worker is not None and worker.is_alive():
+            try:
+                worker.join(timeout=2.0)
+            except RuntimeError:
+                pass
+        self.real_direct_model_worker_thread = None
+
+    def _publish_real_direct_model_sample(self, camera_name, frame, captured_at=None):
+        self._ensure_real_direct_model_sample_state()
         name = str(camera_name)
         if name not in {"wide_90", "narrow_50"}:
-            return
+            return None
         now = time.monotonic()
         try:
             frame_ts = float(captured_at)
@@ -1081,52 +1164,123 @@ class AppController(QObject):
             frame_ts = now
         if frame_ts <= 0.0:
             frame_ts = now
-        self.real_direct_model_frames[name] = {"frame": frame, "ts": frame_ts, "received_ts": now}
-        if not self.ai_control_requested:
-            return
+        with self.real_direct_model_condition:
+            self.real_direct_model_part_seq += 1
+            self.real_direct_model_frame_parts[name] = {
+                "frame": frame,
+                "ts": frame_ts,
+                "received_ts": now,
+                "part_seq": self.real_direct_model_part_seq,
+            }
+            parts = self.real_direct_model_frame_parts
+            if not all(key in parts for key in ("wide_90", "narrow_50")):
+                return None
+            self.real_direct_model_sample_seq += 1
+            sample = {
+                "seq": self.real_direct_model_sample_seq,
+                "frames": {key: parts[key]["frame"] for key in ("wide_90", "narrow_50")},
+                "timestamps": {key: float(parts[key]["ts"]) for key in ("wide_90", "narrow_50")},
+                "received_timestamps": {key: float(parts[key]["received_ts"]) for key in ("wide_90", "narrow_50")},
+                "part_sequences": {key: int(parts[key]["part_seq"]) for key in ("wide_90", "narrow_50")},
+                "created_at": now,
+                "generation": int(self.real_direct_model_sample_generation),
+            }
+            self.real_direct_model_latest_sample = sample
+            self.real_direct_model_condition.notify_all()
+            return sample
+
+    def _next_real_direct_model_sample(self, block=True):
+        self._ensure_real_direct_model_sample_state()
+        with self.real_direct_model_condition:
+            while True:
+                sample = self.real_direct_model_latest_sample
+                sample_seq = int(sample.get("seq", 0)) if sample else 0
+                consumed_seq = int(self.real_direct_model_consumed_sample_seq or 0)
+                if sample is not None and sample_seq > consumed_seq and self._real_direct_model_inference_enabled():
+                    self.real_direct_model_consumed_sample_seq = sample_seq
+                    return dict(sample)
+                if not block:
+                    return None
+                if bool(self.real_direct_model_worker_stop):
+                    return None
+                self.real_direct_model_condition.wait()
+
+    def _predict_real_direct_model_sample(self, sample):
         adapter = self._ensure_real_direct_model_adapter()
-        if adapter is None:
-            return
-        latest = self.real_direct_model_frames
-        if not all(key in latest for key in ("wide_90", "narrow_50")):
-            return
-        max_age_ms = float(os.environ.get("MITSU_REAL_DIRECT_MODEL_STALE_MS", "500") or 500.0)
-        ages = {key: (now - float(latest[key]["ts"])) * 1000.0 for key in ("wide_90", "narrow_50")}
-        if any(age > max_age_ms for age in ages.values()):
-            return
-        min_period = float(os.environ.get("MITSU_REAL_DIRECT_MODEL_PERIOD_SEC", "0.05") or 0.05)
-        if now - float(self.real_direct_model_last_predict_at or 0.0) < min_period:
-            return
-        self.real_direct_model_last_predict_at = now
+        if adapter is None or not self._real_direct_model_inference_enabled():
+            return None
+        now = time.monotonic()
         try:
-            frames = {key: latest[key]["frame"] for key in ("wide_90", "narrow_50")}
+            frames = dict(sample.get("frames") or {})
             context_payload = self._build_real_agent_context()
+            context_payload["input_sample_seq"] = int(sample.get("seq", 0))
+            context_payload["input_sample_generation"] = int(sample.get("generation", 0))
+            context_payload["input_sample_created_at_monotonic"] = float(sample.get("created_at", 0.0) or 0.0)
+            context_payload["input_frame_timestamps_monotonic"] = dict(sample.get("timestamps") or {})
+            context_payload["input_frame_part_sequences"] = dict(sample.get("part_sequences") or {})
             prediction = adapter.predict(frames, context_payload)
-            if prediction:
-                payload = dict(prediction)
-                self.real_direct_model_frame_seq += 1
-                payload.setdefault("frame_id", self.real_direct_model_frame_seq)
-                payload.setdefault("timestamp_monotonic", now)
-                payload.setdefault("input_frame_timestamps_monotonic", {key: float(latest[key]["ts"]) for key in ("wide_90", "narrow_50")})
-                payload.setdefault("input_frame_age_ms", dict(ages))
-                if os.environ.get("MITSU_DEBUG_REAL_MODEL_PREVIEW", "0").lower() in {"1", "true", "yes", "on"}:
-                    print(
-                        "REAL MODEL PREVIEW: "
-                        f"frame={payload.get('frame_id')} "
-                        f"age_wide={ages['wide_90']:.0f}ms "
-                        f"age_narrow={ages['narrow_50']:.0f}ms "
-                        f"steer={float(payload.get('steer', payload.get('steer_norm', 0.0))):.3f} "
-                        f"thr={float(payload.get('throttle', payload.get('thr', 0.0))):.3f} "
-                        f"brk={float(payload.get('brake', payload.get('brk', 0.0))):.3f} "
-                        f"pose={context_payload.get('pose_source', 'none')} "
-                        f"target={context_payload.get('target_point')}"
-                    )
-                self.handle_real_agent_prediction(payload)
+            if not prediction or not self._real_direct_model_inference_enabled():
+                return None
+            current_generation = int(getattr(self, "real_direct_model_sample_generation", 0) or 0)
+            if int(sample.get("generation", -1)) != current_generation:
+                return None
+            payload = dict(prediction)
+            self.real_direct_model_frame_seq += 1
+            payload.setdefault("frame_id", self.real_direct_model_frame_seq)
+            payload.setdefault("timestamp_monotonic", now)
+            payload.setdefault("input_sample_seq", int(sample.get("seq", 0)))
+            payload.setdefault("input_sample_generation", int(sample.get("generation", 0)))
+            payload.setdefault("input_sample_created_at_monotonic", float(sample.get("created_at", 0.0) or 0.0))
+            payload.setdefault("input_frame_timestamps_monotonic", dict(sample.get("timestamps") or {}))
+            payload.setdefault("input_frame_part_sequences", dict(sample.get("part_sequences") or {}))
+            if os.environ.get("MITSU_DEBUG_REAL_MODEL_PREVIEW", "0").lower() in {"1", "true", "yes", "on"}:
+                print(
+                    "REAL MODEL PREVIEW: "
+                    f"sample={payload.get('input_sample_seq')} "
+                    f"frame={payload.get('frame_id')} "
+                    f"steer={float(payload.get('steer', payload.get('steer_norm', 0.0))):.3f} "
+                    f"thr={float(payload.get('throttle', payload.get('thr', 0.0))):.3f} "
+                    f"brk={float(payload.get('brake', payload.get('brk', 0.0))):.3f} "
+                    f"pose={context_payload.get('pose_source', 'none')} "
+                    f"target={context_payload.get('target_point')}"
+                )
+            return payload
         except Exception as exc:
             last = float(getattr(self, "_last_real_direct_model_error_at", 0.0) or 0.0)
             if now - last >= 1.0:
                 self._last_real_direct_model_error_at = now
                 print(f"REAL MODEL PREVIEW: inference error: {exc}")
+            return None
+
+    def _real_direct_model_worker_loop(self):
+        while True:
+            sample = self._next_real_direct_model_sample(block=True)
+            if sample is None:
+                return
+            payload = self._predict_real_direct_model_sample(sample)
+            if payload:
+                try:
+                    self.real_direct_model_prediction_ready.emit(payload)
+                except Exception:
+                    self.handle_real_agent_prediction(payload)
+
+    def _consume_real_direct_model_sample_once_for_test(self):
+        sample = self._next_real_direct_model_sample(block=False)
+        if sample is None:
+            return False
+        payload = self._predict_real_direct_model_sample(sample)
+        if payload:
+            self.handle_real_agent_prediction(payload)
+        return payload is not None
+
+    @Slot(str, object)
+    @Slot(str, object, float)
+    def handle_real_direct_model_frame(self, camera_name, frame, captured_at=None):
+        sample = self._publish_real_direct_model_sample(camera_name, frame, captured_at)
+        if not self._real_direct_model_inference_enabled():
+            return
+        if sample is not None and bool(getattr(self, "real_direct_model_auto_worker", True)):
+            self._ensure_real_direct_model_worker()
 
     def _build_real_agent_context(self):
         if self.vehicle_control is None or RealAgentBridge is None:
@@ -1234,6 +1388,8 @@ class AppController(QObject):
 
     @Slot(dict)
     def handle_real_agent_prediction(self, payload):
+        if str(getattr(self, "runtime_mode", "") or "") == "real" and not self._real_direct_model_inference_enabled():
+            return
         if self.vehicle_control is None or self.real_agent_bridge is None or AgentPrediction is None:
             return
         try:
@@ -1583,7 +1739,6 @@ class AppController(QObject):
         state_text = getattr(current_state, "value", str(current_state)) if current_state is not None else "unknown"
         print(f"REAL CONTROL: toggle requested={bool(is_active)} state={state_text} control_active={bool(self.control_active)}")
         if is_active:
-            self._reset_real_direct_model_frame_cache()
             manual_enabled = bool(
                 hasattr(self.view, "is_manual_control_enabled")
                 and self.view.is_manual_control_enabled()
@@ -1767,10 +1922,10 @@ class AppController(QObject):
         self.ai_control_requested = bool(is_active)
         if self.runtime_mode == "real":
             if bool(is_active):
-                self._reset_real_direct_model_frame_cache()
+                self._reset_real_direct_model_sample()
                 self._start_real_camera_stack()
                 if self.real_agent_analyzer is not None:
-                    self.real_agent_analyzer.set_ai_enabled(True)
+                    self.real_agent_analyzer.set_ai_enabled(False)
                 if self.vehicle_control is not None:
                     self.vehicle_control.set_ai_preview_enabled(True)
                 self.view.statusBar().showMessage("РџСЂРµРґРїСЂРѕСЃРјРѕС‚СЂ РР РІРєР»СЋС‡РµРЅ: Р°РіРµРЅС‚ РїРѕР»СѓС‡Р°РµС‚ РґРІРµ СЂРµР°Р»СЊРЅС‹Рµ РєР°РјРµСЂС‹")
@@ -1785,6 +1940,8 @@ class AppController(QObject):
 
             if self.real_agent_analyzer is not None:
                 self.real_agent_analyzer.set_ai_enabled(False)
+            self._stop_real_direct_model_worker()
+            self._reset_real_direct_model_sample()
             if self.vehicle_control is not None:
                 self.vehicle_control.set_ai_preview_enabled(False)
             self.view.statusBar().showMessage("РџСЂРµРґРїСЂРѕСЃРјРѕС‚СЂ РР РІС‹РєР»СЋС‡РµРЅ")
@@ -3502,6 +3659,30 @@ if hasattr(AppController, "_handle_async_task_completed") and not hasattr(AppCon
             return AppController._mitsu_v18_original_handle_async_task_completed(self, label, result, error)
 
         self.control_active = True
+        if state == "AI_ACTIVE":
+            analyzer = getattr(self, "real_agent_analyzer", None)
+            if analyzer is not None:
+                try:
+                    analyzer.set_ai_enabled(True)
+                except Exception:
+                    pass
+            try:
+                self._reset_real_direct_model_sample()
+                self._ensure_real_direct_model_worker()
+            except Exception as exc:
+                print(f"REAL MODEL PREVIEW: activation start failed: {exc}")
+        else:
+            analyzer = getattr(self, "real_agent_analyzer", None)
+            if analyzer is not None:
+                try:
+                    analyzer.set_ai_enabled(False)
+                except Exception:
+                    pass
+            try:
+                self._stop_real_direct_model_worker()
+                self._reset_real_direct_model_sample()
+            except Exception:
+                pass
         _mitsu_v18_apply_state_to_ui(self)
 
         message = result.get("message")
