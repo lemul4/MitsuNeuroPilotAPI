@@ -88,6 +88,28 @@ class RealModelInputPipelineTests(unittest.TestCase):
         self.assertIs(frames["narrow_50"], frame)
         self.assertEqual(context["pose_source"], "dead_reckoning_ab_no_gps")
         self.assertTrue(hasattr(controller, "_last_prediction_payload"))
+        self.assertIn("input_frame_age_ms", controller._last_prediction_payload)
+
+    def test_direct_model_prediction_rejects_stale_timestamped_frames(self):
+        controller = self._controller_with_service()
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        stale_ts = time.monotonic() - 2.0
+
+        controller.handle_real_direct_model_frame("wide_90", frame, stale_ts)
+        controller.handle_real_direct_model_frame("narrow_50", frame, stale_ts)
+
+        self.assertEqual(len(controller.real_direct_model_adapter.calls), 0)
+        self.assertFalse(hasattr(controller, "_last_prediction_payload"))
+
+    def test_direct_model_cache_reset_forces_wait_for_new_camera_pair(self):
+        controller = self._controller_with_service()
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+
+        controller.handle_real_direct_model_frame("wide_90", frame, time.monotonic())
+        controller._reset_real_direct_model_frame_cache()
+        controller.handle_real_direct_model_frame("narrow_50", frame, time.monotonic())
+
+        self.assertEqual(len(controller.real_direct_model_adapter.calls), 0)
 
 
 if __name__ == "__main__":

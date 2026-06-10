@@ -34,6 +34,45 @@ except Exception:  # pragma: no cover
     QImage = QPixmap = None
 
 
+def _pipe_bytes_available(pipe) -> int:
+    if pipe is None:
+        return 0
+    try:
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+
+            available = ctypes.c_ulong(0)
+            handle = msvcrt.get_osfhandle(pipe.fileno())
+            ok = ctypes.windll.kernel32.PeekNamedPipe(
+                ctypes.c_void_p(handle),
+                None,
+                0,
+                None,
+                ctypes.byref(available),
+                None,
+            )
+            return int(available.value) if ok else 0
+    except Exception:
+        return 0
+    return 0
+
+
+def read_latest_raw_frame(pipe, frame_size: int):
+    """Read one frame, then drop queued complete frames and return the newest."""
+    raw = pipe.read(frame_size)
+    if len(raw) != frame_size:
+        return raw
+
+    latest = raw
+    while _pipe_bytes_available(pipe) >= frame_size:
+        next_raw = pipe.read(frame_size)
+        if len(next_raw) != frame_size:
+            return next_raw
+        latest = next_raw
+    return latest
+
+
 @dataclass(frozen=True)
 class OpenCvUdpH265CameraSpec:
     name: str
@@ -103,7 +142,7 @@ class OpenCvUdpH265ReceiverThread(QThread):
     """
 
     frame_received = Signal(str, QPixmap)
-    model_frame_received = Signal(str, object)
+    model_frame_received = Signal(str, object, float)
     status_changed = Signal(str, bool, str)
 
     def __init__(self, spec: OpenCvUdpH265CameraSpec, parent=None):
@@ -164,7 +203,7 @@ class OpenCvUdpH265ReceiverThread(QThread):
             while self.is_running:
                 if process.stdout is None:
                     break
-                raw = process.stdout.read(frame_size)
+                raw = read_latest_raw_frame(process.stdout, frame_size)
                 if len(raw) != frame_size:
                     if process.poll() is not None:
                         err = b""
@@ -182,13 +221,13 @@ class OpenCvUdpH265ReceiverThread(QThread):
                 pixmap = self._frame_to_pixmap(frame_bgr)
                 if pixmap is None:
                     continue
+                captured_at = time.monotonic()
                 self.received_count += 1
                 self.frame_received.emit(self.spec.name, pixmap)
-                self.model_frame_received.emit(self.spec.name, frame_bgr)
+                self.model_frame_received.emit(self.spec.name, frame_bgr, captured_at)
 
-                now = time.monotonic()
-                if now - last_status_at >= 1.0:
-                    last_status_at = now
+                if captured_at - last_status_at >= 1.0:
+                    last_status_at = captured_at
                     self.status_changed.emit(self.spec.name, True, f"frames={self.received_count}")
         finally:
             try:

@@ -61,7 +61,7 @@ class GStreamerUdpH265ReceiverThread(QThread):
     """
 
     frame_received = Signal(str, QPixmap)
-    model_frame_received = Signal(str, object)
+    model_frame_received = Signal(str, object, float)
     status_changed = Signal(str, bool, str)
 
     def __init__(self, spec: UdpH265CameraSpec, parent=None):
@@ -117,13 +117,13 @@ class GStreamerUdpH265ReceiverThread(QThread):
                 pixmap, frame_bgr = self._sample_to_outputs(sample)
                 if pixmap is None or frame_bgr is None:
                     continue
+                captured_at = time.monotonic()
                 self.received_count += 1
                 self.frame_received.emit(self.spec.name, pixmap)
-                self.model_frame_received.emit(self.spec.name, frame_bgr)
+                self.model_frame_received.emit(self.spec.name, frame_bgr, captured_at)
 
-                now = time.monotonic()
-                if now - last_status_at >= 1.0:
-                    last_status_at = now
+                if captured_at - last_status_at >= 1.0:
+                    last_status_at = captured_at
                     self.status_changed.emit(self.spec.name, True, f"frames={self.received_count}")
         finally:
             try:

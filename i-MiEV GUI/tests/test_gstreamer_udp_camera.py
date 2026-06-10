@@ -3,7 +3,19 @@ import unittest
 from pathlib import Path
 
 from hardware.gstreamer_udp_camera import UdpH265CameraSpec, build_udp_h265_pipeline
-from hardware.opencv_udp_camera import OpenCvUdpH265CameraSpec, build_h265_rtp_sdp
+from hardware.opencv_udp_camera import OpenCvUdpH265CameraSpec, build_h265_rtp_sdp, read_latest_raw_frame
+
+
+class _BufferedPipe:
+    def __init__(self, chunks):
+        self.data = b"".join(chunks)
+        self.offset = 0
+
+    def read(self, size):
+        end = min(len(self.data), self.offset + int(size))
+        chunk = self.data[self.offset:end]
+        self.offset = end
+        return chunk
 
 
 class GStreamerUdpCameraPipelineTests(unittest.TestCase):
@@ -34,6 +46,20 @@ class GStreamerUdpCameraPipelineTests(unittest.TestCase):
         self.assertIn("m=video 5601 RTP/AVP 96", sdp)
         self.assertIn("a=rtpmap:96 H265/90000", sdp)
         self.assertIn("c=IN IP4 127.0.0.1", sdp)
+
+    def test_opencv_raw_pipe_reader_returns_newest_complete_frame(self):
+        frames = [bytes([idx]) * 4 for idx in range(1, 4)]
+        pipe = _BufferedPipe(frames)
+        old_available = __import__("hardware.opencv_udp_camera", fromlist=["_pipe_bytes_available"])._pipe_bytes_available
+        try:
+            import hardware.opencv_udp_camera as opencv_udp_camera
+
+            opencv_udp_camera._pipe_bytes_available = lambda stream: len(stream.data) - stream.offset
+            self.assertEqual(read_latest_raw_frame(pipe, 4), frames[-1])
+        finally:
+            import hardware.opencv_udp_camera as opencv_udp_camera
+
+            opencv_udp_camera._pipe_bytes_available = old_available
 
     def test_appcontroller_loads_udp_h265_default_specs(self):
         import main

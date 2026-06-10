@@ -62,6 +62,10 @@ class ZmqCameraCellReceiverThread(QThread):
         socket = context.socket(zmq.SUB)
         socket.setsockopt(zmq.LINGER, 0)
         try:
+            socket.setsockopt(zmq.CONFLATE, 1)
+        except Exception:
+            pass
+        try:
             socket.connect(self.url)
             socket.setsockopt_string(zmq.SUBSCRIBE, "")
             self.status_changed.emit(self.camera_name, True, f"подключено: {self.url}")
@@ -80,6 +84,11 @@ class ZmqCameraCellReceiverThread(QThread):
                 if socket.poll(250):
                     try:
                         msg = socket.recv()
+                        while True:
+                            try:
+                                msg = socket.recv(zmq.NOBLOCK)
+                            except zmq.Again:
+                                break
                         image = QImage.fromData(msg, "JPG")
                         if image.isNull():
                             self.status_changed.emit(self.camera_name, False, "битый JPEG")
@@ -204,6 +213,10 @@ class RealCameraAgentAnalyzerThread(QThread):
         narrow = context.socket(zmq.SUB)
         for socket, url in ((wide, self.config.wide_url), (narrow, self.config.narrow_url)):
             socket.setsockopt(zmq.LINGER, 0)
+            try:
+                socket.setsockopt(zmq.CONFLATE, 1)
+            except Exception:
+                pass
             socket.setsockopt_string(zmq.SUBSCRIBE, "")
             socket.connect(url)
 
@@ -221,9 +234,19 @@ class RealCameraAgentAnalyzerThread(QThread):
                 now = time.monotonic()
                 if wide in events:
                     msg = wide.recv()
+                    while True:
+                        try:
+                            msg = wide.recv(zmq.NOBLOCK)
+                        except zmq.Again:
+                            break
                     latest["wide_90"] = {"jpeg": msg, "frame": self._decode_jpeg(msg), "ts": now}
                 if narrow in events:
                     msg = narrow.recv()
+                    while True:
+                        try:
+                            msg = narrow.recv(zmq.NOBLOCK)
+                        except zmq.Again:
+                            break
                     latest["narrow_50"] = {"jpeg": msg, "frame": self._decode_jpeg(msg), "ts": now}
 
                 ages = {name: (now - item["ts"]) * 1000.0 for name, item in latest.items()}

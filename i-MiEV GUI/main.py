@@ -1064,13 +1064,24 @@ class AppController(QObject):
             print(f"REAL MODEL PREVIEW: model unavailable: {exc}; PID fallback remains active")
         return self.real_direct_model_adapter
 
+    def _reset_real_direct_model_frame_cache(self):
+        self.real_direct_model_frames = {}
+        self.real_direct_model_last_predict_at = 0.0
+
     @Slot(str, object)
-    def handle_real_direct_model_frame(self, camera_name, frame):
+    @Slot(str, object, float)
+    def handle_real_direct_model_frame(self, camera_name, frame, captured_at=None):
         name = str(camera_name)
         if name not in {"wide_90", "narrow_50"}:
             return
         now = time.monotonic()
-        self.real_direct_model_frames[name] = {"frame": frame, "ts": now}
+        try:
+            frame_ts = float(captured_at)
+        except Exception:
+            frame_ts = now
+        if frame_ts <= 0.0:
+            frame_ts = now
+        self.real_direct_model_frames[name] = {"frame": frame, "ts": frame_ts, "received_ts": now}
         if not self.ai_control_requested:
             return
         adapter = self._ensure_real_direct_model_adapter()
@@ -1096,10 +1107,14 @@ class AppController(QObject):
                 self.real_direct_model_frame_seq += 1
                 payload.setdefault("frame_id", self.real_direct_model_frame_seq)
                 payload.setdefault("timestamp_monotonic", now)
+                payload.setdefault("input_frame_timestamps_monotonic", {key: float(latest[key]["ts"]) for key in ("wide_90", "narrow_50")})
+                payload.setdefault("input_frame_age_ms", dict(ages))
                 if os.environ.get("MITSU_DEBUG_REAL_MODEL_PREVIEW", "0").lower() in {"1", "true", "yes", "on"}:
                     print(
                         "REAL MODEL PREVIEW: "
                         f"frame={payload.get('frame_id')} "
+                        f"age_wide={ages['wide_90']:.0f}ms "
+                        f"age_narrow={ages['narrow_50']:.0f}ms "
                         f"steer={float(payload.get('steer', payload.get('steer_norm', 0.0))):.3f} "
                         f"thr={float(payload.get('throttle', payload.get('thr', 0.0))):.3f} "
                         f"brk={float(payload.get('brake', payload.get('brk', 0.0))):.3f} "
@@ -1568,6 +1583,7 @@ class AppController(QObject):
         state_text = getattr(current_state, "value", str(current_state)) if current_state is not None else "unknown"
         print(f"REAL CONTROL: toggle requested={bool(is_active)} state={state_text} control_active={bool(self.control_active)}")
         if is_active:
+            self._reset_real_direct_model_frame_cache()
             manual_enabled = bool(
                 hasattr(self.view, "is_manual_control_enabled")
                 and self.view.is_manual_control_enabled()
@@ -1751,6 +1767,7 @@ class AppController(QObject):
         self.ai_control_requested = bool(is_active)
         if self.runtime_mode == "real":
             if bool(is_active):
+                self._reset_real_direct_model_frame_cache()
                 self._start_real_camera_stack()
                 if self.real_agent_analyzer is not None:
                     self.real_agent_analyzer.set_ai_enabled(True)
