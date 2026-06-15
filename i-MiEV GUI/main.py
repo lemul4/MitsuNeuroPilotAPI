@@ -84,9 +84,15 @@ except Exception as _opencv_udp_import_error:
     OpenCvUdpH265CameraSpec = None
 
 try:
-    from hardware.pose_provider import JsonPoseProviderThread
+    from hardware.pose_provider import JsonPoseProviderThread, NmeaSerialPoseProviderThread
 except Exception:
     JsonPoseProviderThread = None
+    NmeaSerialPoseProviderThread = None
+
+try:
+    from vehicle_control.geo import GeoPoint, GeoReference, latlon_to_local_m
+except Exception:
+    GeoPoint = GeoReference = latlon_to_local_m = None
 
 try:
     from vehicle_control.pose_modes import (
@@ -393,6 +399,8 @@ class AppController(QObject):
         self.real_agent_bridge = RealAgentBridge() if RealAgentBridge is not None else None
         self.real_pose_provider = None
         self.real_pose_mode = os.environ.get("MITSU_REAL_POSE_MODE", "external").strip().lower() or "external"
+        self.real_gps_com_port = os.environ.get("MITSU_GPS_COM_PORT", "").strip()
+        self.real_gps_baudrate = int(os.environ.get("MITSU_GPS_BAUDRATE", "115200"))
         self.real_dead_reckoning_pose = None
         self.real_dead_reckoning_targets = ()
         self.real_dead_reckoning_last_ts = None
@@ -918,6 +926,27 @@ class AppController(QObject):
         if str(getattr(self, "real_pose_mode", "external") or "external").lower() == "dead_reckoning_ab":
             self._start_real_dead_reckoning_pose()
             return
+        gps_port = str(getattr(self, "real_gps_com_port", "") or os.environ.get("MITSU_GPS_COM_PORT", "")).strip()
+        if (
+            str(getattr(self, "real_pose_mode", "external") or "external").lower() == "nmea_serial"
+            or gps_port
+        ):
+            if NmeaSerialPoseProviderThread is None or self.real_pose_provider is not None:
+                return
+            if not gps_port:
+                print("REAL POSE: NMEA mode selected, but MITSU_GPS_COM_PORT is not set")
+                return
+            provider = NmeaSerialPoseProviderThread(
+                gps_port,
+                baudrate=int(getattr(self, "real_gps_baudrate", 115200) or 115200),
+                stale_after_ms=int(os.environ.get("MITSU_GPS_STALE_AFTER_MS", "1500")),
+            )
+            provider.pose_received.connect(self.handle_real_pose_payload)
+            provider.status_changed.connect(lambda ok, msg: print(f"REAL POSE: {msg}"))
+            self.real_pose_provider = provider
+            provider.start()
+            print(f"REAL POSE: NMEA-0183 provider started: {gps_port}")
+            return
         if JsonPoseProviderThread is None or self.real_pose_provider is not None:
             return
         pose_path = os.environ.get("MITSU_REAL_POSE_JSON", "").strip()
@@ -1027,11 +1056,43 @@ class AppController(QObject):
         if self.vehicle_control is None or Pose2D is None:
             return
         try:
+            payload = dict(payload or {})
+            if not bool(payload.get("valid", True)):
+                telemetry = self.vehicle_control.get_telemetry()
+                self.vehicle_control.submit_pose(Pose2D(
+                    x_m=float(getattr(telemetry, "x_m", 0.0)),
+                    y_m=float(getattr(telemetry, "y_m", 0.0)),
+                    yaw_deg=float(getattr(telemetry, "yaw_deg", 0.0)),
+                    valid=False,
+                    source=str(payload.get("source", "external_pose_invalid")),
+                ))
+                return
+
+            x_m = payload.get("x_m")
+            y_m = payload.get("y_m")
+            if x_m is None or y_m is None:
+                lat = payload.get("lat", payload.get("latitude"))
+                lon = payload.get("lon", payload.get("longitude"))
+                reference = self._real_gps_geo_reference()
+                if lat is None or lon is None or reference is None or GeoPoint is None or latlon_to_local_m is None:
+                    raise ValueError("GNSS lat/lon received, but route origin_geo or MITSU_GPS_ORIGIN_LAT/LON is missing")
+                x_m, y_m = latlon_to_local_m(GeoPoint(float(lat), float(lon)), reference)
+                max_origin_distance = float(os.environ.get("MITSU_GPS_MAX_ORIGIN_DISTANCE_M", "2000"))
+                if (float(x_m) ** 2 + float(y_m) ** 2) ** 0.5 > max_origin_distance:
+                    raise ValueError(
+                        f"GNSS fix is too far from route origin: "
+                        f"{(float(x_m) ** 2 + float(y_m) ** 2) ** 0.5:.0f}m > {max_origin_distance:.0f}m"
+                    )
+
+            current = self.vehicle_control.get_telemetry()
+            yaw_value = payload.get("yaw_deg")
+            if yaw_value is None:
+                yaw_value = getattr(current, "yaw_deg", 0.0)
             pose = Pose2D(
-                x_m=float(payload.get("x_m", 0.0)),
-                y_m=float(payload.get("y_m", 0.0)),
-                yaw_deg=float(payload.get("yaw_deg", 0.0)),
-                valid=bool(payload.get("valid", True)),
+                x_m=float(x_m),
+                y_m=float(y_m),
+                yaw_deg=float(yaw_value),
+                valid=True,
                 source=str(payload.get("source", "json_pose_provider")),
             )
             self.vehicle_control.submit_pose(pose)
@@ -1039,6 +1100,23 @@ class AppController(QObject):
                 self.vehicle_control.update_navigation_preview()
         except Exception as exc:
             print(f"REAL POSE: payload rejected: {exc}")
+
+    def _real_gps_geo_reference(self):
+        if GeoReference is None or GeoPoint is None:
+            return None
+        mission = dict(self.real_mission or {})
+        metadata = dict(mission.get("metadata") or {})
+        origin = metadata.get("origin_geo") or mission.get("origin_geo")
+        if origin:
+            try:
+                return GeoReference(GeoPoint.from_dict(origin))
+            except Exception:
+                pass
+        lat = os.environ.get("MITSU_GPS_ORIGIN_LAT", "").strip()
+        lon = os.environ.get("MITSU_GPS_ORIGIN_LON", "").strip()
+        if lat and lon:
+            return GeoReference.from_origin(float(lat), float(lon))
+        return None
 
     def _stop_real_camera_stack(self):
         analyzer = self.real_agent_analyzer
@@ -1700,11 +1778,28 @@ class AppController(QObject):
             or os.environ.get("MITSU_REAL_POSE_MODE", "external")
             or "external"
         ).strip().lower()
+        self.real_gps_com_port = str(
+            self.real_mission.get("gps_com_port")
+            or os.environ.get("MITSU_GPS_COM_PORT", "")
+        ).strip()
+        self.real_gps_baudrate = int(
+            self.real_mission.get("gps_baudrate")
+            or os.environ.get("MITSU_GPS_BAUDRATE", "115200")
+        )
         if self.real_pose_mode == "dead_reckoning_ab":
             if self._configure_real_dead_reckoning_pose(self.real_mission) and self.is_connected:
                 self._start_real_dead_reckoning_pose()
         else:
             self._stop_real_dead_reckoning_pose()
+            if self.real_pose_mode == "nmea_serial" and self.is_connected:
+                provider = self.real_pose_provider
+                self.real_pose_provider = None
+                if provider is not None:
+                    try:
+                        provider.stop()
+                    except Exception:
+                        pass
+                self._start_real_pose_provider()
         if self.vehicle_control is not None and Mission is not None:
             try:
                 metadata = dict(self.real_mission.get("metadata") or {})

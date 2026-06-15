@@ -92,6 +92,8 @@ class VehicleControlService(QObject):
         self._manual_last_update_monotonic: Optional[float] = None
         self._manual_accel_pct = 0.0
         self._manual_brake_pct = 0.0
+        self.pose_stale_ms = float(os.environ.get("MITSU_REAL_POSE_STALE_MS", "1500"))
+        self.navigator.stale_pose_ms = self.pose_stale_ms
 
     def clear_external_agent_state(self, reason: str = "clear_external_agent_state") -> None:
         self._last_external_intent = None
@@ -408,13 +410,13 @@ class VehicleControlService(QObject):
         telemetry.yaw_deg = float(pose.yaw_deg)
         telemetry.pose_valid = bool(pose.valid)
         telemetry.pose_source = str(pose.source or "external")
-        telemetry.last_rx_monotonic = time.monotonic()
+        telemetry.last_pose_monotonic = time.monotonic()
         self._refresh_readiness_state()
 
     def _build_readiness(self) -> ReadinessStatus:
         telemetry = self.get_telemetry()
         pose_valid = bool(getattr(telemetry, "pose_valid", False))
-        pose_fresh = telemetry.age_ms() <= 750.0
+        pose_fresh = telemetry.pose_age_ms() <= self.pose_stale_ms
         manual = bool(self.manual_mode_enabled)
         return ReadinessStatus(
             connected=self._connected and telemetry.connected,

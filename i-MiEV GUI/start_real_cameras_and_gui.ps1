@@ -45,6 +45,12 @@ $GuiEnv = @(
     "set MITSU_AUTO_AI_PREVIEW=1",
     "set MITSU_CAN_TX_DEBUG=1",
     "set MITSU_CAN_RX_DEBUG=0",
+    "set MITSU_GPS_MIN_SATELLITES=6",
+    "set MITSU_GPS_MAX_HDOP=3",
+    "set MITSU_GPS_LOCK_SAMPLES=3",
+    "set MITSU_GPS_MAX_JUMP_M=35",
+    "set MITSU_GPS_MAX_ORIGIN_DISTANCE_M=2000",
+    "set MITSU_REAL_POSE_STALE_MS=1500",
     "set MITSU_REAL_ENABLE_ACTUATION=1",
     "set MITSU_REAL_DRY_RUN=0",
     "`"$Python`" main.py"

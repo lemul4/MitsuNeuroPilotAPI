@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
@@ -165,8 +166,16 @@ class RealMissionPanel(QGroupBox):
         coord_grid.addWidget(QLabel("Pose автомобиля"), 6, 0)
         self.combo_pose_mode = QComboBox()
         self.combo_pose_mode.addItem("GPS / внешний pose", "external")
+        self.combo_pose_mode.addItem("GPS NMEA-0183 через COM", "nmea_serial")
         self.combo_pose_mode.addItem("Без GPS: A→B по скорости", "dead_reckoning_ab")
         coord_grid.addWidget(self.combo_pose_mode, 6, 1)
+        coord_grid.addWidget(QLabel("GPS COM-порт"), 7, 0)
+        self.input_gps_com_port = QLineEdit(os.environ.get("MITSU_GPS_COM_PORT", ""))
+        self.input_gps_com_port.setPlaceholderText("например COM7")
+        coord_grid.addWidget(self.input_gps_com_port, 7, 1)
+        coord_grid.addWidget(QLabel("GPS baudrate"), 8, 0)
+        self.input_gps_baudrate = QLineEdit(os.environ.get("MITSU_GPS_BAUDRATE", "115200"))
+        coord_grid.addWidget(self.input_gps_baudrate, 8, 1)
         layout.addLayout(coord_grid)
 
         map_row = QHBoxLayout()
@@ -282,6 +291,11 @@ class RealMissionPanel(QGroupBox):
                 "traffic_side": "right",
             }
             pose_mode = self.combo_pose_mode.currentData() if hasattr(self, "combo_pose_mode") else "external"
+            gps_com_port = self.input_gps_com_port.text().strip() if hasattr(self, "input_gps_com_port") else ""
+            try:
+                gps_baudrate = int(self.input_gps_baudrate.text().strip() or 115200)
+            except Exception:
+                gps_baudrate = 115200
             goal_label = f"B=({gx:.1f}, {gy:.1f})"
 
             if self._map_start_geo and self._map_goal_geo and GeoPoint is not None and geo_points_to_local_ab is not None:
@@ -307,6 +321,8 @@ class RealMissionPanel(QGroupBox):
                 "goal": goal_payload,
                 "goal_label": goal_label,
                 "pose_mode": pose_mode,
+                "gps_com_port": gps_com_port,
+                "gps_baudrate": gps_baudrate,
                 "spacing_m": float(self.input_spacing.text() or 2.0),
                 "turn_speed_kmh": speed,
                 "hints": hints,

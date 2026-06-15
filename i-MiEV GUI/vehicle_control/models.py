@@ -227,19 +227,29 @@ class VehicleTelemetry:
     pose_valid: bool = False
     pose_source: str = "none"
     last_rx_monotonic: float = field(default_factory=time.monotonic)
+    last_pose_monotonic: Optional[float] = None
     fault: Optional[str] = None
 
     def age_ms(self) -> float:
         return (time.monotonic() - self.last_rx_monotonic) * 1000.0
 
+    def pose_age_ms(self) -> float:
+        timestamp = self.last_pose_monotonic
+        if timestamp is None:
+            timestamp = self.last_rx_monotonic
+        return (time.monotonic() - float(timestamp)) * 1000.0
+
     def pose(self) -> Pose2D:
+        timestamp = self.last_pose_monotonic
+        if timestamp is None:
+            timestamp = self.last_rx_monotonic
         return Pose2D(
             x_m=float(self.x_m),
             y_m=float(self.y_m),
             yaw_deg=float(self.yaw_deg),
             valid=bool(self.pose_valid),
             source=str(self.pose_source or "telemetry"),
-            timestamp_monotonic=self.last_rx_monotonic,
+            timestamp_monotonic=float(timestamp),
         )
 
 

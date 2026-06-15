@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -67,5 +70,259 @@ class JsonPoseProviderThread(QThread):
         self.running = False
         try:
             self.wait(1200)
+        except Exception:
+            pass
+
+
+def _nmea_checksum_ok(sentence: str) -> bool:
+    text = str(sentence or "").strip()
+    if not text.startswith("$") or "*" not in text:
+        return False
+    body, expected = text[1:].split("*", 1)
+    checksum = 0
+    for char in body:
+        checksum ^= ord(char)
+    try:
+        return checksum == int(expected[:2], 16)
+    except Exception:
+        return False
+
+
+def _nmea_coordinate(value: str, hemisphere: str) -> float:
+    raw = float(value)
+    degrees = int(raw // 100)
+    minutes = raw - degrees * 100
+    coordinate = degrees + minutes / 60.0
+    if str(hemisphere or "").upper() in {"S", "W"}:
+        coordinate = -coordinate
+    return coordinate
+
+
+@dataclass(frozen=True)
+class NmeaFix:
+    lat: float
+    lon: float
+    valid: bool
+    fix_quality: int = 0
+    satellites: int = 0
+    hdop: float = 99.0
+    speed_mps: float = 0.0
+    course_deg: Optional[float] = None
+
+
+class Nmea0183Parser:
+    def __init__(self):
+        self.fix_quality = 0
+        self.satellites = 0
+        self.hdop = 99.0
+        self.speed_mps = 0.0
+        self.course_deg = None
+
+    def parse(self, sentence: str) -> Optional[NmeaFix]:
+        text = str(sentence or "").strip()
+        if not _nmea_checksum_ok(text):
+            return None
+        fields = text[1:text.index("*")].split(",")
+        kind = fields[0][-3:].upper()
+        try:
+            if kind == "GGA":
+                lat = _nmea_coordinate(fields[2], fields[3])
+                lon = _nmea_coordinate(fields[4], fields[5])
+                self.fix_quality = int(fields[6] or 0)
+                self.satellites = int(fields[7] or 0)
+                self.hdop = float(fields[8] or 99.0)
+                return NmeaFix(
+                    lat=lat,
+                    lon=lon,
+                    valid=self.fix_quality > 0,
+                    fix_quality=self.fix_quality,
+                    satellites=self.satellites,
+                    hdop=self.hdop,
+                    speed_mps=self.speed_mps,
+                    course_deg=self.course_deg,
+                )
+            if kind == "RMC":
+                lat = _nmea_coordinate(fields[3], fields[4])
+                lon = _nmea_coordinate(fields[5], fields[6])
+                self.speed_mps = float(fields[7] or 0.0) * 0.514444
+                self.course_deg = None if not fields[8] else float(fields[8]) % 360.0
+                return NmeaFix(
+                    lat=lat,
+                    lon=lon,
+                    valid=str(fields[2]).upper() == "A",
+                    fix_quality=self.fix_quality,
+                    satellites=self.satellites,
+                    hdop=self.hdop,
+                    speed_mps=self.speed_mps,
+                    course_deg=self.course_deg,
+                )
+        except (ValueError, IndexError):
+            return None
+        return None
+
+
+def _geo_distance_m(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
+    radius = 6378137.0
+    lat1 = math.radians(float(a_lat))
+    lat2 = math.radians(float(b_lat))
+    dlat = lat2 - lat1
+    dlon = math.radians(float(b_lon) - float(a_lon))
+    value = math.sin(dlat / 2.0) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2.0) ** 2
+    return radius * 2.0 * math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1.0 - value)))
+
+
+class NmeaFixFilter:
+    def __init__(
+        self,
+        min_satellites: int = 6,
+        max_hdop: float = 3.0,
+        lock_samples: int = 3,
+        lock_radius_m: float = 20.0,
+        max_jump_m: float = 35.0,
+        window_size: int = 5,
+    ):
+        self.min_satellites = int(min_satellites)
+        self.max_hdop = float(max_hdop)
+        self.lock_samples = max(1, int(lock_samples))
+        self.lock_radius_m = float(lock_radius_m)
+        self.max_jump_m = float(max_jump_m)
+        self.window_size = max(1, int(window_size))
+        self._candidates = []
+        self._accepted = []
+        self._locked = False
+
+    def accept(self, fix: NmeaFix) -> Optional[NmeaFix]:
+        if not fix.valid:
+            return None
+        if not (-90.0 <= fix.lat <= 90.0 and -180.0 <= fix.lon <= 180.0):
+            return None
+        if fix.fix_quality <= 0:
+            return None
+        if fix.satellites < self.min_satellites or fix.hdop > self.max_hdop:
+            return None
+
+        if not self._locked:
+            self._candidates.append(fix)
+            self._candidates = self._candidates[-self.lock_samples:]
+            if len(self._candidates) < self.lock_samples:
+                return None
+            center_lat = statistics.median(item.lat for item in self._candidates)
+            center_lon = statistics.median(item.lon for item in self._candidates)
+            if any(_geo_distance_m(center_lat, center_lon, item.lat, item.lon) > self.lock_radius_m for item in self._candidates):
+                self._candidates = [fix]
+                return None
+            self._locked = True
+
+        if self._accepted:
+            previous = self._accepted[-1]
+            if _geo_distance_m(previous.lat, previous.lon, fix.lat, fix.lon) > self.max_jump_m:
+                return None
+
+        self._accepted.append(fix)
+        self._accepted = self._accepted[-self.window_size:]
+        return NmeaFix(
+            lat=statistics.median(item.lat for item in self._accepted),
+            lon=statistics.median(item.lon for item in self._accepted),
+            valid=True,
+            fix_quality=fix.fix_quality,
+            satellites=fix.satellites,
+            hdop=fix.hdop,
+            speed_mps=fix.speed_mps,
+            course_deg=fix.course_deg,
+        )
+
+
+class NmeaSerialPoseProviderThread(QThread):
+    """Read a dedicated GNSS COM port carrying NMEA-0183 sentences."""
+
+    pose_received = Signal(dict)
+    status_changed = Signal(bool, str)
+
+    def __init__(self, port: str, baudrate: int = 115200, stale_after_ms: int = 1500, parent=None):
+        super().__init__(parent)
+        self.port = str(port)
+        self.baudrate = int(baudrate)
+        self.stale_after_ms = int(stale_after_ms)
+        self.running = True
+        self._serial = None
+        self._last_valid_at = 0.0
+        self._stale_emitted = False
+        self._last_status_at = 0.0
+        self.parser = Nmea0183Parser()
+        self.filter = NmeaFixFilter(
+            min_satellites=int(os.environ.get("MITSU_GPS_MIN_SATELLITES", "6")),
+            max_hdop=float(os.environ.get("MITSU_GPS_MAX_HDOP", "3.0")),
+            lock_samples=int(os.environ.get("MITSU_GPS_LOCK_SAMPLES", "3")),
+            lock_radius_m=float(os.environ.get("MITSU_GPS_LOCK_RADIUS_M", "20.0")),
+            max_jump_m=float(os.environ.get("MITSU_GPS_MAX_JUMP_M", "35.0")),
+            window_size=int(os.environ.get("MITSU_GPS_FILTER_WINDOW", "5")),
+        )
+
+    def run(self):
+        try:
+            import serial
+
+            self._serial = serial.Serial(self.port, self.baudrate, timeout=0.2)
+            self.status_changed.emit(False, f"NMEA GPS connected: {self.port}; waiting for stable fix")
+            while self.running:
+                raw = self._serial.readline()
+                now = time.monotonic()
+                if raw:
+                    sentence = raw.decode("ascii", errors="ignore").strip()
+                    fix = self.parser.parse(sentence)
+                    accepted = self.filter.accept(fix) if fix is not None else None
+                    if accepted is not None:
+                        self._last_valid_at = now
+                        self._stale_emitted = False
+                        self.pose_received.emit({
+                            "lat": accepted.lat,
+                            "lon": accepted.lon,
+                            "yaw_deg": (
+                                accepted.course_deg
+                                if accepted.speed_mps >= float(os.environ.get("MITSU_GPS_COURSE_MIN_SPEED_MPS", "0.5"))
+                                else None
+                            ),
+                            "speed_mps": accepted.speed_mps,
+                            "valid": True,
+                            "source": "nmea0183_gnss",
+                            "fix_quality": accepted.fix_quality,
+                            "satellites": accepted.satellites,
+                            "hdop": accepted.hdop,
+                            "timestamp_monotonic": now,
+                        })
+                        if now - self._last_status_at >= 1.0:
+                            self._last_status_at = now
+                            self.status_changed.emit(
+                                True,
+                                f"NMEA GPS fix: sats={accepted.satellites} hdop={accepted.hdop:.1f}",
+                            )
+                if (
+                    self._last_valid_at > 0.0
+                    and (now - self._last_valid_at) * 1000.0 > self.stale_after_ms
+                    and not self._stale_emitted
+                ):
+                    self._stale_emitted = True
+                    self.pose_received.emit({"valid": False, "source": "nmea0183_stale"})
+                    self.status_changed.emit(False, "NMEA GPS pose stale")
+        except Exception as exc:
+            self.status_changed.emit(False, f"NMEA GPS error: {exc}")
+            self.pose_received.emit({"valid": False, "source": "nmea0183_error"})
+        finally:
+            try:
+                if self._serial is not None:
+                    self._serial.close()
+            except Exception:
+                pass
+            self._serial = None
+
+    def stop(self):
+        self.running = False
+        try:
+            if self._serial is not None:
+                self._serial.close()
+        except Exception:
+            pass
+        try:
+            self.wait(1500)
         except Exception:
             pass
