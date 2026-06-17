@@ -157,6 +157,12 @@ class TrainingConfig(BaseConfig):
     visualize_dataset = False
     # If false, BEV visualizations use a blank canvas instead of the LiDAR raster.
     visualize_lidar_bev = True
+    # If true, draw ego-centered x/y coordinate grid on BEV visualizations.
+    visualize_coordinate_grid = False
+    # Coordinate grid spacing in meters.
+    coordinate_grid_step_m = 1.0
+    # Draw coordinate text every N grid lines.
+    coordinate_grid_label_every = 5
     # Flag to visualize the failed scenarios and deactivate randomization and augmentation.
     visualize_failed_scenarios = False
     # Flag to load the BEV 3rd person images from the dataset for debugging.

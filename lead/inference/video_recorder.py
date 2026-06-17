@@ -348,6 +348,10 @@ class VideoRecorder:
             processed_image = image.copy()
 
             # Add visualizations if enabled
+            if camera_name == "bev_camera" and self._coordinate_grid_enabled():
+                processed_image = self.draw_coordinate_grid(
+                    processed_image, camera_config
+                )
             if draw_planning and pred_waypoints is not None:
                 processed_image = self.draw_waypoints(
                     processed_image, pred_waypoints, camera_config
@@ -394,6 +398,160 @@ class VideoRecorder:
                     (concatenated.shape[1], concatenated.shape[0]),
                 )
             self.demo_video_writer.write(concatenated)
+
+    def _coordinate_grid_enabled(self) -> bool:
+        if self.training_config is None:
+            return False
+        return bool(getattr(self.training_config, "visualize_coordinate_grid", False))
+
+    def draw_coordinate_grid(
+        self,
+        image: jt.UInt8[npt.NDArray, "height width 3"],
+        camera_config: dict[str, str | float | bool],
+    ) -> jt.UInt8[npt.NDArray, "height width 3"]:
+        """Project and draw ego-centered x/y meter grid on the BEV camera image."""
+        if self.training_config is None:
+            return image
+
+        step_m = float(getattr(self.training_config, "coordinate_grid_step_m", 1.0))
+        if step_m <= 0.0:
+            return image
+
+        label_every = max(
+            1, int(getattr(self.training_config, "coordinate_grid_label_every", 5))
+        )
+        min_x = float(self.training_config.min_x_meter)
+        max_x = float(self.training_config.max_x_meter)
+        min_y = float(self.training_config.min_y_meter)
+        max_y = float(self.training_config.max_y_meter)
+
+        img_with_grid = image.copy()
+        camera_height, camera_width = image.shape[:2]
+        camera_fov = float(camera_config["fov"])
+        camera_pos = [camera_config["x"], camera_config["y"], camera_config["z"]]
+        camera_rot = [
+            camera_config.get("roll", 0.0),
+            camera_config["pitch"],
+            camera_config["yaw"],
+        ]
+
+        grid_color = (185, 185, 185)
+        axis_color = (50, 50, 50)
+        label_color = (25, 25, 25)
+        origin_color = (0, 0, 0)
+
+        def _project(points: npt.NDArray):
+            return common_utils.project_points_to_image(
+                camera_rot,
+                camera_pos,
+                camera_fov,
+                camera_width,
+                camera_height,
+                points,
+            )
+
+        def _draw_polyline(points_m: npt.NDArray, color, thickness: int) -> None:
+            projected, inside = _project(points_m)
+            for i in range(len(projected) - 1):
+                if not inside[i] or not inside[i + 1]:
+                    continue
+                pt1 = (int(round(projected[i][0])), int(round(projected[i][1])))
+                pt2 = (
+                    int(round(projected[i + 1][0])),
+                    int(round(projected[i + 1][1])),
+                )
+                cv2.line(
+                    img_with_grid,
+                    pt1,
+                    pt2,
+                    color=color,
+                    thickness=thickness,
+                    lineType=cv2.LINE_AA,
+                )
+
+        y_samples = np.arange(min_y, max_y + step_m, step_m, dtype=np.float32)
+        x_samples = np.arange(min_x, max_x + step_m, step_m, dtype=np.float32)
+
+        min_x_tick = int(np.ceil(min_x / step_m))
+        max_x_tick = int(np.floor(max_x / step_m))
+        min_y_tick = int(np.ceil(min_y / step_m))
+        max_y_tick = int(np.floor(max_y / step_m))
+
+        for tick in range(min_x_tick, max_x_tick + 1):
+            x_m = tick * step_m
+            points = np.column_stack(
+                [np.full_like(y_samples, x_m, dtype=np.float32), y_samples]
+            )
+            is_axis = abs(x_m) < 1e-6
+            _draw_polyline(
+                points,
+                axis_color if is_axis else grid_color,
+                2 if is_axis else 1,
+            )
+
+            if tick % label_every == 0:
+                projected, inside = _project(np.array([[x_m, 0.0]], dtype=np.float32))
+                if inside[0]:
+                    cv2.putText(
+                        img_with_grid,
+                        f"x={x_m:g}",
+                        (int(projected[0][0]) + 4, int(projected[0][1]) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        label_color,
+                        1,
+                        cv2.LINE_AA,
+                    )
+
+        for tick in range(min_y_tick, max_y_tick + 1):
+            y_m = tick * step_m
+            points = np.column_stack(
+                [x_samples, np.full_like(x_samples, y_m, dtype=np.float32)]
+            )
+            is_axis = abs(y_m) < 1e-6
+            _draw_polyline(
+                points,
+                axis_color if is_axis else grid_color,
+                2 if is_axis else 1,
+            )
+
+            if tick % label_every == 0:
+                projected, inside = _project(np.array([[0.0, y_m]], dtype=np.float32))
+                if inside[0]:
+                    cv2.putText(
+                        img_with_grid,
+                        f"y={y_m:g}",
+                        (int(projected[0][0]) + 4, int(projected[0][1]) + 14),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        label_color,
+                        1,
+                        cv2.LINE_AA,
+                    )
+
+        projected, inside = _project(np.array([[0.0, 0.0]], dtype=np.float32))
+        if inside[0]:
+            origin = (int(round(projected[0][0])), int(round(projected[0][1])))
+            cv2.circle(
+                img_with_grid,
+                origin,
+                radius=4,
+                color=origin_color,
+                thickness=-1,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                img_with_grid,
+                "0.0",
+                (origin[0] + 7, origin[1] + 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                origin_color,
+                1,
+                cv2.LINE_AA,
+            )
+
+        return img_with_grid
 
     @beartype
     def draw_waypoints(
