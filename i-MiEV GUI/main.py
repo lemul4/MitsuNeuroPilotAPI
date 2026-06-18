@@ -1079,6 +1079,13 @@ class AppController(QObject):
             if x_m is None or y_m is None:
                 lat = payload.get("lat", payload.get("latitude"))
                 lon = payload.get("lon", payload.get("longitude"))
+                if (
+                    lat is not None
+                    and lon is not None
+                    and str(payload.get("source", "")).lower() == "nmea0183_gnss"
+                    and hasattr(getattr(self, "view", None), "set_current_gps_position")
+                ):
+                    self.view.set_current_gps_position(float(lat), float(lon), str(payload.get("source", "")))
                 reference = self._real_gps_geo_reference()
                 if lat is None or lon is None or reference is None or GeoPoint is None or latlon_to_local_m is None:
                     raise ValueError("GNSS lat/lon received, but route origin_geo or MITSU_GPS_ORIGIN_LAT/LON is missing")

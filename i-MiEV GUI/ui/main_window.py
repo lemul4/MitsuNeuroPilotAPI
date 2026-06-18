@@ -1003,6 +1003,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_nav_goal"):
             self.real_mission_panel.set_nav_goal(goal)
 
+    def set_current_gps_position(self, lat, lon, source=""):
+        if hasattr(self, "real_mission_panel") and hasattr(self.real_mission_panel, "set_current_gps_position"):
+            self.real_mission_panel.set_current_gps_position(lat, lon, source)
+
 
     def _special_device_modes(self):
         return (

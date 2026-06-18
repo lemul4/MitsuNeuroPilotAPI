@@ -61,6 +61,7 @@ class RealMissionPanel(QGroupBox):
         self._last_message = ""
         self._map_start_geo = None
         self._map_goal_geo = None
+        self._current_gps_geo = None
         self._setup_ui()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFixedHeight(self.FIXED_PANEL_HEIGHT)
@@ -237,9 +238,29 @@ class RealMissionPanel(QGroupBox):
         if MapPickerDialog is None:
             self.lbl_map_points.setText("Карта недоступна: не удалось импортировать ui.map_picker_dialog")
             return
-        dialog = MapPickerDialog(self, start=self._map_start_geo, goal=self._map_goal_geo)
+        pose_mode = self.combo_pose_mode.currentData() if hasattr(self, "combo_pose_mode") else "external"
+        dialog = MapPickerDialog(
+            self,
+            start=self._map_start_geo,
+            goal=self._map_goal_geo,
+            current=self._current_gps_geo if pose_mode == "nmea_serial" else None,
+            allow_browser_geolocation=pose_mode != "nmea_serial",
+        )
         dialog.points_selected.connect(self._apply_map_points)
         dialog.exec()
+
+    def set_current_gps_position(self, lat, lon, source=""):
+        if str(source or "").lower() not in {"nmea0183_gnss", "nmea0183"}:
+            return
+        try:
+            self._current_gps_geo = {"lat": float(lat), "lon": float(lon), "yaw_deg": 0.0}
+            if not self._map_start_geo:
+                self._map_start_geo = dict(self._current_gps_geo)
+                self.lbl_map_points.setText(
+                    f"GPS A=({float(lat):.6f},{float(lon):.6f})  B=не задана"
+                )
+        except Exception:
+            return
 
     def _apply_map_points(self, payload):
         if not isinstance(payload, dict):
