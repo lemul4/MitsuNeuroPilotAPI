@@ -396,6 +396,9 @@ class AppController(QObject):
         self.real_direct_model_worker_stop = False
         self.real_direct_model_auto_worker = True
         self.real_direct_model_frame_seq = 0
+        self._real_agent_intent_lock = threading.Lock()
+        self._real_agent_pending_intent = None
+        self._real_agent_intent_future = None
         self.real_camera_status = {"wide_90": False, "narrow_50": False}
         self.real_agent_bridge = RealAgentBridge() if RealAgentBridge is not None else None
         self.real_pose_provider = None
@@ -578,6 +581,36 @@ class AppController(QObject):
 
         future.add_done_callback(_done)
         return future
+
+    def _schedule_latest_real_agent_intent(self, intent):
+        if self.vehicle_control is None:
+            return
+        should_schedule = False
+        with self._real_agent_intent_lock:
+            self._real_agent_pending_intent = intent
+            future = self._real_agent_intent_future
+            if future is None or future.done():
+                should_schedule = True
+        if not should_schedule:
+            return
+        future = self._schedule_async(self._submit_latest_real_agent_intents(), "real_agent_intent")
+        with self._real_agent_intent_lock:
+            self._real_agent_intent_future = future
+
+    async def _submit_latest_real_agent_intents(self):
+        sent = 0
+        while True:
+            with self._real_agent_intent_lock:
+                intent = self._real_agent_pending_intent
+                self._real_agent_pending_intent = None
+            if intent is None:
+                return {"ok": True, "sent": sent}
+            if self.vehicle_control is not None:
+                await self.vehicle_control.submit_external_agent_intent(intent)
+                sent += 1
+            with self._real_agent_intent_lock:
+                if self._real_agent_pending_intent is None:
+                    return {"ok": True, "sent": sent}
 
     @Slot(float, float, float)
     def handle_pid_update(self, kp, ki, kd):
@@ -1101,6 +1134,10 @@ class AppController(QObject):
             yaw_value = payload.get("yaw_deg")
             if yaw_value is None:
                 yaw_value = getattr(current, "yaw_deg", 0.0)
+            elif str(payload.get("source", "")).lower() == "nmea0183_gnss":
+                # NMEA/RMC course is compass bearing: 0=north, 90=east.
+                # The local navigation frame uses x=east, y=north and yaw=0 along +x.
+                yaw_value = (90.0 - float(yaw_value) + 180.0) % 360.0 - 180.0
             pose = Pose2D(
                 x_m=float(x_m),
                 y_m=float(y_m),
@@ -1335,15 +1372,18 @@ class AppController(QObject):
         if adapter is None or not self._real_direct_model_inference_enabled():
             return None
         now = time.monotonic()
+        inference_started_at = now
         try:
             frames = dict(sample.get("frames") or {})
             context_payload = self._build_real_agent_context()
             context_payload["input_sample_seq"] = int(sample.get("seq", 0))
             context_payload["input_sample_generation"] = int(sample.get("generation", 0))
             context_payload["input_sample_created_at_monotonic"] = float(sample.get("created_at", 0.0) or 0.0)
+            context_payload["inference_started_at_monotonic"] = float(inference_started_at)
             context_payload["input_frame_timestamps_monotonic"] = dict(sample.get("timestamps") or {})
             context_payload["input_frame_part_sequences"] = dict(sample.get("part_sequences") or {})
             prediction = adapter.predict(frames, context_payload)
+            inference_finished_at = time.monotonic()
             if not prediction or not self._real_direct_model_inference_enabled():
                 return None
             current_generation = int(getattr(self, "real_direct_model_sample_generation", 0) or 0)
@@ -1356,6 +1396,9 @@ class AppController(QObject):
             payload.setdefault("input_sample_seq", int(sample.get("seq", 0)))
             payload.setdefault("input_sample_generation", int(sample.get("generation", 0)))
             payload.setdefault("input_sample_created_at_monotonic", float(sample.get("created_at", 0.0) or 0.0))
+            payload.setdefault("inference_started_at_monotonic", float(inference_started_at))
+            payload.setdefault("inference_finished_at_monotonic", float(inference_finished_at))
+            payload.setdefault("inference_duration_ms", max(0.0, (float(inference_finished_at) - float(inference_started_at)) * 1000.0))
             payload.setdefault("input_frame_timestamps_monotonic", dict(sample.get("timestamps") or {}))
             payload.setdefault("input_frame_part_sequences", dict(sample.get("part_sequences") or {}))
             if os.environ.get("MITSU_DEBUG_REAL_MODEL_PREVIEW", "0").lower() in {"1", "true", "yes", "on"}:
@@ -1385,7 +1428,9 @@ class AppController(QObject):
             payload = self._predict_real_direct_model_sample(sample)
             if payload:
                 try:
+                    payload["qt_signal_emit_started_at_monotonic"] = time.monotonic()
                     self.real_direct_model_prediction_ready.emit(payload)
+                    payload["qt_signal_emit_finished_at_monotonic"] = time.monotonic()
                 except Exception:
                     self.handle_real_agent_prediction(payload)
 
@@ -1421,7 +1466,7 @@ class AppController(QObject):
             except Exception:
                 return float(default)
 
-        def _world_to_ego(point_x, point_y):
+        def _world_to_ego(point_x, point_y, yaw_deg=None):
             # Model input convention:
             #   ego/current vehicle position == [0, 0]
             #   x = forward from vehicle
@@ -1430,7 +1475,9 @@ class AppController(QObject):
 
             ego_x = _as_float(getattr(telemetry, "x_m", 0.0))
             ego_y = _as_float(getattr(telemetry, "y_m", 0.0))
-            ego_yaw = math.radians(_as_float(getattr(telemetry, "yaw_deg", 0.0)))
+            if yaw_deg is None:
+                yaw_deg = getattr(telemetry, "yaw_deg", 0.0)
+            ego_yaw = math.radians(_as_float(yaw_deg))
 
             dx = _as_float(point_x) - ego_x
             dy = _as_float(point_y) - ego_y
@@ -1448,6 +1495,7 @@ class AppController(QObject):
         previous_world = None
         target_world = None
         next_world = None
+        ego_yaw_for_model = _as_float(getattr(telemetry, "yaw_deg", 0.0))
 
         if goal is not None and getattr(goal, "is_valid", lambda: False)():
             target_world = [
@@ -1465,9 +1513,37 @@ class AppController(QObject):
                 _as_float(getattr(goal, "next_y_m", target_world[1])),
             ]
 
-            target_point_previous = _world_to_ego(previous_world[0], previous_world[1])
-            target_point = _world_to_ego(target_world[0], target_world[1])
-            target_point_next = _world_to_ego(next_world[0], next_world[1])
+            route_heading_source = os.environ.get(
+                "MITSU_REAL_MODEL_ROUTE_HEADING",
+                "auto",
+            ).strip().lower()
+            if route_heading_source in {"1", "true", "yes", "on", "route"} or (
+                route_heading_source == "auto"
+                and str(getattr(telemetry, "pose_source", "") or "").lower()
+                in {"nmea0183_gnss", "json_pose_provider"}
+            ):
+                import math
+
+                dx = next_world[0] - previous_world[0]
+                dy = next_world[1] - previous_world[1]
+                if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                    ego_yaw_for_model = math.degrees(math.atan2(dy, dx))
+
+            target_point_previous = _world_to_ego(
+                previous_world[0],
+                previous_world[1],
+                ego_yaw_for_model,
+            )
+            target_point = _world_to_ego(
+                target_world[0],
+                target_world[1],
+                ego_yaw_for_model,
+            )
+            target_point_next = _world_to_ego(
+                next_world[0],
+                next_world[1],
+                ego_yaw_for_model,
+            )
 
             if os.environ.get("MITSU_DEBUG_NAV_EGO", "0").lower() in {"1", "true", "yes", "on"}:
                 now = time.monotonic()
@@ -1479,6 +1555,7 @@ class AppController(QObject):
                         f"pose=({getattr(telemetry, 'x_m', 0.0):.2f},"
                         f"{getattr(telemetry, 'y_m', 0.0):.2f},"
                         f"{getattr(telemetry, 'yaw_deg', 0.0):.1f}) "
+                        f"model_yaw={ego_yaw_for_model:.1f} "
                         f"prev={target_point_previous} "
                         f"target={target_point} "
                         f"next={target_point_next}"
@@ -1504,9 +1581,28 @@ class AppController(QObject):
             "target_point_next_ego": target_point_next,
 
             # Raw route/world points for debugging only.
+            "target_point_previous_waypoint_index": None if goal is None else int(getattr(goal, "previous_waypoint_index", 0) or 0),
+            "target_point_waypoint_index": None if goal is None else int(getattr(goal, "waypoint_index", 0) or 0),
+            "target_point_next_waypoint_index": None if goal is None else int(getattr(goal, "next_waypoint_index", 0) or 0),
+            "target_point_control_waypoint_index": None if goal is None else int(getattr(goal, "control_waypoint_index", getattr(goal, "waypoint_index", 0)) or 0),
             "target_point_previous_world": previous_world,
             "target_point_world": target_world,
             "target_point_next_world": next_world,
+            "model_ego_yaw_deg": ego_yaw_for_model,
+            "model_waypoints_spacing_m": float(
+                dict(getattr(self, "real_mission", {}) or {}).get(
+                    "model_waypoints_spacing_m",
+                    os.environ.get("MITSU_MODEL_WAYPOINTS_SPACING_M", "3.0"),
+                )
+                or 3.0
+            ),
+            "route_target_spacing_m": float(
+                dict(getattr(self, "real_mission", {}) or {}).get(
+                    "route_target_spacing_m",
+                    os.environ.get("MITSU_ROUTE_TARGET_SPACING_M", "2.0"),
+                )
+                or 2.0
+            ),
 
             **payload,
         }
@@ -1518,13 +1614,161 @@ class AppController(QObject):
         if self.vehicle_control is None or self.real_agent_bridge is None or AgentPrediction is None:
             return
         try:
-            self._log_real_agent_prediction(dict(payload or {}))
-            prediction = AgentPrediction.from_dict(dict(payload or {}))
+            payload = dict(payload or {})
+            handler_received_at = time.monotonic()
+            payload["control_handler_received_at_monotonic"] = handler_received_at
+            now = handler_received_at
+            prediction_timestamp = payload.get("inference_finished_at_monotonic", payload.get("timestamp_monotonic"))
+            try:
+                prediction_age_ms = max(0.0, (now - float(prediction_timestamp)) * 1000.0)
+            except Exception:
+                prediction_age_ms = 0.0
+            stale_drop_ms = float(os.environ.get("MITSU_REAL_AGENT_DROP_STALE_MS", "500") or 500.0)
+            if prediction_age_ms > stale_drop_ms:
+                print(
+                    "REAL AGENT: stale prediction dropped: "
+                    f"frame={payload.get('frame_id', '-')} "
+                    f"age={prediction_age_ms:.1f}ms "
+                    f"limit={stale_drop_ms:.1f}ms",
+                    flush=True,
+                )
+                return
+            self._log_real_agent_prediction(payload)
+            conversion_started_at = time.monotonic()
+            prediction = AgentPrediction.from_dict(payload)
+            conversion_finished_at = time.monotonic()
+            goal_started_at = conversion_finished_at
             goal = self.vehicle_control.get_current_goal() if hasattr(self.vehicle_control, "get_current_goal") else None
+            goal_finished_at = time.monotonic()
+            bridge_started_at = goal_finished_at
             intent = self.real_agent_bridge.build_intent(prediction, goal)
-            self._schedule_async(self.vehicle_control.submit_external_agent_intent(intent), "real_agent_intent")
+            bridge_finished_at = time.monotonic()
+            payload["control_conversion_ms"] = max(0.0, (conversion_finished_at - conversion_started_at) * 1000.0)
+            payload["control_goal_lookup_ms"] = max(0.0, (goal_finished_at - goal_started_at) * 1000.0)
+            payload["control_bridge_ms"] = max(0.0, (bridge_finished_at - bridge_started_at) * 1000.0)
+            self._log_real_model_to_control_latency(payload, intent)
+            schedule_started_at = time.monotonic()
+            self._schedule_latest_real_agent_intent(intent)
+            schedule_finished_at = time.monotonic()
+            self._log_real_model_schedule_latency(payload, schedule_started_at, schedule_finished_at)
         except Exception as exc:
             print(f"REAL AGENT: prediction conversion failed: {exc}")
+
+    def _log_real_model_to_control_latency(self, payload, intent):
+        now = time.monotonic()
+        period = float(os.environ.get("MITSU_REAL_MODEL_LATENCY_LOG_PERIOD_SEC", "0.25") or 0.25)
+        last = float(getattr(self, "_last_real_model_latency_log_at", 0.0) or 0.0)
+        if now - last < period:
+            return
+        self._last_real_model_latency_log_at = now
+
+        def _elapsed_ms(start_value):
+            try:
+                start = float(start_value)
+            except Exception:
+                return None
+            if start <= 0.0:
+                return None
+            return max(0.0, (now - start) * 1000.0)
+
+        sample_to_control_ms = _elapsed_ms(payload.get("input_sample_created_at_monotonic"))
+        inference_to_control_ms = _elapsed_ms(payload.get("inference_started_at_monotonic"))
+        inference_ms = payload.get("inference_duration_ms")
+        if inference_ms is None:
+            try:
+                inference_ms = max(
+                    0.0,
+                    (
+                        float(payload.get("inference_finished_at_monotonic"))
+                        - float(payload.get("inference_started_at_monotonic"))
+                    )
+                    * 1000.0,
+                )
+            except Exception:
+                inference_ms = None
+
+        def _fmt_ms(value):
+            return "n/a" if value is None else f"{float(value):.1f}ms"
+
+        print(
+            "REAL MODEL LATENCY: "
+            f"sample={payload.get('input_sample_seq', 'n/a')} "
+            f"frame={payload.get('frame_id', 'n/a')} "
+            f"inference={_fmt_ms(inference_ms)} "
+            f"inference_to_control={_fmt_ms(inference_to_control_ms)} "
+            f"sample_to_control={_fmt_ms(sample_to_control_ms)} "
+            f"steer={float(getattr(intent, 'steer_norm', 0.0) or 0.0):.3f}",
+            flush=True,
+        )
+        self._log_real_model_latency_detail(payload, now)
+
+    def _log_real_model_latency_detail(self, payload, now):
+        def _elapsed_between_ms(start_value, end_value):
+            try:
+                start = float(start_value)
+                end = float(end_value)
+            except Exception:
+                return None
+            if start <= 0.0 or end <= 0.0:
+                return None
+            return max(0.0, (end - start) * 1000.0)
+
+        def _elapsed_to_now_ms(start_value):
+            try:
+                start = float(start_value)
+            except Exception:
+                return None
+            if start <= 0.0:
+                return None
+            return max(0.0, (now - start) * 1000.0)
+
+        def _fmt_ms(value):
+            return "n/a" if value is None else f"{float(value):.1f}ms"
+
+        sample_wait_ms = _elapsed_between_ms(
+            payload.get("input_sample_created_at_monotonic"),
+            payload.get("real_model_loop_selected_at_monotonic"),
+        )
+        context_ms = _elapsed_between_ms(
+            payload.get("real_model_context_started_at_monotonic"),
+            payload.get("real_model_context_finished_at_monotonic"),
+        )
+        queue_to_handler_ms = _elapsed_to_now_ms(payload.get("qt_signal_emit_started_at_monotonic"))
+        post_infer_to_handler_ms = _elapsed_between_ms(
+            payload.get("inference_finished_at_monotonic"),
+            payload.get("control_handler_received_at_monotonic"),
+        )
+        print(
+            "REAL MODEL LATENCY DETAIL: "
+            f"frame={payload.get('frame_id', 'n/a')} "
+            f"sample_wait={_fmt_ms(sample_wait_ms)} "
+            f"context={_fmt_ms(context_ms)} "
+            f"build={_fmt_ms(payload.get('model_build_ms'))} "
+            f"forward={_fmt_ms(payload.get('model_forward_ms'))} "
+            f"vis={_fmt_ms(payload.get('model_visualization_ms'))} "
+            f"post={_fmt_ms(payload.get('model_postprocess_ms'))} "
+            f"predict_total={_fmt_ms(payload.get('model_predict_total_ms'))} "
+            f"emit_to_handler={_fmt_ms(queue_to_handler_ms)} "
+            f"post_infer_to_handler={_fmt_ms(post_infer_to_handler_ms)} "
+            f"convert={_fmt_ms(payload.get('control_conversion_ms'))} "
+            f"goal={_fmt_ms(payload.get('control_goal_lookup_ms'))} "
+            f"bridge={_fmt_ms(payload.get('control_bridge_ms'))}",
+            flush=True,
+        )
+
+    def _log_real_model_schedule_latency(self, payload, started_at, finished_at):
+        period = float(os.environ.get("MITSU_REAL_MODEL_LATENCY_LOG_PERIOD_SEC", "0.25") or 0.25)
+        now = time.monotonic()
+        last = float(getattr(self, "_last_real_model_schedule_latency_log_at", 0.0) or 0.0)
+        if now - last < period:
+            return
+        self._last_real_model_schedule_latency_log_at = now
+        print(
+            "REAL MODEL INTENT QUEUE: "
+            f"frame={payload.get('frame_id', 'n/a')} "
+            f"schedule={(finished_at - started_at) * 1000.0:.1f}ms",
+            flush=True,
+        )
 
     def _log_real_agent_prediction(self, payload):
         now = time.monotonic()
@@ -1549,11 +1793,28 @@ class AppController(QObject):
         except Exception:
             target_speed_text = str(target_speed)
 
+        real_steer_text = ""
+        if payload.get("real_steer_controller"):
+            real_steer_text = (
+                f" real_ctrl={payload.get('real_steer_controller')}"
+                f" aim_wp={payload.get('real_steer_waypoint_index', '-')}"
+                f" aim={_fmt_pair([payload.get('real_steer_aim_x_m', 0.0), payload.get('real_steer_aim_y_m', 0.0)])}"
+                f" curve={float(payload.get('real_steer_curvature_1pm', 0.0) or 0.0):.3f}"
+                f" wheel={float(payload.get('real_steer_front_wheel_angle_deg', 0.0) or 0.0):.1f}deg"
+                f" lead_steer={float(payload.get('lead_waypoint_pid_steer', 0.0) or 0.0):.3f}"
+            )
+
         goal_text = ""
         if goal is not None:
             goal_text = (
+                f" idx=({int(getattr(goal, 'previous_waypoint_index', 0) or 0)},"
+                f"{int(getattr(goal, 'waypoint_index', 0) or 0)},"
+                f"{int(getattr(goal, 'next_waypoint_index', 0) or 0)})"
+                f" control_idx={int(getattr(goal, 'control_waypoint_index', getattr(goal, 'waypoint_index', 0)) or 0)}"
                 f" goal=({_fmt_pair([getattr(goal, 'target_x_m', 0.0), getattr(goal, 'target_y_m', 0.0)])})"
-                f" option={getattr(goal, 'command', '-')}"
+                f" option={getattr(goal, 'command', getattr(goal, 'maneuver', '-'))}"
+                f" xtrack={float(getattr(goal, 'cross_track_error_m', 0.0) or 0.0):.2f}m"
+                f" dist={float(getattr(goal, 'distance_to_target_m', 0.0) or 0.0):.2f}m"
             )
 
         print(
@@ -1564,11 +1825,14 @@ class AppController(QObject):
             f"brk={float(payload.get('brake', 0.0)):.3f} "
             f"target_speed={target_speed_text} "
             f"speed={float(context.get('speed_mps', 0.0)):.2f}m/s "
+            f"pose=({_fmt_pair([getattr(context.get('telemetry'), 'x_m', 0.0), getattr(context.get('telemetry'), 'y_m', 0.0)])}) "
+            f"model_yaw={float(context.get('model_ego_yaw_deg', 0.0) or 0.0):.1f} "
             f"prev={_fmt_pair(context.get('target_point_previous'))} "
             f"target={_fmt_pair(context.get('target_point'))} "
             f"next={_fmt_pair(context.get('target_point_next'))} "
             f"world_target={_fmt_pair(context.get('target_point_world'))}"
             f"{goal_text}"
+            f"{real_steer_text}"
         )
 
     def shutdown(self):
@@ -1741,6 +2005,8 @@ class AppController(QObject):
     def handle_vehicle_control_telemetry(self, telemetry):
         try:
             self.vehicle.speed = float(getattr(telemetry, "speed_kmh", 0.0) or 0.0)
+            self.vehicle.speed_source = str(getattr(telemetry, "speed_source", "none") or "none")
+            self.vehicle.last_speed_rx_monotonic = getattr(telemetry, "last_speed_rx_monotonic", None)
             self.vehicle.angle = int(float(getattr(telemetry, "angle_deg", 0.0) or 0.0))
             self.vehicle.target_angle = int(float(getattr(telemetry, "target_angle_deg", 0.0) or 0.0))
             self.vehicle.accel = int(float(getattr(telemetry, "accel_pct", 0.0) or 0.0))
@@ -1754,6 +2020,14 @@ class AppController(QObject):
                     cameras=True,
                     ai=self.ai_control_requested,
                     vehicle=bool(getattr(telemetry, "connected", False)) and bool(getattr(telemetry, "heartbeat_ok", False)),
+                )
+            if time.monotonic() - float(getattr(self, "_last_real_speed_ui_log_at", 0.0) or 0.0) >= 1.0:
+                self._last_real_speed_ui_log_at = time.monotonic()
+                print(
+                    "REAL SPEED UI: "
+                    f"actual={self.vehicle.speed:.2f}km/h "
+                    f"source={self.vehicle.speed_source}",
+                    flush=True,
                 )
         except Exception as exc:
             print(f"REAL CONTROL: telemetry mapping error: {exc}")
@@ -1838,8 +2112,20 @@ class AppController(QObject):
                             f"lane_policy={lane_policy}, offset={lane_offset}m"
                         )
                     except Exception as route_exc:
-                        print(f"REAL CONTROL: road routing failed, fallback to direct Aв†’B: {route_exc}")
-                        m = CoordinateRoutePlanner().build_from_ab(ABRouteRequest.from_dict(self.real_mission))
+                        message = f"Road routing failed: {route_exc}"
+                        print(f"REAL CONTROL: {message}")
+                        self.real_mission_prepared = False
+                        self.vehicle_control.set_mission(None)
+                        if hasattr(self.view, "set_real_readiness"):
+                            self.view.set_real_readiness(
+                                route=False,
+                                pose=self.real_pose_mode == "dead_reckoning_ab",
+                                cameras=False,
+                                ai=self.ai_control_requested,
+                                vehicle=self.is_connected,
+                            )
+                        self.view.statusBar().showMessage(message)
+                        return
                 elif self.real_mission.get("start") and self.real_mission.get("goal") and CoordinateRoutePlanner is not None:
                     m = CoordinateRoutePlanner().build_from_ab(ABRouteRequest.from_dict(self.real_mission))
                 elif self.real_mission.get("waypoints") and Waypoint is not None:
@@ -1855,6 +2141,31 @@ class AppController(QObject):
                 else:
                     m = Mission.default_test_mission()
                 self.vehicle_control.set_mission(m)
+                try:
+                    telemetry = self.vehicle_control.get_telemetry()
+                    waypoints = list(getattr(m, "waypoints", []) or [])
+                    metadata = dict(getattr(m, "metadata", {}) or {})
+                    if waypoints:
+                        first = waypoints[0]
+                        second = waypoints[1] if len(waypoints) > 1 else first
+                        dx0 = float(first.x_m) - float(getattr(telemetry, "x_m", 0.0))
+                        dy0 = float(first.y_m) - float(getattr(telemetry, "y_m", 0.0))
+                        dx1 = float(second.x_m) - float(getattr(telemetry, "x_m", 0.0))
+                        dy1 = float(second.y_m) - float(getattr(telemetry, "y_m", 0.0))
+                        print(
+                            "REAL CONTROL: mission geometry: "
+                            f"pose=({float(getattr(telemetry, 'x_m', 0.0)):.2f},"
+                            f"{float(getattr(telemetry, 'y_m', 0.0)):.2f},"
+                            f"{float(getattr(telemetry, 'yaw_deg', 0.0)):.1f}) "
+                            f"wp0=({float(first.x_m):.2f},{float(first.y_m):.2f}) "
+                            f"d0=({dx0:.2f},{dy0:.2f}) "
+                            f"wp1=({float(second.x_m):.2f},{float(second.y_m):.2f}) "
+                            f"d1=({dx1:.2f},{dy1:.2f}) "
+                            f"lane_policy={metadata.get('lane_policy', '-')} "
+                            f"lane_offset={metadata.get('lane_offset_m', '-')}"
+                        )
+                except Exception as diag_exc:
+                    print(f"REAL CONTROL: mission geometry log failed: {diag_exc}")
                 if hasattr(self.view, "set_real_mission_summary"):
                     self.view.set_real_mission_summary(m)
             except Exception as exc:

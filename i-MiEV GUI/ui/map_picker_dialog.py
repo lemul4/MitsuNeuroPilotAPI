@@ -169,7 +169,7 @@ def _load_lane_settings() -> dict:
     if offset is None:
         offset = _float_or_none(route.get("lane_offset_m", settings.get("lane_offset_m")))
     if offset is None:
-        offset = 1.7
+        offset = 0.0
     traffic_side = str(os.environ.get("MITSU_TRAFFIC_SIDE") or route.get("traffic_side") or settings.get("traffic_side") or "right")
     return {"lane_offset_m": max(0.0, min(4.0, float(offset))), "traffic_side": traffic_side}
 
@@ -344,7 +344,7 @@ class MapPickerDialog(QDialog):
         goal_json = json.dumps(self.goal_point.to_dict() if self.goal_point else None)
         current_json = json.dumps(self.current_location.to_dict() if self.current_location else None)
         allow_browser_geolocation = "true" if self.allow_browser_geolocation else "false"
-        lane_offset = float(self.lane_settings.get("lane_offset_m", 1.7))
+        lane_offset = float(self.lane_settings.get("lane_offset_m", 0.0))
         traffic_side = json.dumps(str(self.lane_settings.get("traffic_side", "right")))
         bridge_script = "<script src=\"qrc:///qtwebchannel/qwebchannel.js\"></script>" if embedded else ""
         bridge_init = "try { if (typeof qt !== 'undefined' && typeof QWebChannel !== 'undefined' && qt.webChannelTransport) { new QWebChannel(qt.webChannelTransport, function(channel) { bridge = channel.objects.bridge; }); } } catch (e) { console.log('QWebChannel init failed: ' + e.message); }" if embedded else ""

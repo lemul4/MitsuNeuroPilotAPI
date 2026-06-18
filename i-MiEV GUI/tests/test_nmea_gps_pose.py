@@ -108,7 +108,7 @@ class PoseFreshnessTests(unittest.TestCase):
         self.assertEqual(telemetry.pose_source, "nmea0183_gnss")
         self.assertGreater(telemetry.x_m, 5.0)
         self.assertGreater(telemetry.y_m, 10.0)
-        self.assertAlmostEqual(telemetry.yaw_deg, 15.0)
+        self.assertAlmostEqual(telemetry.yaw_deg, 75.0)
 
     def test_nmea_fix_from_another_city_is_not_accepted(self):
         mock = MockVehicleAdapter()

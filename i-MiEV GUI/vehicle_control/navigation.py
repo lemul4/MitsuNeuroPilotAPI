@@ -78,7 +78,7 @@ class ABRouteRequest:
             start_yaw_deg=None if start.get("yaw_deg", d.get("start_yaw_deg")) is None else float(start.get("yaw_deg", d.get("start_yaw_deg"))),
             goal_yaw_deg=None if goal.get("yaw_deg", d.get("goal_yaw_deg")) is None else float(goal.get("yaw_deg", d.get("goal_yaw_deg"))),
             speed_cap_kmh=float(d.get("speed_cap_kmh", 3.0)),
-            spacing_m=float(d.get("spacing_m", 2.0)),
+            spacing_m=float(d.get("route_target_spacing_m", d.get("spacing_m", 2.0))),
             turn_speed_kmh=float(d.get("turn_speed_kmh", 1.2)),
             stop_at_goal=bool(d.get("stop_at_goal", True)),
             hints=hints,
@@ -181,6 +181,7 @@ class CoordinateRoutePlanner:
 @dataclass
 class NavigatorService:
     lookahead_m: float = 3.0
+    target_waypoint_lookahead: int = 8
     waypoint_reached_m: float = 0.8
     goal_reached_m: float = 0.8
     stale_pose_ms: float = 500.0
@@ -199,6 +200,7 @@ class NavigatorService:
 
         wps = list(mission.waypoints)
         self._active_index = max(0, min(self._active_index, len(wps) - 1))
+        self._advance_active_index_by_projection(wps, pose)
 
         while self._active_index < len(wps) - 1:
             current = wps[self._active_index]
@@ -207,9 +209,15 @@ class NavigatorService:
             else:
                 break
 
-        target_idx = self._pick_lookahead_index(wps, pose)
+        current_idx = self._active_index
+        target_idx = current_idx
         target = wps[target_idx]
-        prev = wps[max(0, min(target_idx - 1, len(wps) - 1))]
+        prev_idx = max(0, min(current_idx - 1, len(wps) - 1))
+        prev = wps[prev_idx]
+        next_idx = min(current_idx + 1, len(wps) - 1)
+        next_wp = wps[next_idx]
+        control_idx = self._pick_lookahead_index(wps, pose)
+        control_wp = wps[control_idx]
         final = wps[-1]
 
         target_dist = distance_2d(pose.x_m, pose.y_m, target.x_m, target.y_m)
@@ -223,7 +231,6 @@ class NavigatorService:
         progress = 100.0 * float(target_idx) / max(1.0, float(len(wps) - 1))
 
         current_road_option = target.road_option
-        next_wp = wps[min(target_idx + 1, len(wps) - 1)]
         next_road_option = next_wp.road_option
 
         goal = LocalNavigationGoal(
@@ -240,7 +247,12 @@ class NavigatorService:
             distance_to_goal_m=goal_dist,
             cross_track_error_m=xtrack,
             heading_error_deg=heading_error,
+            previous_waypoint_index=prev_idx,
             waypoint_index=target_idx,
+            next_waypoint_index=next_idx,
+            control_waypoint_index=control_idx,
+            control_x_m=control_wp.x_m,
+            control_y_m=control_wp.y_m,
             maneuver=target.nav_command.value,
             road_option=int(current_road_option),
             road_option_name=road_option_name(current_road_option),
@@ -254,7 +266,54 @@ class NavigatorService:
         self._last_goal = goal
         return goal
 
+    def _advance_active_index_by_projection(self, wps: Sequence[Waypoint], pose: Pose2D) -> None:
+        """Advance along the route even when the car misses waypoint hit radius.
+
+        GNSS poses can be offset from the waypoint polyline by more than
+        waypoint_reached_m. In that case the old radius-only logic could keep
+        targeting an already-passed waypoint behind the vehicle. Projection keeps
+        progress monotonic by finding the closest segment ahead of the current
+        index and moving the active index to that segment.
+        """
+        if len(wps) < 2 or self._active_index >= len(wps) - 1:
+            return
+
+        best_seg = self._active_index
+        best_t = 0.0
+        best_dist2 = float("inf")
+
+        px = float(pose.x_m)
+        py = float(pose.y_m)
+        for idx in range(self._active_index, len(wps) - 1):
+            ax = float(wps[idx].x_m)
+            ay = float(wps[idx].y_m)
+            bx = float(wps[idx + 1].x_m)
+            by = float(wps[idx + 1].y_m)
+            dx = bx - ax
+            dy = by - ay
+            denom = dx * dx + dy * dy
+            if denom <= 1e-9:
+                continue
+            t = ((px - ax) * dx + (py - ay) * dy) / denom
+            t_clamped = clamp(t, 0.0, 1.0)
+            proj_x = ax + dx * t_clamped
+            proj_y = ay + dy * t_clamped
+            dist2 = (px - proj_x) * (px - proj_x) + (py - proj_y) * (py - proj_y)
+            if dist2 < best_dist2:
+                best_dist2 = dist2
+                best_seg = idx
+                best_t = t_clamped
+
+        projected_index = best_seg
+        if best_t >= 0.05:
+            projected_index = min(best_seg + 1, len(wps) - 1)
+        self._active_index = max(self._active_index, projected_index)
+
     def _pick_lookahead_index(self, wps: Sequence[Waypoint], pose: Pose2D) -> int:
+        waypoint_lookahead = int(getattr(self, "target_waypoint_lookahead", 0) or 0)
+        if waypoint_lookahead > 0:
+            return min(self._active_index + waypoint_lookahead - 1, len(wps) - 1)
+
         best_idx = self._active_index
         acc = 0.0
         last_x = pose.x_m

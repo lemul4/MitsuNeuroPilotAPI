@@ -79,7 +79,12 @@ class ControlArbiter:
         target_steering_raw = int(round(steer_norm * steering_gain * self.max_steering_raw))
         target_steering_raw = self._apply_steering_deadband(steer_norm, target_steering_raw)
         target_steering_raw = self._apply_steering_center_offset(target_steering_raw)
+        previous_steering_raw = int(self._last_steering_raw)
         steering_raw = self._limit_steering_rate(target_steering_raw, now)
+        self.last_target_steering_raw = int(target_steering_raw)
+        self.last_steering_raw = int(steering_raw)
+        self.last_steering_raw_delta = int(steering_raw - previous_steering_raw)
+        self.last_steering_rate_limited = int(steering_raw) != int(target_steering_raw)
 
         accel_pct = int(round(throttle_norm * self.max_accel_pct))
         brake_pct = int(round(brake_norm * self.max_brake_pct))

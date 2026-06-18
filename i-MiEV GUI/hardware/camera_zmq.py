@@ -265,19 +265,44 @@ class RealCameraAgentAnalyzerThread(QThread):
                 if self.ai_enabled and ok and self._model_adapter is not None and now - last_predict_at >= 0.05:
                     last_predict_at = now
                     try:
+                        loop_selected_at = time.monotonic()
                         frames = {k: v["frame"] for k, v in latest.items()}
+                        sample_created_at = max(float(v["ts"]) for v in latest.values())
+                        context_started_at = time.monotonic()
                         context_payload = self.context_provider() if callable(self.context_provider) else {}
+                        context_finished_at = time.monotonic()
+                        inference_started_at = context_finished_at
+                        if isinstance(context_payload, dict):
+                            context_payload = dict(context_payload)
+                            context_payload.setdefault("input_sample_created_at_monotonic", sample_created_at)
+                            context_payload.setdefault("inference_started_at_monotonic", inference_started_at)
+                            context_payload.setdefault("real_model_loop_selected_at_monotonic", loop_selected_at)
+                            context_payload.setdefault("real_model_context_started_at_monotonic", context_started_at)
+                            context_payload.setdefault("real_model_context_finished_at_monotonic", context_finished_at)
                         try:
                             prediction = self._model_adapter.predict(frames, context_payload)
                         except TypeError:
                             # Backward compatibility with early adapters that accept only frames.
                             prediction = self._model_adapter.predict(frames)
+                        inference_finished_at = time.monotonic()
                         if prediction:
                             payload = dict(prediction)
                             self._frame_seq += 1
                             payload.setdefault("frame_id", self._frame_seq)
-                            payload.setdefault("timestamp_monotonic", now)
+                            payload.setdefault("timestamp_monotonic", inference_finished_at)
+                            payload.setdefault("input_sample_created_at_monotonic", sample_created_at)
+                            payload.setdefault("real_model_loop_selected_at_monotonic", loop_selected_at)
+                            payload.setdefault("real_model_context_started_at_monotonic", context_started_at)
+                            payload.setdefault("real_model_context_finished_at_monotonic", context_finished_at)
+                            payload.setdefault("inference_started_at_monotonic", inference_started_at)
+                            payload.setdefault("inference_finished_at_monotonic", inference_finished_at)
+                            payload.setdefault(
+                                "inference_duration_ms",
+                                max(0.0, (inference_finished_at - inference_started_at) * 1000.0),
+                            )
+                            payload["qt_signal_emit_started_at_monotonic"] = time.monotonic()
                             self.prediction_ready.emit(payload)
+                            payload["qt_signal_emit_finished_at_monotonic"] = time.monotonic()
                     except Exception as exc:
                         self.analyzer_status_changed.emit(f"ошибка инференса: {exc}")
                         time.sleep(0.2)

@@ -59,6 +59,9 @@ class _CommandSink:
     def write_vehicle_command_now(self, command):
         self.commands.append(command)
 
+    def send_vehicle_command_latest(self, command):
+        self.commands.append(command)
+
 
 class _Packet:
     class _CanData:
@@ -119,8 +122,11 @@ class ComModeAdapterMatrixTests(unittest.IsolatedAsyncioTestCase):
         serial.data_received.emit(_Packet(0x44, [36, 0, 0, 0]))
         self.assertTrue(adapter.get_telemetry().heartbeat_ok)
         self.assertEqual(adapter.get_telemetry().speed_kmh, 36.0)
+        self.assertEqual(adapter.get_telemetry().speed_source, "mcu_telemetry_map:0x0044")
         self.assertEqual(adapter.get_diagnostics()["rx_packet_count"], 1)
         self.assertEqual(adapter.get_diagnostics()["mapped_packet_count"], 1)
+        self.assertEqual(adapter.get_diagnostics()["speed_kmh"], 36.0)
+        self.assertEqual(adapter.get_diagnostics()["speed_source"], "mcu_telemetry_map:0x0044")
 
         serial.connection_status.emit(False, "closed")
         self.assertFalse(adapter.get_telemetry().connected)

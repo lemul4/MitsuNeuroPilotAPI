@@ -94,4 +94,8 @@ class RealAgentBridge:
             nav_maneuver=maneuver,
             nav_target_distance_m=target_distance,
             valid_for_ms=self.default_valid_for_ms,
+            metadata={
+                **dict(prediction.metadata or {}),
+                "control_source": "camera_model",
+            },
         )

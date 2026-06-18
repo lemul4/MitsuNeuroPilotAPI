@@ -207,6 +207,43 @@ def _select_device() -> "torch.device":
     return torch.device(requested)
 
 
+def _apply_torch_inference_backend_settings(device: "torch.device") -> None:
+    if torch is None or device.type != "cuda":
+        return
+    # Match lead.inference.sensor_agent runtime settings used by simulation.
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.allow_tf32 = True
+
+
+def _apply_real_precision_override(training_payload: Dict[str, Any]) -> None:
+    override = os.environ.get("MITSU_REAL_MODEL_PRECISION", "").strip().lower()
+    if not override:
+        return
+    if override in {"fp32", "float32"}:
+        training_payload["use_mixed_precision_training"] = False
+    elif override in {"bf16", "bfloat16"}:
+        training_payload["use_mixed_precision_training"] = True
+        training_payload["gpu_name"] = "rtx3060"
+    elif override in {"fp16", "float16", "half"}:
+        print(
+            "REAL MODEL TIMING: MITSU_REAL_MODEL_PRECISION=fp16 is not supported by "
+            "TrainingConfig.torch_float_type here; use bf16 or fp32",
+            flush=True,
+        )
+    else:
+        print(f"REAL MODEL TIMING: unknown MITSU_REAL_MODEL_PRECISION={override!r}; ignoring", flush=True)
+
+
+def _torch_dtype_name(dtype: Any) -> str:
+    return str(dtype).replace("torch.", "")
+
+
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -441,7 +478,16 @@ class LeadModel0011RealPortAdapter:
         self.root = root
         step_start = time.perf_counter()
         self.device = _select_device()
-        self._log_timing("select_device", step_start, device=self.device)
+        _apply_torch_inference_backend_settings(self.device)
+        self._log_timing(
+            "select_device",
+            step_start,
+            device=self.device,
+            cuda_name=torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "cpu",
+            allow_tf32_matmul=getattr(torch.backends.cuda.matmul, "allow_tf32", None),
+            cudnn_benchmark=getattr(torch.backends.cudnn, "benchmark", None),
+            cudnn_allow_tf32=getattr(torch.backends.cudnn, "allow_tf32", None),
+        )
         self.builder = builder or RealModel0011InputBuilder()
 
         step_start = time.perf_counter()
@@ -491,22 +537,19 @@ class LeadModel0011RealPortAdapter:
         # Real-COM preview favors compatibility over throughput. Some Windows
         # Torch builds cannot convert or run parts of this model in bfloat16.
         step_start = time.perf_counter()
-        training_payload["compile"] = False
-        training_payload["jit_compile"] = False
-        training_payload["jit_compile_warmup_steps"] = 0
-        training_payload["use_mixed_precision_training"] = False
-        training_payload["channel_last"] = False
-        training_payload["additional_metrics_dtype"] = "float32"
-        training_payload["visualize_lidar_bev"] = False
+        training_payload["compile"] = True
+        training_payload["jit_compile"] = True
+        training_payload["jit_compile_warmup_steps"] = 1
+        training_payload["use_mixed_precision_training"] = True
+        training_payload["channel_last"] = True
+        training_payload["additional_metrics_dtype"] = "float16"
+        _apply_real_precision_override(training_payload)
 
-        if self.device.type == "cpu":
-            training_payload["inference_device"] = "cpu"
-        else:
-            training_payload["inference_device"] = str(self.device)
         self._log_timing(
             "apply_real_runtime_overrides",
             step_start,
             inference_device=training_payload["inference_device"],
+            precision=os.environ.get("MITSU_REAL_MODEL_PRECISION", "config"),
         )
 
         step_start = time.perf_counter()
@@ -517,12 +560,24 @@ class LeadModel0011RealPortAdapter:
             "build_training_config",
             step_start,
             image=f"{self.builder.image_width}x{self.builder.image_height}",
+            gpu_name=getattr(self.training_config, "gpu_name", "-"),
+            mixed_precision=getattr(self.training_config, "use_mixed_precision_training", False),
+            dtype=_torch_dtype_name(getattr(self.training_config, "torch_float_type", "-")),
+            channel_last=getattr(self.training_config, "channel_last", False),
+            jit_compile=getattr(self.training_config, "jit_compile", False),
+            compile=getattr(self.training_config, "compile", False),
         )
 
         step_start = time.perf_counter()
         self.closed_loop_config = ClosedLoopConfig()
+        pid_waypoint = int(os.environ.get("MITSU_REAL_MODEL_PID_WAYPOINT_INDEX", "2") or 2)
+        self.closed_loop_config.waypoint_pid_forced_aim_index = max(0, pid_waypoint - 1)
         self.expert_config = ExpertConfig()
-        self._log_timing("build_control_configs", step_start)
+        self._log_timing(
+            "build_control_configs",
+            step_start,
+            waypoint_pid_index=pid_waypoint,
+        )
 
         step_start = time.perf_counter()
         self.inference = ClosedLoopInference(
@@ -568,6 +623,61 @@ class LeadModel0011RealPortAdapter:
         if np is not None:
             value = np.asarray(value).reshape(-1)[0]
         return float(value)
+
+    @staticmethod
+    def _to_numpy(value: Any) -> Optional["np.ndarray"]:
+        if value is None or np is None:
+            return None
+        if hasattr(value, "detach"):
+            value = value.detach().float().cpu().numpy()
+        try:
+            return np.asarray(value, dtype=np.float32)
+        except Exception:
+            return None
+
+    def _real_steer_from_model_waypoints(self, prediction: Any) -> tuple[Optional[float], Dict[str, Any]]:
+        """Convert model-predicted ego waypoints to a real-car steering command.
+
+        This is intentionally separate from LEAD's CARLA waypoint PID. The model
+        still provides the trajectory; the real vehicle controller converts the
+        selected predicted waypoint into curvature/steering angle.
+        """
+        mode = os.environ.get("MITSU_REAL_STEERING_CONTROLLER", "pure_pursuit").strip().lower()
+        if mode in {"", "lead", "carla", "sim", "simulation"}:
+            return None, {"real_steer_controller": "lead_waypoint_pid"}
+        waypoints = self._to_numpy(getattr(prediction, "pred_future_waypoints", None))
+        if waypoints is None:
+            return None, {"real_steer_controller": mode, "real_steer_error": "no_pred_future_waypoints"}
+        waypoints = waypoints.reshape(-1, 2)
+        if waypoints.shape[0] <= 0:
+            return None, {"real_steer_controller": mode, "real_steer_error": "empty_pred_future_waypoints"}
+
+        waypoint_index_1based = int(os.environ.get("MITSU_REAL_MODEL_PID_WAYPOINT_INDEX", "2") or 2)
+        aim_index = max(0, min(waypoints.shape[0] - 1, waypoint_index_1based - 1))
+        aim_x = float(waypoints[aim_index, 0])
+        aim_y = float(waypoints[aim_index, 1])
+        ld2 = max(1e-6, aim_x * aim_x + aim_y * aim_y)
+        curvature = 2.0 * aim_y / ld2
+
+        wheelbase_m = float(os.environ.get("MITSU_IMIEV_WHEELBASE_M", "2.55") or 2.55)
+        front_wheel_angle_rad = math.atan(wheelbase_m * curvature)
+        front_wheel_angle_deg = math.degrees(front_wheel_angle_rad)
+        norm_angle_deg = float(os.environ.get("MITSU_REAL_STEER_NORM_WHEEL_ANGLE_DEG", "35.0") or 35.0)
+        sign = float(os.environ.get("MITSU_REAL_STEERING_SIGN", "1.0") or 1.0)
+        steer_norm = sign * front_wheel_angle_deg / max(1e-6, abs(norm_angle_deg))
+        steer_norm = max(-1.0, min(1.0, steer_norm))
+
+        return steer_norm, {
+            "real_steer_controller": "pure_pursuit",
+            "real_steer_waypoint_index": int(aim_index + 1),
+            "real_steer_aim_x_m": aim_x,
+            "real_steer_aim_y_m": aim_y,
+            "real_steer_lookahead_m": math.sqrt(ld2),
+            "real_steer_curvature_1pm": curvature,
+            "real_steer_front_wheel_angle_deg": front_wheel_angle_deg,
+            "real_steer_norm_angle_deg": norm_angle_deg,
+            "real_steer_wheelbase_m": wheelbase_m,
+        }
 
     def _visualization_enabled(self) -> bool:
         if getattr(self, "visualizer_cls", None) is None:
@@ -769,15 +879,32 @@ class LeadModel0011RealPortAdapter:
 
     def predict(self, frames: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         context = dict(context or {})
+        predict_started_at = time.monotonic()
+        build_started_at = predict_started_at
         data = self.builder.build_torch(frames, context, self.device)
+        build_finished_at = time.monotonic()
 
+        forward_started_at = time.monotonic()
+        if str(self.device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize(self.device)
+            forward_started_at = time.monotonic()
         with torch.inference_mode():
             pred = self.inference.forward(data)
+        if str(self.device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize(self.device)
+        forward_finished_at = time.monotonic()
 
         self._frame_id += 1
+        visualization_started_at = time.monotonic()
         self._maybe_save_visualization(data, pred)
+        visualization_finished_at = time.monotonic()
 
-        steer = max(-1.0, min(1.0, self._to_float(pred.steer)))
+        postprocess_started_at = time.monotonic()
+        lead_steer = max(-1.0, min(1.0, self._to_float(pred.steer)))
+        steer = lead_steer
+        real_steer, real_steer_metadata = self._real_steer_from_model_waypoints(pred)
+        if real_steer is not None:
+            steer = float(real_steer)
         throttle = max(0.0, min(1.0, self._to_float(pred.throttle)))
         brake = max(0.0, min(1.0, self._to_float(pred.brake)))
 
@@ -785,24 +912,49 @@ class LeadModel0011RealPortAdapter:
             "source": "model_0011_closed_loop",
             "checkpoint": self.checkpoint,
             "device": str(self.device),
+            "lead_waypoint_pid_steer": float(lead_steer),
+            "model_waypoints_spacing_m": float(context.get("model_waypoints_spacing_m", 3.0) or 3.0),
+            "route_target_spacing_m": float(context.get("route_target_spacing_m", 2.0) or 2.0),
+            "target_point_previous_waypoint_index": context.get("target_point_previous_waypoint_index"),
+            "target_point_waypoint_index": context.get("target_point_waypoint_index"),
+            "target_point_next_waypoint_index": context.get("target_point_next_waypoint_index"),
+            "target_point_control_waypoint_index": context.get("target_point_control_waypoint_index"),
+            **real_steer_metadata,
         }
 
         if getattr(pred, "pred_target_speed_scalar", None) is not None:
             metadata["pred_target_speed_mps"] = self._to_float(pred.pred_target_speed_scalar)
+        if getattr(pred, "waypoints_steer", None) is not None:
+            metadata["waypoints_steer"] = float(pred.waypoints_steer)
         if getattr(pred, "route_steer", None) is not None:
             metadata["route_steer"] = float(pred.route_steer)
         if getattr(pred, "target_speed_throttle", None) is not None:
             metadata["target_speed_throttle"] = float(pred.target_speed_throttle)
         if getattr(pred, "target_speed_brake", None) is not None:
             metadata["target_speed_brake"] = float(pred.target_speed_brake)
+        postprocess_finished_at = time.monotonic()
 
         return {
             "steer": steer,
             "throttle": throttle,
             "brake": brake,
             "confidence": 1.0,
-            "timestamp_monotonic": time.monotonic(),
+            "timestamp_monotonic": postprocess_finished_at,
             "frame_id": self._frame_id,
+            "model_predict_started_at_monotonic": predict_started_at,
+            "model_build_started_at_monotonic": build_started_at,
+            "model_build_finished_at_monotonic": build_finished_at,
+            "model_forward_started_at_monotonic": forward_started_at,
+            "model_forward_finished_at_monotonic": forward_finished_at,
+            "model_visualization_started_at_monotonic": visualization_started_at,
+            "model_visualization_finished_at_monotonic": visualization_finished_at,
+            "model_postprocess_started_at_monotonic": postprocess_started_at,
+            "model_postprocess_finished_at_monotonic": postprocess_finished_at,
+            "model_build_ms": max(0.0, (build_finished_at - build_started_at) * 1000.0),
+            "model_forward_ms": max(0.0, (forward_finished_at - forward_started_at) * 1000.0),
+            "model_visualization_ms": max(0.0, (visualization_finished_at - visualization_started_at) * 1000.0),
+            "model_postprocess_ms": max(0.0, (postprocess_finished_at - postprocess_started_at) * 1000.0),
+            "model_predict_total_ms": max(0.0, (postprocess_finished_at - predict_started_at) * 1000.0),
             **metadata,
         }
 

@@ -91,9 +91,9 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
                     f"dry_run={self.safety_config.dry_run}"
                 )
             command_to_send = VehicleCommand.safe_stop(seq=command.seq, brake_pct=max(25, int(command.brake_pct)), reason="host_dry_run_guard")
-        self.gateway.write_vehicle_command_now(command_to_send)
+        self.gateway.send_vehicle_command_latest(command_to_send)
         self.telemetry.requested_gear = command_to_send.gear_request or self.telemetry.requested_gear
-        self.telemetry.target_angle_deg = float(command.steering_raw) / 100.0 * 630.0
+        self.telemetry.target_angle_deg = float(command_to_send.steering_raw) / 100.0 * 630.0
         self.telemetry.accel_pct = float(command_to_send.accel_pct)
         self.telemetry.brake_pct = float(command_to_send.brake_pct)
 
@@ -131,6 +131,7 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
                     print(
                         f"[{self._ts()}] CAN RX: "
                         f"id=0x{can_id:04X} data={values} mapped={mapped} "
+                        f"speed={self.telemetry.speed_kmh:.2f}km/h "
                         f"steer={self.telemetry.angle_deg:.1f} "
                         f"accel={self.telemetry.accel_pct:.0f} "
                         f"brake={self.telemetry.brake_pct:.0f}"
@@ -144,7 +145,7 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
     def _rx_debug_enabled(can_id: int) -> bool:
         if os.environ.get("MITSU_CAN_RX_DEBUG", "").strip().lower() not in {"1", "true", "yes", "on"}:
             return False
-        return int(can_id) in {0x0001, 0x0017, 0x0018, 0x0037, 0x0038}
+        return int(can_id) in {0x0001, 0x0003, 0x0017, 0x0018, 0x0037, 0x0038}
 
     def get_diagnostics(self) -> Dict[str, object]:
         return {
@@ -153,6 +154,8 @@ class RealSerialVehicleAdapter(BaseVehicleAdapter):
             "rx_packet_count": int(self._rx_packet_count),
             "mapped_packet_count": int(self._mapped_packet_count),
             "last_packet_can_id": self._last_packet_can_id,
+            "speed_kmh": float(getattr(self.telemetry, "speed_kmh", 0.0) or 0.0),
+            "speed_source": str(getattr(self.telemetry, "speed_source", "none") or "none"),
         }
 
 

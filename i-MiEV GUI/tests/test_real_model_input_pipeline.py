@@ -1,7 +1,9 @@
 import time
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -34,6 +36,7 @@ class RealModelInputPipelineTests(unittest.TestCase):
         mock = MockVehicleAdapter()
         service = VehicleControlService(VehicleAdapterFactory(real_adapter=None, mock_adapter=mock), ControlArbiter())
         service.adapter = mock
+        service.navigator.target_waypoint_lookahead = 0
         mission = Mission(
             mission_id="real_model_input",
             name="Real model input",
@@ -85,6 +88,79 @@ class RealModelInputPipelineTests(unittest.TestCase):
         self.assertIn("command_one_hot", context)
         self.assertIn("next_command_one_hot", context)
 
+    def test_context_world_targets_are_previous_current_next_waypoints(self):
+        controller = self._controller_with_service()
+        mission = Mission(
+            mission_id="target_triplet",
+            name="Target triplet",
+            speed_cap_kmh=3.0,
+            waypoints=(
+                Waypoint(0.0, 0.0, 0.0, 3.0, "start", "start"),
+                Waypoint(2.0, 0.0, 0.0, 3.0, "lane_follow", "straight"),
+                Waypoint(4.0, 0.0, 0.0, 3.0, "lane_follow", "straight"),
+                Waypoint(6.0, 0.0, 0.0, 0.0, "stop", "stop"),
+            ),
+        )
+        controller.vehicle_control.set_mission(mission)
+        controller.vehicle_control.submit_pose(Pose2D(0.0, 0.0, 0.0, True, "dead_reckoning_ab_no_gps"))
+        controller.vehicle_control.update_navigation_preview()
+
+        context = controller._build_real_agent_context()
+
+        self.assertEqual(context["target_point_previous_world"], [0.0, 0.0])
+        self.assertEqual(context["target_point_world"], [2.0, 0.0])
+        self.assertEqual(context["target_point_next_world"], [4.0, 0.0])
+        self.assertEqual(context["target_point_previous_ego"], [0.0, 0.0])
+        self.assertEqual(context["target_point_ego"], [2.0, 0.0])
+        self.assertEqual(context["target_point_next_ego"], [4.0, 0.0])
+
+    def test_context_default_route_target_triplet_uses_current_route_points(self):
+        controller = self._controller_with_service()
+        controller.vehicle_control.navigator.target_waypoint_lookahead = 8
+        mission = Mission(
+            mission_id="target_triplet_eighth",
+            name="Target triplet eighth",
+            speed_cap_kmh=3.0,
+            waypoints=tuple(
+                Waypoint(float(idx), 0.0, 0.0, 3.0, "lane_follow", "straight")
+                for idx in range(12)
+            ),
+        )
+        controller.vehicle_control.set_mission(mission)
+        controller.vehicle_control.submit_pose(Pose2D(0.0, 0.0, 0.0, True, "dead_reckoning_ab_no_gps"))
+        controller.vehicle_control.update_navigation_preview()
+
+        context = controller._build_real_agent_context()
+
+        self.assertEqual(context["target_point_previous_waypoint_index"], 0)
+        self.assertEqual(context["target_point_waypoint_index"], 1)
+        self.assertEqual(context["target_point_next_waypoint_index"], 2)
+        self.assertEqual(context["target_point_previous_world"], [0.0, 0.0])
+        self.assertEqual(context["target_point_world"], [1.0, 0.0])
+        self.assertEqual(context["target_point_next_world"], [2.0, 0.0])
+
+    def test_nmea_route_heading_keeps_straight_route_in_front_of_model(self):
+        controller = self._controller_with_service()
+        mission = Mission(
+            mission_id="nmea_straight_route",
+            name="NMEA straight route",
+            speed_cap_kmh=3.0,
+            waypoints=(
+                Waypoint(0.0, 0.0, 90.0, 3.0, "start", "start"),
+                Waypoint(0.0, 5.0, 90.0, 3.0, "lane_follow", "straight"),
+                Waypoint(0.0, 10.0, 90.0, 0.0, "stop", "stop"),
+            ),
+        )
+        controller.vehicle_control.set_mission(mission)
+        controller.vehicle_control.submit_pose(Pose2D(0.0, 0.0, 0.0, True, "nmea0183_gnss"))
+        controller.vehicle_control.update_navigation_preview()
+
+        context = controller._build_real_agent_context()
+
+        self.assertGreater(context["target_point_ego"][0], 0.0)
+        self.assertAlmostEqual(context["target_point_ego"][1], 0.0, places=6)
+        self.assertAlmostEqual(context["model_ego_yaw_deg"], 90.0, places=6)
+
     def test_direct_model_preview_without_active_control_does_not_predict(self):
         controller = self._controller_with_service()
         controller.control_active = False
@@ -114,6 +190,35 @@ class RealModelInputPipelineTests(unittest.TestCase):
         self.assertEqual(context["pose_source"], "dead_reckoning_ab_no_gps")
         self.assertTrue(hasattr(controller, "_last_prediction_payload"))
         self.assertEqual(controller._last_prediction_payload["input_sample_seq"], 1)
+        self.assertIn("inference_started_at_monotonic", controller._last_prediction_payload)
+        self.assertIn("inference_finished_at_monotonic", controller._last_prediction_payload)
+        self.assertIn("inference_duration_ms", controller._last_prediction_payload)
+
+    def test_prediction_to_control_latency_is_logged(self):
+        controller = self._controller_with_service()
+        controller.runtime_mode = "carla"
+        controller._last_real_model_latency_log_at = 0.0
+        payload = {
+            "steer": 0.1,
+            "throttle": 0.0,
+            "brake": 0.0,
+            "confidence": 1.0,
+            "timestamp_monotonic": time.monotonic(),
+            "frame_id": 42,
+            "input_sample_seq": 7,
+            "input_sample_created_at_monotonic": time.monotonic() - 0.2,
+            "inference_started_at_monotonic": time.monotonic() - 0.1,
+            "inference_finished_at_monotonic": time.monotonic() - 0.02,
+            "inference_duration_ms": 80.0,
+        }
+        controller._schedule_latest_real_agent_intent = lambda intent: setattr(controller, "_last_intent", intent)
+
+        with patch("main.print") as mocked_print:
+            main.AppController.handle_real_agent_prediction(controller, payload)
+
+        printed = " ".join(str(call.args[0]) for call in mocked_print.call_args_list if call.args)
+        self.assertIn("REAL MODEL LATENCY", printed)
+        self.assertTrue(hasattr(controller, "_last_intent"))
 
     def test_direct_model_prediction_does_not_repeat_without_new_sample(self):
         controller = self._controller_with_service()
@@ -181,6 +286,26 @@ class RealModelInputPipelineTests(unittest.TestCase):
                 {"input_sample_created_at_monotonic": 123.456789},
             )
             self.assertIn("123.456789", path.read_text(encoding="utf-8"))
+
+    def test_real_steering_uses_second_model_waypoint_by_default(self):
+        adapter = LeadModel0011RealPortAdapter.__new__(LeadModel0011RealPortAdapter)
+        pred = SimpleNamespace(
+            pred_future_waypoints=np.array(
+                [
+                    [1.0, 0.1],
+                    [2.0, 0.2],
+                    [3.0, 3.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+
+        with patch.dict("os.environ", {}, clear=False):
+            _steer, metadata = adapter._real_steer_from_model_waypoints(pred)
+
+        self.assertEqual(metadata["real_steer_waypoint_index"], 2)
+        self.assertAlmostEqual(metadata["real_steer_aim_x_m"], 2.0)
+        self.assertAlmostEqual(metadata["real_steer_aim_y_m"], 0.2)
 
 
 if __name__ == "__main__":

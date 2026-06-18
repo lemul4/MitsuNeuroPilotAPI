@@ -10,7 +10,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 from .geo import GeoPoint, GeoReference, latlon_to_local_m, local_m_to_latlon
 from .models import Mission, NavCommand, Waypoint
-from .navigation import distance_2d, heading_deg, wrap_deg
+from .navigation import distance_2d, heading_deg
 
 
 @dataclass(frozen=True)
@@ -25,8 +25,8 @@ class RoadRouteRequest:
     provider: str = "osrm"
     osrm_base_url: str = "https://router.project-osrm.org"
     timeout_sec: float = 4.0
-    lane_policy: str = "right_side"
-    lane_offset_m: float = 1.7
+    lane_policy: str = "centerline"
+    lane_offset_m: float = 0.0
     traffic_side: str = "right"
 
     @classmethod
@@ -43,13 +43,13 @@ class RoadRouteRequest:
             start=GeoPoint.from_dict(start_geo),
             goal=GeoPoint.from_dict(goal_geo),
             speed_cap_kmh=float(d.get("speed_cap_kmh", 3.0)),
-            spacing_m=float(d.get("spacing_m", 2.0)),
+            spacing_m=float(d.get("route_target_spacing_m", d.get("spacing_m", 2.0))),
             turn_speed_kmh=float(d.get("turn_speed_kmh", min(1.2, float(d.get("speed_cap_kmh", 3.0))))),
             provider=str(metadata.get("routing_provider") or d.get("routing_provider") or "osrm"),
             osrm_base_url=str(metadata.get("osrm_base_url") or d.get("osrm_base_url") or "https://router.project-osrm.org"),
             timeout_sec=float(metadata.get("routing_timeout_sec", d.get("routing_timeout_sec", 4.0))),
-            lane_policy=str(metadata.get("lane_policy", d.get("lane_policy", "right_side"))),
-            lane_offset_m=float(metadata.get("lane_offset_m", d.get("lane_offset_m", 1.7))),
+            lane_policy=str(metadata.get("lane_policy", d.get("lane_policy", "centerline"))),
+            lane_offset_m=float(metadata.get("lane_offset_m", d.get("lane_offset_m", 0.0))),
             traffic_side=str(metadata.get("traffic_side", d.get("traffic_side", "right"))),
         )
 
@@ -245,11 +245,5 @@ class OsrmRoadRouteProvider:
                 yaw = 0.0
             command = NavCommand.STRAIGHT.value if idx > 0 else NavCommand.START.value
             speed = float(speed_cap_kmh)
-            if 0 < idx < len(dense) - 1:
-                incoming = heading_deg(dense[idx - 1][0], dense[idx - 1][1], x, y)
-                outgoing = heading_deg(x, y, dense[idx + 1][0], dense[idx + 1][1])
-                delta = wrap_deg(outgoing - incoming)
-                if abs(delta) >= 28.0:
-                    command = NavCommand.TURN_LEFT.value if delta > 0 else NavCommand.TURN_RIGHT.value
             waypoints.append(Waypoint(x, y, yaw, speed, command, command, 0.0, {"route_source": "road", "trajectory": "control_side"}))
         return waypoints

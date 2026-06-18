@@ -168,12 +168,20 @@ class ClosedLoopInference(OpenLoopInference):
             else:
                 aim_distance = self.config_closed_loop.aim_distance_fast
 
-        # We follow the waypoint that is at least a certain distance away
-        aim_index = waypoints.shape[0] - 1
-        for index, predicted_waypoint in enumerate(waypoints):
-            if np.linalg.norm(predicted_waypoint) >= aim_distance:
-                aim_index = index
-                break
+        forced_aim_index = getattr(
+            self.config_closed_loop,
+            "waypoint_pid_forced_aim_index",
+            None,
+        )
+        if forced_aim_index is not None:
+            aim_index = int(np.clip(int(forced_aim_index), 0, waypoints.shape[0] - 1))
+        else:
+            # We follow the waypoint that is at least a certain distance away
+            aim_index = waypoints.shape[0] - 1
+            for index, predicted_waypoint in enumerate(waypoints):
+                if np.linalg.norm(predicted_waypoint) >= aim_distance:
+                    aim_index = index
+                    break
 
         aim = waypoints[aim_index]
         angle = np.degrees(np.arctan2(aim[1], aim[0])) / 90.0

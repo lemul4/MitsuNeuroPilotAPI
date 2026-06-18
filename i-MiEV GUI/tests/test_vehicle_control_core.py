@@ -15,6 +15,8 @@ class DummyGateway:
         self.commands = []
     def write_vehicle_command_now(self, command):
         self.commands.append(command)
+    def send_vehicle_command_latest(self, command):
+        self.commands.append(command)
 
 
 class _StatusBar:
@@ -123,6 +125,36 @@ class VehicleControlTests(unittest.IsolatedAsyncioTestCase):
         command = arbiter.build_command(ControlIntent(steer_norm=-0.059, confidence=1.0, prediction_age_ms=0.0))
 
         self.assertEqual(command.steering_raw, -1)
+        self.assertTrue(arbiter.last_steering_rate_limited)
+        self.assertEqual(arbiter.last_target_steering_raw, -64)
+
+    async def test_safety_config_loads_steering_rate_limit(self):
+        from vehicle_control.safety_config import RealVehicleSafetyConfig
+
+        cfg = RealVehicleSafetyConfig.from_dict(
+            {
+                "max_steering_raw": 84,
+                "max_steering_rate_raw_per_sec": 180.0,
+                "steering_output_gain": 3.0,
+            }
+        )
+        arbiter = ControlArbiter.from_safety_config(cfg)
+
+        self.assertEqual(arbiter.max_steering_raw, 84)
+        self.assertAlmostEqual(arbiter.max_steering_rate_raw_per_sec, 180.0)
+
+    async def test_enabled_real_vehicle_profile_uses_full_steering_authority(self):
+        import json
+        from pathlib import Path
+        from vehicle_control.safety_config import RealVehicleSafetyConfig
+
+        cfg_path = Path(__file__).resolve().parents[1] / "config" / "real_vehicle_safety.json"
+        cfg = RealVehicleSafetyConfig.from_dict(json.loads(cfg_path.read_text(encoding="utf-8")))
+        arbiter = ControlArbiter.from_safety_config(cfg)
+
+        self.assertEqual(arbiter.max_steering_raw, 100)
+        self.assertAlmostEqual(arbiter.max_steering_rate_raw_per_sec, 300.0)
+        self.assertEqual(arbiter.min_effective_steering_raw, 72)
 
     async def test_navigation_uses_waypoint_speed_without_mission_cap(self):
         mission = Mission(

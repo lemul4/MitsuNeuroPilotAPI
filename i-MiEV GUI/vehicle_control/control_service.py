@@ -40,6 +40,7 @@ from .arbiter import ControlArbiter
 from .adapters import VehicleAdapterFactory, VehicleAdapterError
 from .navigation import NavigatorService
 from .pid import WaypointPIDController
+from .calibration_logger import RealCalibrationRecorder
 
 
 class VehicleControlService(QObject):
@@ -94,6 +95,9 @@ class VehicleControlService(QObject):
         self._manual_brake_pct = 0.0
         self.pose_stale_ms = float(os.environ.get("MITSU_REAL_POSE_STALE_MS", "1500"))
         self.navigator.stale_pose_ms = self.pose_stale_ms
+        self.calibration_recorder = RealCalibrationRecorder()
+        if self.calibration_recorder.enabled:
+            self._log(f"Real calibration logging: {self.calibration_recorder.run_dir}")
 
     def clear_external_agent_state(self, reason: str = "clear_external_agent_state") -> None:
         self._last_external_intent = None
@@ -721,6 +725,16 @@ class VehicleControlService(QObject):
                     source = "camera_model"
 
             if intent is None:
+                descriptor_kind = getattr(getattr(self, "descriptor", None), "kind", None)
+                fallback_setting = os.environ.get("MITSU_REAL_ALLOW_ROUTE_PID_FALLBACK", "1").strip().lower()
+                fallback_allowed = fallback_setting not in {"0", "false", "no", "off"}
+                if self.external_agent_enabled and descriptor_kind == DeviceKind.REAL_SERIAL and not fallback_allowed:
+                    await self._send_ai_authority_hold("model_intent_missing", brake_pct=35)
+                    if time.monotonic() - self._last_autonomy_log_at > 1.0:
+                        self._last_autonomy_log_at = time.monotonic()
+                        self._log("Autonomy hold: camera model intent missing/stale; route PID fallback disabled")
+                    await asyncio.sleep(period)
+                    continue
                 # Fallback path for dry-run and initial real-car testing. It keeps
                 # the car following the validated route even when the neural camera
                 # adapter is not configured yet.
@@ -730,8 +744,15 @@ class VehicleControlService(QObject):
             if time.monotonic() - self._last_autonomy_log_at > float(self.nav_log_interval_sec):
                 self._last_autonomy_log_at = time.monotonic()
                 self._log(
-                    f"NAV[{source}]: wp={goal.waypoint_index} {goal.maneuver} "
+                    f"NAV[{source}]: active_wp={getattr(self.navigator, '_active_index', -1)} "
+                    f"lookahead_wp={getattr(self.navigator, 'target_waypoint_lookahead', 0)} "
+                    f"triplet=({goal.previous_waypoint_index},{goal.waypoint_index},{goal.next_waypoint_index}) "
+                    f"control_wp={getattr(goal, 'control_waypoint_index', goal.waypoint_index)} "
+                    f"target_wp={goal.waypoint_index} {goal.maneuver} "
                     f"target=({goal.target_x_m:.1f},{goal.target_y_m:.1f}) "
+                    f"next=({goal.next_x_m:.1f},{goal.next_y_m:.1f}) "
+                    f"heading_err={goal.heading_error_deg:.1f}deg xtrack={goal.cross_track_error_m:.2f}m "
+                    f"cmd_steer={intent.steer_norm:.3f} "
                     f"dist={goal.distance_to_target_m:.1f}m desired={goal.desired_speed_kmh:.1f}km/h "
                     f"actual={telemetry.speed_kmh:.2f}km/h cmd_thr={intent.throttle_norm:.2f} cmd_brk={intent.brake_norm:.2f}"
                 )
@@ -761,12 +782,39 @@ class VehicleControlService(QObject):
             return
         telemetry = self.get_telemetry()
         command = self.arbiter.build_command(intent, telemetry=telemetry, gear=Gear.D, active=True)
+        descriptor_kind = getattr(getattr(self, "descriptor", None), "kind", None)
+        is_real_serial = descriptor_kind == DeviceKind.REAL_SERIAL
+        log_mock = os.environ.get("MITSU_REAL_CALIBRATION_LOG_MOCK", "").strip().lower() in {"1", "true", "yes", "on"}
+        if is_real_serial or log_mock:
+            try:
+                self.calibration_recorder.record_control_event(
+                    source="ai_intent",
+                    intent=intent,
+                    command=command,
+                    telemetry=telemetry,
+                    goal=self._last_goal,
+                    arbiter=self.arbiter,
+                    vehicle={
+                        "descriptor_kind": getattr(descriptor_kind, "value", str(descriptor_kind)),
+                        "descriptor_port": getattr(getattr(self, "descriptor", None), "port", None),
+                        "state": getattr(self.state_machine.state, "value", str(self.state_machine.state)),
+                        "ai_authority_confirmed": bool(self.ai_authority_confirmed),
+                    },
+                )
+            except Exception as exc:
+                if time.monotonic() - getattr(self, "_last_calibration_log_error_at", 0.0) > 5.0:
+                    self._last_calibration_log_error_at = time.monotonic()
+                    self._log(f"Real calibration logging failed: {exc}")
         if time.monotonic() - getattr(self, "_last_ai_command_log_at", 0.0) > 0.25:
             self._last_ai_command_log_at = time.monotonic()
             self._log(
                 "AI COMMAND: "
+                f"source={str((getattr(intent, 'metadata', {}) or {}).get('control_source', 'unknown'))} "
                 f"steer_norm={float(getattr(intent, 'steer_norm', 0.0) or 0.0):.3f} "
+                f"target_raw={int(getattr(self.arbiter, 'last_target_steering_raw', getattr(command, 'steering_raw', 0)) or 0)} "
                 f"steering_raw={int(getattr(command, 'steering_raw', 0) or 0)} "
+                f"raw_delta={int(getattr(self.arbiter, 'last_steering_raw_delta', 0) or 0)} "
+                f"rate_limited={bool(getattr(self.arbiter, 'last_steering_rate_limited', False))} "
                 f"accel={int(getattr(command, 'accel_pct', 0) or 0)} "
                 f"brake={int(getattr(command, 'brake_pct', 0) or 0)} "
                 f"active={bool(getattr(command, 'active', False))}"

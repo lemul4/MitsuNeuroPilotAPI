@@ -36,7 +36,7 @@ class RoadOptionBridgeTests(unittest.TestCase):
                 Waypoint(7, 4, 90, 0.0, "stop", "stop"),
             ),
         )
-        goal = NavigatorService(lookahead_m=3.0).update(mission, Pose2D(0, 0, 0, valid=True, source="test"), 0)
+        goal = NavigatorService(lookahead_m=3.0, target_waypoint_lookahead=0).update(mission, Pose2D(0, 0, 0, valid=True, source="test"), 0)
         self.assertEqual(goal.road_option, int(RoadOption.STRAIGHT))
         self.assertEqual(goal.road_option_name, "STRAIGHT")
         self.assertEqual(goal.next_road_option, int(RoadOption.LEFT))
@@ -45,7 +45,7 @@ class RoadOptionBridgeTests(unittest.TestCase):
         mission = CoordinateRoutePlanner().build_from_ab(
             ABRouteRequest(mission_id="test", name="A-B", start_x_m=0, start_y_m=0, goal_x_m=10, goal_y_m=0, spacing_m=2)
         )
-        goal = NavigatorService(lookahead_m=3.0).update(mission, Pose2D(0, 0, 0, valid=True, source="test"), 0)
+        goal = NavigatorService(lookahead_m=3.0, target_waypoint_lookahead=0).update(mission, Pose2D(0, 0, 0, valid=True, source="test"), 0)
         payload = RealAgentBridge.build_model_command_payload(goal)
         self.assertEqual(payload["road_option"], int(RoadOption.STRAIGHT))
         self.assertEqual(len(payload["command_one_hot"]), 6)

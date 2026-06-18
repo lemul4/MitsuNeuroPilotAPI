@@ -12,7 +12,7 @@
   "use_default_center_as_current": false,
   "route_planning": {
     "traffic_side": "right",
-    "lane_offset_m": 1.7,
-    "note": "OSRM/OpenStreetMap returns road centerlines. The navigator shifts the control trajectory to the right-hand side of travel by this offset for low-speed testing."
+    "lane_offset_m": 0.0,
+    "note": "OSRM/OpenStreetMap returns road centerlines. Keep lane_offset_m=0.0 for straight proving-ground tests; set 1.5-2.0 only when you intentionally want a side-of-road offset."
   }
 }

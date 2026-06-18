@@ -24,6 +24,7 @@ class RealVehicleSafetyConfig:
     max_accel_pct: int = 10
     max_brake_pct: int = 80
     max_steering_raw: int = 60
+    max_steering_rate_raw_per_sec: float = 140.0
     steering_output_gain: float = 1.0
     min_effective_steering_raw: int = 0
     steering_deadband_norm: float = 0.0
@@ -51,6 +52,7 @@ class RealVehicleSafetyConfig:
             max_accel_pct=int(d.get("max_accel_pct", 10)),
             max_brake_pct=int(d.get("max_brake_pct", 80)),
             max_steering_raw=int(d.get("max_steering_raw", 60)),
+            max_steering_rate_raw_per_sec=float(d.get("max_steering_rate_raw_per_sec", 140.0)),
             steering_output_gain=float(d.get("steering_output_gain", 1.0)),
             min_effective_steering_raw=int(d.get("min_effective_steering_raw", 0)),
             steering_deadband_norm=float(d.get("steering_deadband_norm", 0.0)),
@@ -108,6 +110,7 @@ class RealVehicleSafetyConfig:
             f"profile={self.profile_name}; dry_run={self.dry_run}; "
             f"actuation_allowed={self.actuation_allowed}; "
             f"max_accel={self.max_accel_pct}%; max_steer={self.max_steering_raw}; "
+            f"steer_rate={self.max_steering_rate_raw_per_sec:.1f}raw/s; "
             f"steer_gain={self.steering_output_gain:.2f}; min_steer={self.min_effective_steering_raw}; "
             f"steer_offset={self.steering_center_offset_raw}; "
             f"manual_rates accel+={self.manual_accel_rise_pct_per_sec:.1f}%/s "

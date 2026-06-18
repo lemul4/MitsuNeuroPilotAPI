@@ -2388,6 +2388,7 @@ class MainWindow(QMainWindow):
         """Единственный метод, обновляющий UI данными из физической модели."""
         self.wheel_widget.set_angle(vehicle_state.angle)
         self.lbl_speed.setText(f"{vehicle_state.speed:.2f} km/h")
+        self.lbl_speed.setToolTip(f"Actual speed from {getattr(vehicle_state, 'speed_source', 'vehicle telemetry') or 'vehicle telemetry'}")
         self.lbl_angle_text.setText(f"Угол: {vehicle_state.angle}° · Цель: {vehicle_state.target_angle}°")
 
         self.pb_accel.setValue(int(vehicle_state.accel))

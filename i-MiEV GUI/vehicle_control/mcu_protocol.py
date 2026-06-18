@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -48,6 +50,9 @@ class McuTelemetryParser:
         candidates = []
         if path:
             candidates.append(Path(path))
+        env_path = os.environ.get("MITSU_MCU_TELEMETRY_MAP", "").strip()
+        if env_path:
+            candidates.append(Path(env_path))
         candidates.append(Path("config/mcu_telemetry_map.json"))
         candidates.append(Path("config/mcu_telemetry_map.example.json"))
         for candidate in candidates:
@@ -91,6 +96,9 @@ class McuTelemetryParser:
                 telemetry.pose_valid = True if spec.field in {"x_m", "y_m", "yaw_deg"} else telemetry.pose_valid
             elif spec.field:
                 setattr(telemetry, spec.field, float(value) * spec.scale + spec.bias)
+                if spec.field == "speed_kmh":
+                    telemetry.speed_source = f"mcu_telemetry_map:0x{int(can_id):04X}"
+                    telemetry.last_speed_rx_monotonic = time.monotonic()
             updated = True
         if updated and any(spec.can_id == can_id and spec.field in {"x_m", "y_m", "yaw_deg", "pose_valid"} for spec in self.fields):
             telemetry.pose_source = telemetry.pose_source or "mcu_telemetry_map"

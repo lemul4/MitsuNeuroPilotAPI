@@ -171,6 +171,7 @@ class ControlIntent:
     nav_maneuver: str = "idle"
     nav_target_distance_m: float = 0.0
     valid_for_ms: int = 100
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def is_expired(self, now: Optional[float] = None) -> bool:
         now = time.monotonic() if now is None else now
@@ -217,6 +218,8 @@ class VehicleTelemetry:
     gear: Gear = Gear.P
     requested_gear: Gear = Gear.P
     speed_kmh: float = 0.0
+    speed_source: str = "none"
+    last_speed_rx_monotonic: Optional[float] = None
     angle_deg: float = 0.0
     target_angle_deg: float = 0.0
     accel_pct: float = 0.0
@@ -391,7 +394,12 @@ class LocalNavigationGoal:
     distance_to_goal_m: float = 0.0
     cross_track_error_m: float = 0.0
     heading_error_deg: float = 0.0
+    previous_waypoint_index: int = 0
     waypoint_index: int = 0
+    next_waypoint_index: int = 0
+    control_waypoint_index: int = 0
+    control_x_m: float = 0.0
+    control_y_m: float = 0.0
     maneuver: str = "idle"
     road_option: int = int(RoadOption.LANEFOLLOW)
     road_option_name: str = RoadOption.LANEFOLLOW.name

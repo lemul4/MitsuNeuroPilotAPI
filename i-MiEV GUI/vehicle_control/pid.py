@@ -78,7 +78,11 @@ class WaypointPIDController:
 
         heading_error_norm = clamp(float(goal.heading_error_deg) / 45.0, -1.0, 1.0)
         xtrack_correction = clamp(float(goal.cross_track_error_m) * self.cross_track_gain, -0.5, 0.5)
-        steer_error = heading_error_norm - xtrack_correction
+        # Local navigation uses positive heading error for a left/CCW target,
+        # while the real i-MiEV steering raw convention is negative=left and
+        # positive=right. Cross-track has the same convention after negation:
+        # positive xtrack means the car is right of the path and must steer left.
+        steer_error = -heading_error_norm - xtrack_correction
         steer_norm = self.steering_pid.step(steer_error)
         target_angle_deg = clamp(steer_norm * self.max_target_angle_deg, -self.max_target_angle_deg, self.max_target_angle_deg)
 
@@ -112,4 +116,10 @@ class WaypointPIDController:
             nav_maneuver=str(goal.maneuver),
             nav_target_distance_m=float(goal.distance_to_target_m),
             valid_for_ms=120,
+            metadata={
+                "control_source": "route_pid",
+                "pid_heading_error_norm": heading_error_norm,
+                "pid_xtrack_correction": xtrack_correction,
+                "pid_steer_error": steer_error,
+            },
         )

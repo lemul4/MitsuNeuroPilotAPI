@@ -50,8 +50,6 @@ class VehicleGateway:
 
         # Brake first, then gear, then angle, then accel, then cruise. This order
         # makes stale or partially delivered frames fail safer.
-        if bool(getattr(command, "send_cruise_frame", False)):
-            packets.append(self.can.prepare_packet(self.cmd_cruise, 1 if command.cruise_enabled else 0))
         packets.append(self.can.prepare_packet(self.cmd_brake, max(0, min(100, int(command.brake_pct)))))
 
         if command.gear_request is not None:
@@ -62,6 +60,9 @@ class VehicleGateway:
 
         accel = 0 if int(command.brake_pct) > 0 else int(command.accel_pct)
         packets.append(self.can.prepare_packet(self.cmd_accel, max(0, min(100, accel))))
+
+        if bool(getattr(command, "send_cruise_frame", False)):
+            packets.append(self.can.prepare_packet(self.cmd_cruise, 1 if command.cruise_enabled else 0))
 
         return packets
 

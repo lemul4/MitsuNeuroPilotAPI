@@ -148,7 +148,7 @@ class RealMissionPanel(QGroupBox):
         self.input_goal.setPlaceholderText("22,8,20")
         coord_grid.addWidget(self.input_goal, 1, 1)
         coord_grid.addWidget(QLabel("Шаг waypoint, м"), 2, 0)
-        self.input_spacing = QLineEdit("2.0")
+        self.input_spacing = QLineEdit(os.environ.get("MITSU_MODEL_WAYPOINTS_SPACING_M", "3.0"))
         coord_grid.addWidget(self.input_spacing, 2, 1)
         coord_grid.addWidget(QLabel("Построение"), 3, 0)
         self.combo_routing_provider = QComboBox()
@@ -157,11 +157,11 @@ class RealMissionPanel(QGroupBox):
         coord_grid.addWidget(self.combo_routing_provider, 3, 1)
         coord_grid.addWidget(QLabel("Траектория"), 4, 0)
         self.combo_lane_policy = QComboBox()
-        self.combo_lane_policy.addItem("По нужной стороне дороги", "right_side")
         self.combo_lane_policy.addItem("По центру линии OSM", "centerline")
+        self.combo_lane_policy.addItem("По нужной стороне дороги", "right_side")
         coord_grid.addWidget(self.combo_lane_policy, 4, 1)
         coord_grid.addWidget(QLabel("Смещение от центра, м"), 5, 0)
-        self.input_lane_offset = QLineEdit("1.7")
+        self.input_lane_offset = QLineEdit("0.0")
         self.input_lane_offset.setPlaceholderText("1.5–2.0")
         coord_grid.addWidget(self.input_lane_offset, 5, 1)
         coord_grid.addWidget(QLabel("Pose автомобиля"), 6, 0)
@@ -177,6 +177,9 @@ class RealMissionPanel(QGroupBox):
         coord_grid.addWidget(QLabel("GPS baudrate"), 8, 0)
         self.input_gps_baudrate = QLineEdit(os.environ.get("MITSU_GPS_BAUDRATE", "9600"))
         coord_grid.addWidget(self.input_gps_baudrate, 8, 1)
+        coord_grid.addWidget(QLabel("Route target step, m"), 9, 0)
+        self.input_route_target_spacing = QLineEdit(os.environ.get("MITSU_ROUTE_TARGET_SPACING_M", "2.0"))
+        coord_grid.addWidget(self.input_route_target_spacing, 9, 1)
         layout.addLayout(coord_grid)
 
         map_row = QHBoxLayout()
@@ -192,7 +195,7 @@ class RealMissionPanel(QGroupBox):
         self.hints_json = QTextEdit()
         self.hints_json.setPlaceholderText("Дополнительные точки JSON: [{\"x_m\": 8, \"y_m\": 0, \"command\": \"turn_left\"}]")
         self.hints_json.setFixedHeight(74)
-        self.hints_json.setPlainText('[{"x_m": 8.0, "y_m": 0.0, "command": "straight"}, {"x_m": 12.0, "y_m": 2.5, "command": "turn_left"}]')
+        self.hints_json.setPlainText("[]")
         layout.addWidget(self.hints_json)
 
         self.lbl_runtime = ScrollingLabel("Состояние: ожидание")
@@ -301,11 +304,11 @@ class RealMissionPanel(QGroupBox):
                 hints = []
             start_payload = {"x_m": sx, "y_m": sy, "yaw_deg": syaw}
             goal_payload = {"x_m": gx, "y_m": gy, "yaw_deg": gyaw}
-            lane_policy = self.combo_lane_policy.currentData() if hasattr(self, "combo_lane_policy") else "right_side"
+            lane_policy = self.combo_lane_policy.currentData() if hasattr(self, "combo_lane_policy") else "centerline"
             try:
-                lane_offset_m = float(str(self.input_lane_offset.text() or "1.7").replace(",", "."))
+                lane_offset_m = float(str(self.input_lane_offset.text() or "0.0").replace(",", "."))
             except Exception:
-                lane_offset_m = 1.7
+                lane_offset_m = 0.0
             metadata_payload = {
                 "lane_policy": lane_policy,
                 "lane_offset_m": lane_offset_m,
@@ -344,7 +347,18 @@ class RealMissionPanel(QGroupBox):
                 "pose_mode": pose_mode,
                 "gps_com_port": gps_com_port,
                 "gps_baudrate": gps_baudrate,
-                "spacing_m": float(self.input_spacing.text() or 2.0),
+                "model_waypoints_spacing_m": float(str(self.input_spacing.text() or "3.0").replace(",", ".")),
+                "spacing_m": float(str(self.input_spacing.text() or "3.0").replace(",", ".")),
+                "route_target_spacing_m": float(
+                    str(
+                        (
+                            self.input_route_target_spacing.text()
+                            if hasattr(self, "input_route_target_spacing")
+                            else os.environ.get("MITSU_ROUTE_TARGET_SPACING_M", "2.0")
+                        )
+                        or "2.0"
+                    ).replace(",", ".")
+                ),
                 "turn_speed_kmh": speed,
                 "hints": hints,
                 "metadata": metadata_payload,
@@ -362,7 +376,9 @@ class RealMissionPanel(QGroupBox):
         self._mission_ready = True
         self.lbl_goal.value_label.setText(str(mission.get("goal_label", "-")))
         if mission.get("start") and mission.get("goal"):
-            self.lbl_next.value_label.setText(f"A→B шаг {mission.get('spacing_m', 2.0)}м")
+            self.lbl_next.value_label.setText(
+                f"model {mission.get('model_waypoints_spacing_m', 3.0)}m / target {mission.get('route_target_spacing_m', 2.0)}m"
+            )
             self.lbl_maneuver.value_label.setText("координатный маршрут")
         else:
             self.lbl_next.value_label.setText("WP 1 / test")

@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import json
+import os
 from pathlib import Path
 
 from vehicle_control.mcu_protocol import McuTelemetryParser, TelemetryFieldSpec
@@ -23,10 +25,48 @@ class McuTelemetryParserTests(unittest.TestCase):
         parser.apply_packet(0x45, [4], t)
         parser.apply_packet(0x46, [100, 0, 200, 0], t)
         self.assertAlmostEqual(t.speed_kmh, 12.3)
+        self.assertEqual(t.speed_source, "mcu_telemetry_map:0x0044")
+        self.assertIsNotNone(t.last_speed_rx_monotonic)
         self.assertEqual(t.gear, Gear.D)
         self.assertAlmostEqual(t.x_m, 1.0)
         self.assertAlmostEqual(t.y_m, 2.0)
         self.assertTrue(t.pose_valid)
+
+    def test_parser_load_uses_env_telemetry_map_for_speedometer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mcu_map.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "fields": [
+                            {
+                                "can_id": "0x55",
+                                "field": "speed_kmh",
+                                "offset": 0,
+                                "length": 2,
+                                "signed": False,
+                                "scale": 0.1,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            old = os.environ.get("MITSU_MCU_TELEMETRY_MAP")
+            os.environ["MITSU_MCU_TELEMETRY_MAP"] = str(path)
+            try:
+                parser = McuTelemetryParser.load()
+            finally:
+                if old is None:
+                    os.environ.pop("MITSU_MCU_TELEMETRY_MAP", None)
+                else:
+                    os.environ["MITSU_MCU_TELEMETRY_MAP"] = old
+
+        telemetry = VehicleTelemetry()
+        parser.apply_packet(0x55, [210, 0], telemetry)
+
+        self.assertAlmostEqual(telemetry.speed_kmh, 21.0)
+        self.assertEqual(telemetry.speed_source, "mcu_telemetry_map:0x0055")
 
 
 class SafetyConfigTests(unittest.TestCase):
