@@ -7,7 +7,7 @@ import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 try:
     from PySide6.QtCore import QThread, Signal
@@ -126,11 +126,28 @@ class Nmea0183Parser:
         kind = fields[0][-3:].upper()
         try:
             if kind == "GGA":
+                fix_quality = int(fields[6] or 0)
+                satellites = int(fields[7] or 0)
+                hdop = float(fields[8] or 99.0)
+                if fix_quality <= 0 or not fields[2] or not fields[4]:
+                    self.fix_quality = fix_quality
+                    self.satellites = satellites
+                    self.hdop = hdop
+                    return NmeaFix(
+                        lat=0.0,
+                        lon=0.0,
+                        valid=False,
+                        fix_quality=fix_quality,
+                        satellites=satellites,
+                        hdop=hdop,
+                        speed_mps=self.speed_mps,
+                        course_deg=self.course_deg,
+                    )
                 lat = _nmea_coordinate(fields[2], fields[3])
                 lon = _nmea_coordinate(fields[4], fields[5])
-                self.fix_quality = int(fields[6] or 0)
-                self.satellites = int(fields[7] or 0)
-                self.hdop = float(fields[8] or 99.0)
+                self.fix_quality = fix_quality
+                self.satellites = satellites
+                self.hdop = hdop
                 return NmeaFix(
                     lat=lat,
                     lon=lon,
@@ -142,6 +159,17 @@ class Nmea0183Parser:
                     course_deg=self.course_deg,
                 )
             if kind == "RMC":
+                if str(fields[2]).upper() != "A" or not fields[3] or not fields[5]:
+                    return NmeaFix(
+                        lat=0.0,
+                        lon=0.0,
+                        valid=False,
+                        fix_quality=self.fix_quality,
+                        satellites=self.satellites,
+                        hdop=self.hdop,
+                        speed_mps=self.speed_mps,
+                        course_deg=self.course_deg,
+                    )
                 lat = _nmea_coordinate(fields[3], fields[4])
                 lon = _nmea_coordinate(fields[5], fields[6])
                 self.speed_mps = float(fields[7] or 0.0) * 0.514444
@@ -232,13 +260,52 @@ class NmeaFixFilter:
         )
 
 
+def discover_nmea_serial_port(comports: Optional[Sequence[object]] = None) -> str:
+    """Pick the most likely USB GNSS/NMEA serial port.
+
+    Bluetooth COM ports are deliberately avoided because the vehicle control
+    port can also be exposed as a serial device and must not be grabbed here.
+    """
+    if comports is None:
+        try:
+            import serial.tools.list_ports
+
+            comports = list(serial.tools.list_ports.comports())
+        except Exception:
+            return ""
+
+    scored = []
+    for port in list(comports or []):
+        device = str(getattr(port, "device", "") or "")
+        description = str(getattr(port, "description", "") or "")
+        hwid = str(getattr(port, "hwid", "") or "")
+        text = f"{device} {description} {hwid}".lower()
+        if not device:
+            continue
+        if "bluetooth" in text or "bthenum" in text:
+            continue
+        score = 0
+        for token in ("gps", "gnss", "nmea", "ublox", "u-blox", "cp210", "silicon labs", "usb to uart"):
+            if token in text:
+                score += 10
+        if "usb" in text:
+            score += 2
+        if score > 0:
+            scored.append((score, device, description))
+
+    if not scored:
+        return ""
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
 class NmeaSerialPoseProviderThread(QThread):
     """Read a dedicated GNSS COM port carrying NMEA-0183 sentences."""
 
     pose_received = Signal(dict)
     status_changed = Signal(bool, str)
 
-    def __init__(self, port: str, baudrate: int = 115200, stale_after_ms: int = 1500, parent=None):
+    def __init__(self, port: str, baudrate: int = 9600, stale_after_ms: int = 1500, parent=None):
         super().__init__(parent)
         self.port = str(port)
         self.baudrate = int(baudrate)
@@ -248,6 +315,13 @@ class NmeaSerialPoseProviderThread(QThread):
         self._last_valid_at = 0.0
         self._stale_emitted = False
         self._last_status_at = 0.0
+        self._last_diag_at = 0.0
+        self._rx_lines = 0
+        self._parsed_fixes = 0
+        self._accepted_fixes = 0
+        self._bad_lines = 0
+        self._filtered_fixes = 0
+        self.log_raw = os.environ.get("MITSU_GPS_LOG_RAW", "").strip().lower() in {"1", "true", "yes", "on"}
         self.parser = Nmea0183Parser()
         self.filter = NmeaFixFilter(
             min_satellites=int(os.environ.get("MITSU_GPS_MIN_SATELLITES", "6")),
@@ -263,15 +337,26 @@ class NmeaSerialPoseProviderThread(QThread):
             import serial
 
             self._serial = serial.Serial(self.port, self.baudrate, timeout=0.2)
-            self.status_changed.emit(False, f"NMEA GPS connected: {self.port}; waiting for stable fix")
+            self.status_changed.emit(
+                False,
+                f"NMEA GPS connected: port={self.port} baud={self.baudrate}; waiting for stable fix",
+            )
             while self.running:
                 raw = self._serial.readline()
                 now = time.monotonic()
                 if raw:
+                    self._rx_lines += 1
                     sentence = raw.decode("ascii", errors="ignore").strip()
+                    if self.log_raw:
+                        print(f"NMEA RX {self.port}: {sentence}")
                     fix = self.parser.parse(sentence)
+                    if fix is None:
+                        self._bad_lines += 1
+                    else:
+                        self._parsed_fixes += 1
                     accepted = self.filter.accept(fix) if fix is not None else None
                     if accepted is not None:
+                        self._accepted_fixes += 1
                         self._last_valid_at = now
                         self._stale_emitted = False
                         self.pose_received.emit({
@@ -296,6 +381,18 @@ class NmeaSerialPoseProviderThread(QThread):
                                 True,
                                 f"NMEA GPS fix: sats={accepted.satellites} hdop={accepted.hdop:.1f}",
                             )
+                    elif fix is not None:
+                        self._filtered_fixes += 1
+                if now - self._last_diag_at >= 2.0:
+                    self._last_diag_at = now
+                    self.status_changed.emit(
+                        self._last_valid_at > 0.0 and not self._stale_emitted,
+                        "NMEA GPS stats: "
+                        f"port={self.port} baud={self.baudrate} "
+                        f"rx={self._rx_lines} parsed={self._parsed_fixes} "
+                        f"accepted={self._accepted_fixes} filtered={self._filtered_fixes} "
+                        f"bad={self._bad_lines}"
+                    )
                 if (
                     self._last_valid_at > 0.0
                     and (now - self._last_valid_at) * 1000.0 > self.stale_after_ms
@@ -305,7 +402,10 @@ class NmeaSerialPoseProviderThread(QThread):
                     self.pose_received.emit({"valid": False, "source": "nmea0183_stale"})
                     self.status_changed.emit(False, "NMEA GPS pose stale")
         except Exception as exc:
-            self.status_changed.emit(False, f"NMEA GPS error: {exc}")
+            hint = ""
+            if "PermissionError" in repr(exc) or "Access is denied" in str(exc) or "Отказано в доступе" in str(exc):
+                hint = "; port is busy or locked by another app"
+            self.status_changed.emit(False, f"NMEA GPS error on {self.port}: {exc}{hint}")
             self.pose_received.emit({"valid": False, "source": "nmea0183_error"})
         finally:
             try:

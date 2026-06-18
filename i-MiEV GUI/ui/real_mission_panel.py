@@ -174,7 +174,7 @@ class RealMissionPanel(QGroupBox):
         self.input_gps_com_port.setPlaceholderText("например COM7")
         coord_grid.addWidget(self.input_gps_com_port, 7, 1)
         coord_grid.addWidget(QLabel("GPS baudrate"), 8, 0)
-        self.input_gps_baudrate = QLineEdit(os.environ.get("MITSU_GPS_BAUDRATE", "115200"))
+        self.input_gps_baudrate = QLineEdit(os.environ.get("MITSU_GPS_BAUDRATE", "9600"))
         coord_grid.addWidget(self.input_gps_baudrate, 8, 1)
         layout.addLayout(coord_grid)
 
