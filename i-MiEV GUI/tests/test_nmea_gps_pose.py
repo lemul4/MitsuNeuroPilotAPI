@@ -27,6 +27,21 @@ class Nmea0183ParserTests(unittest.TestCase):
         self.assertAlmostEqual(rmc.course_deg, 84.4)
         self.assertAlmostEqual(rmc.speed_mps, 22.4 * 0.514444, places=4)
 
+    def test_parses_real_gll_and_rmc_coordinates_as_degrees_minutes(self):
+        parser = Nmea0183Parser()
+
+        gll = parser.parse("$GNGLL,5559.69767,N,09247.92921,E,062555.00,A,A*7A")
+        rmc = parser.parse("$GNRMC,062556.00,A,5559.69773,N,09247.92917,E,0.029,,180626,,,A*60")
+
+        self.assertIsNotNone(gll)
+        self.assertTrue(gll.valid)
+        self.assertAlmostEqual(gll.lat, 55.9949611667, places=7)
+        self.assertAlmostEqual(gll.lon, 92.7988201667, places=7)
+        self.assertIsNotNone(rmc)
+        self.assertTrue(rmc.valid)
+        self.assertAlmostEqual(rmc.lat, 55.9949621667, places=7)
+        self.assertAlmostEqual(rmc.lon, 92.7988195, places=7)
+
     def test_rejects_sentence_with_bad_checksum(self):
         parser = Nmea0183Parser()
         self.assertIsNone(
@@ -59,6 +74,11 @@ class NmeaFixFilterTests(unittest.TestCase):
         self.assertIsNone(filter_.accept(NmeaFix(56.0, 92.0, True, 1, 3, 0.8)))
         self.assertIsNone(filter_.accept(NmeaFix(56.0, 92.0, True, 1, 10, 8.0)))
         self.assertIsNone(filter_.accept(NmeaFix(56.0, 92.0, False, 0, 10, 0.8)))
+
+    def test_accepts_rmc_gll_only_quality_unknown(self):
+        filter_ = NmeaFixFilter(lock_samples=1)
+        accepted = filter_.accept(NmeaFix(55.9949621667, 92.7988195, True, 1, 0, 99.0))
+        self.assertIsNotNone(accepted)
 
 
 class PoseFreshnessTests(unittest.TestCase):

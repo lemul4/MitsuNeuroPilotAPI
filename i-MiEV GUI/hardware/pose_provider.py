@@ -174,11 +174,37 @@ class Nmea0183Parser:
                 lon = _nmea_coordinate(fields[5], fields[6])
                 self.speed_mps = float(fields[7] or 0.0) * 0.514444
                 self.course_deg = None if not fields[8] else float(fields[8]) % 360.0
+                fix_quality = self.fix_quality or 1
                 return NmeaFix(
                     lat=lat,
                     lon=lon,
                     valid=str(fields[2]).upper() == "A",
-                    fix_quality=self.fix_quality,
+                    fix_quality=fix_quality,
+                    satellites=self.satellites,
+                    hdop=self.hdop,
+                    speed_mps=self.speed_mps,
+                    course_deg=self.course_deg,
+                )
+            if kind == "GLL":
+                if str(fields[6]).upper() != "A" or not fields[1] or not fields[3]:
+                    return NmeaFix(
+                        lat=0.0,
+                        lon=0.0,
+                        valid=False,
+                        fix_quality=self.fix_quality,
+                        satellites=self.satellites,
+                        hdop=self.hdop,
+                        speed_mps=self.speed_mps,
+                        course_deg=self.course_deg,
+                    )
+                lat = _nmea_coordinate(fields[1], fields[2])
+                lon = _nmea_coordinate(fields[3], fields[4])
+                fix_quality = self.fix_quality or 1
+                return NmeaFix(
+                    lat=lat,
+                    lon=lon,
+                    valid=True,
+                    fix_quality=fix_quality,
                     satellites=self.satellites,
                     hdop=self.hdop,
                     speed_mps=self.speed_mps,
@@ -218,6 +244,12 @@ class NmeaFixFilter:
         self._candidates = []
         self._accepted = []
         self._locked = False
+        self.allow_quality_unknown = os.environ.get("MITSU_GPS_ALLOW_RMC_GLL_ONLY", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def accept(self, fix: NmeaFix) -> Optional[NmeaFix]:
         if not fix.valid:
@@ -226,7 +258,10 @@ class NmeaFixFilter:
             return None
         if fix.fix_quality <= 0:
             return None
-        if fix.satellites < self.min_satellites or fix.hdop > self.max_hdop:
+        quality_unknown = fix.satellites <= 0 and fix.hdop >= 99.0
+        if quality_unknown and not self.allow_quality_unknown:
+            return None
+        if not quality_unknown and (fix.satellites < self.min_satellites or fix.hdop > self.max_hdop):
             return None
 
         if not self._locked:

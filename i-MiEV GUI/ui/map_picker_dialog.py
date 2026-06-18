@@ -183,12 +183,23 @@ class MapPickerDialog(QDialog):
 
     points_selected = Signal(dict)
 
-    def __init__(self, parent=None, start: Optional[dict] = None, goal: Optional[dict] = None):
+    def __init__(
+        self,
+        parent=None,
+        start: Optional[dict] = None,
+        goal: Optional[dict] = None,
+        current: Optional[dict] = None,
+        allow_browser_geolocation: bool = True,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Планирование маршрута")
         self.resize(1120, 720)
         self.setMinimumSize(920, 560)
-        self.current_location: Optional[MapPoint] = _load_current_location()
+        self.allow_browser_geolocation = bool(allow_browser_geolocation)
+        explicit_current = self._point_from_dict(current)
+        self.current_location: Optional[MapPoint] = (
+            explicit_current if not self.allow_browser_geolocation else explicit_current or _load_current_location()
+        )
         self.start_point: Optional[MapPoint] = self._point_from_dict(start) or self.current_location
         self.goal_point: Optional[MapPoint] = self._point_from_dict(goal)
         self.lane_settings = _load_lane_settings()
@@ -299,6 +310,13 @@ class MapPickerDialog(QDialog):
         try:
             if QWebEnginePage is None:
                 return
+            if not self.allow_browser_geolocation:
+                self.web.page().setFeaturePermission(
+                    security_origin,
+                    feature,
+                    QWebEnginePage.PermissionDeniedByUser,
+                )
+                return
             allowed_features = []
             if hasattr(QWebEnginePage, "Geolocation"):
                 allowed_features.append(QWebEnginePage.Geolocation)
@@ -325,6 +343,7 @@ class MapPickerDialog(QDialog):
         start_json = json.dumps(self.start_point.to_dict() if self.start_point else None)
         goal_json = json.dumps(self.goal_point.to_dict() if self.goal_point else None)
         current_json = json.dumps(self.current_location.to_dict() if self.current_location else None)
+        allow_browser_geolocation = "true" if self.allow_browser_geolocation else "false"
         lane_offset = float(self.lane_settings.get("lane_offset_m", 1.7))
         traffic_side = json.dumps(str(self.lane_settings.get("traffic_side", "right")))
         bridge_script = "<script src=\"qrc:///qtwebchannel/qwebchannel.js\"></script>" if embedded else ""
@@ -366,6 +385,7 @@ var map = L.map('map', {{attributionControl:false}}).setView([{center_lat:.8f}, 
 L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{maxZoom: 20, attribution: ''}}).addTo(map);
 var points = {{A: {start_json}, B: {goal_json}}};
 var current = {current_json};
+var allowBrowserGeolocation = {allow_browser_geolocation};
 var laneOffsetM = {lane_offset:.3f};
 var trafficSide = {traffic_side};
 var markers = {{A: null, B: null, current: null}};
@@ -431,6 +451,7 @@ function setAToCurrent() {{
   setPoint('A', L.latLng(current.lat, current.lon));
 }}
 function locateMe(assignA) {{
+  if (!allowBrowserGeolocation) {{ status('Геолокация браузера отключена: в режиме GPS COM используется только NMEA/GNSS из COM-порта. Дождитесь фикса GPS или задайте A вручную.'); return; }}
   if (!navigator.geolocation) {{ status('Геолокация браузера недоступна. Задайте current_location в config/map_settings.json или выберите A вручную.'); return; }}
   navigator.geolocation.getCurrentPosition(function(pos) {{
     var lat = pos.coords.latitude;
@@ -497,7 +518,7 @@ map.on('click', function(e) {{
   else setPoint('B', e.latlng);
 }});
 redraw();
-if (!current && !points.A && !points.B) {{ setTimeout(function() {{ locateMe(true); }}, 600); }}
+if (allowBrowserGeolocation && !current && !points.A && !points.B) {{ setTimeout(function() {{ locateMe(true); }}, 600); }}
 if (points.A && points.B) {{ setTimeout(previewRoadRoute, 700); }}
 </script>
 </body>

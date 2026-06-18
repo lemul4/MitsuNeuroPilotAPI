@@ -62,10 +62,10 @@
     "_topic_3": "ГЕОМЕТРИЯ КАМЕР",
     "left_camera_fov_deg": 90.0,
     "right_camera_fov_deg": 50.03,
-    "camera_baseline_m": 0.135,
+    "camera_baseline_m": 0.45,
     "left_camera_translation_m": [
         0.9,
-        -0.0675,
+        0.0225,
         1.55
     ],
     "right_camera_translation_m": [
@@ -81,10 +81,10 @@
     "right_camera_roll_deg": 0.0,
     "dual_camera_left_fov_deg": 90.0,
     "dual_camera_right_fov_deg": 50.03,
-    "dual_camera_baseline_m": 0.135,
+    "dual_camera_baseline_m": 0.45,
     "dual_camera_left_translation_m": [
         0.9,
-        -0.0675,
+        0.0225,
         1.55
     ],
     "dual_camera_right_translation_m": [
