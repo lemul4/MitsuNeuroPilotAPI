@@ -84,10 +84,11 @@ except Exception as _opencv_udp_import_error:
     OpenCvUdpH265CameraSpec = None
 
 try:
-    from hardware.pose_provider import JsonPoseProviderThread, NmeaSerialPoseProviderThread
+    from hardware.pose_provider import JsonPoseProviderThread, NmeaSerialPoseProviderThread, discover_nmea_serial_port
 except Exception:
     JsonPoseProviderThread = None
     NmeaSerialPoseProviderThread = None
+    discover_nmea_serial_port = None
 
 try:
     from vehicle_control.geo import GeoPoint, GeoReference, latlon_to_local_m
@@ -400,7 +401,7 @@ class AppController(QObject):
         self.real_pose_provider = None
         self.real_pose_mode = os.environ.get("MITSU_REAL_POSE_MODE", "external").strip().lower() or "external"
         self.real_gps_com_port = os.environ.get("MITSU_GPS_COM_PORT", "").strip()
-        self.real_gps_baudrate = int(os.environ.get("MITSU_GPS_BAUDRATE", "115200"))
+        self.real_gps_baudrate = int(os.environ.get("MITSU_GPS_BAUDRATE", "9600"))
         self.real_dead_reckoning_pose = None
         self.real_dead_reckoning_targets = ()
         self.real_dead_reckoning_last_ts = None
@@ -933,6 +934,11 @@ class AppController(QObject):
         ):
             if NmeaSerialPoseProviderThread is None or self.real_pose_provider is not None:
                 return
+            if not gps_port and callable(discover_nmea_serial_port):
+                gps_port = discover_nmea_serial_port()
+                if gps_port:
+                    self.real_gps_com_port = gps_port
+                    print(f"REAL POSE: auto-detected NMEA GPS port: {gps_port}")
             if not gps_port:
                 print("REAL POSE: NMEA mode selected, but MITSU_GPS_COM_PORT is not set")
                 return
@@ -1784,7 +1790,7 @@ class AppController(QObject):
         ).strip()
         self.real_gps_baudrate = int(
             self.real_mission.get("gps_baudrate")
-            or os.environ.get("MITSU_GPS_BAUDRATE", "115200")
+            or os.environ.get("MITSU_GPS_BAUDRATE", "9600")
         )
         if self.real_pose_mode == "dead_reckoning_ab":
             if self._configure_real_dead_reckoning_pose(self.real_mission) and self.is_connected:
