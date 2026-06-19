@@ -320,7 +320,7 @@ i-MiEV GUI/config/real_cameras.example.json
 ## Scientific Publications
 
 - **Vision-only neural autopilot: bridging sim-to-real gap and learner-expert asymmetry** - published in the proceedings of the International Scientific and Technical Conference "Prom-Engineering", indexed in Scopus. [Document](https://docs.google.com/document/d/12W7nTc2MBqf2siFnO7W33XS8Fv4XVQfi/edit?usp=drive_link&ouid=113779812991506542148&rtpof=true&sd=true)
-- **Intelligent autopilot agent based on neural network technologies in an autonomous driving simulation environment** - submitted to the VAK journal "Software Engineering", ISSN 2220-3397; awaiting publication. [Document](https://docs.google.com/document/d/1-k103PH6_jngbjBz79SBykJh8hvrZUgH/edit?usp=sharing&ouid=113779812991506542148&rtpof=true&sd=true)
+- **Intelligent autopilot agent based on neural network technologies in an autonomous driving simulation environment** - submitted to the VAK journal "Software Engineering", ISSN 2220-3397; awaiting publication. [Document](https://drive.google.com/file/d/1FwVYQutOjzyWUrGSFOkUSdISt7777gFL/view?usp=sharing)
 
 ## Acknowledgements
 

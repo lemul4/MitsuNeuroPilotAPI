@@ -143,6 +143,7 @@ class Visualizer:
 
         # BEV
         self._bev_semantic(ground_truth=True)
+        self._coordinate_grid()
         self._route()
         self._future_waypoints()
         self._ego_bounding_box()
@@ -165,6 +166,7 @@ class Visualizer:
 
         # BEV
         self._bev_semantic(ground_truth=False)
+        self._coordinate_grid()
         self._target_point()
         if self.config.use_planning_decoder:
             self._pred_future_waypoints()
@@ -189,6 +191,7 @@ class Visualizer:
 
         # BEV
         self._bev_semantic(ground_truth=False)
+        self._coordinate_grid()
         self._pred_route()
         # self._pred_future_waypoints()
         self._target_point()
@@ -724,6 +727,116 @@ class Visualizer:
                 interpolation=cv2.INTER_NEAREST,
             )
             self.bev_image = bev_semantic_image * alpha + (1 - alpha) * self.bev_image
+
+    def _coordinate_grid(self):
+        """Draw an ego-centered x/y meter grid on the BEV canvas."""
+        if not bool(getattr(self.config, "visualize_coordinate_grid", False)):
+            return
+
+        step_m = float(getattr(self.config, "coordinate_grid_step_m", 1.0))
+        if step_m <= 0.0:
+            return
+
+        label_every = max(1, int(getattr(self.config, "coordinate_grid_label_every", 5)))
+        min_x = float(self.config.min_x_meter)
+        max_x = float(self.config.max_x_meter)
+        min_y = float(self.config.min_y_meter)
+        max_y = float(self.config.max_y_meter)
+
+        grid_color = (185, 185, 185)
+        axis_color = (70, 70, 70)
+        label_color = (30, 30, 30)
+        origin_color = (20, 20, 20)
+
+        min_x_tick = int(np.ceil(min_x / step_m))
+        max_x_tick = int(np.floor(max_x / step_m))
+        min_y_tick = int(np.ceil(min_y / step_m))
+        max_y_tick = int(np.floor(max_y / step_m))
+
+        for tick in range(min_x_tick, max_x_tick + 1):
+            x_m = tick * step_m
+            px = int(
+                np.clip(
+                    round(x_m * self.loc_pixels_per_meter + self.origin[0]),
+                    0,
+                    self.bev_image.shape[1] - 1,
+                )
+            )
+            is_axis = abs(x_m) < 1e-6
+            cv2.line(
+                self.bev_image,
+                (px, 0),
+                (px, self.bev_image.shape[0] - 1),
+                axis_color if is_axis else grid_color,
+                thickness=2 if is_axis else 1,
+                lineType=cv2.LINE_AA,
+            )
+            if tick % label_every == 0:
+                cv2.putText(
+                    self.bev_image,
+                    f"x={x_m:g}",
+                    (
+                        px + 3,
+                        max(14, min(self.bev_image.shape[0] - 8, self.origin[1] - 6)),
+                    ),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    label_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        for tick in range(min_y_tick, max_y_tick + 1):
+            y_m = tick * step_m
+            py = int(
+                np.clip(
+                    round(y_m * self.loc_pixels_per_meter + self.origin[1]),
+                    0,
+                    self.bev_image.shape[0] - 1,
+                )
+            )
+            is_axis = abs(y_m) < 1e-6
+            cv2.line(
+                self.bev_image,
+                (0, py),
+                (self.bev_image.shape[1] - 1, py),
+                axis_color if is_axis else grid_color,
+                thickness=2 if is_axis else 1,
+                lineType=cv2.LINE_AA,
+            )
+            if tick % label_every == 0:
+                cv2.putText(
+                    self.bev_image,
+                    f"y={y_m:g}",
+                    (
+                        max(3, min(self.bev_image.shape[1] - 45, self.origin[0] + 5)),
+                        py - 3,
+                    ),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    label_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        cv2.circle(
+            self.bev_image,
+            (int(self.origin[0]), int(self.origin[1])),
+            radius=5,
+            color=origin_color,
+            thickness=-1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            self.bev_image,
+            "0.0",
+            (int(self.origin[0]) + 7, int(self.origin[1]) + 14),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            origin_color,
+            1,
+            cv2.LINE_AA,
+        )
 
     def _target_point(self):
         target_point = self.data.get("target_point")

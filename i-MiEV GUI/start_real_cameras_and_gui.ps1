@@ -57,7 +57,11 @@ $GuiEnv = @(
     "set MITSU_REAL_POSE_STALE_MS=1500",
     "set MITSU_REAL_ENABLE_ACTUATION=1",
     "set MITSU_REAL_DRY_RUN=0",
+<<<<<<< HEAD
     "set MITSU_GPS_LOG_RAW=0",
+=======
+    "set MITSU_GPS_LOG_RAW=1",
+>>>>>>> b51b246ac5767281767fec68d02187d62a88b647
     "`"$Python`" main.py"
 ) -join "&&"
 
