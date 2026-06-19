@@ -121,6 +121,9 @@ class ClosedLoopConfig(OpenLoopConfig):
     lateral_n = 6
     # If true use tuned aim distance for navigation
     tuned_aim_distance = False
+    # Optional forced waypoint index for waypoint PID aim point. None keeps the
+    # default distance-based aim point selection.
+    waypoint_pid_forced_aim_index = None
 
     # --- Evaluation Visualization Settings ---
     # If not None, set a custom weather for evaluation

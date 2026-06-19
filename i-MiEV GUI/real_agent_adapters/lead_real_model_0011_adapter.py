@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 from concurrent.futures import (
     FIRST_COMPLETED,
@@ -447,6 +448,100 @@ class LeadModel0011RealPortAdapter:
             suffix = " " + " ".join(f"{key}={value}" for key, value in fields.items())
         print(f"REAL MODEL TIMING: {stage} {elapsed_ms:.1f} ms{suffix}", flush=True)
 
+    @staticmethod
+    def _deep_profile_enabled() -> bool:
+        value = (
+            os.environ.get("MITSU_REAL_MODEL_DEEP_PROFILE", "")
+            or os.environ.get("MITSU_REAL_MODEL_DEEP_PROFILING", "")
+        )
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _deep_profile_period_sec(self) -> float:
+        try:
+            return max(
+                0.0,
+                float(os.environ.get("MITSU_REAL_MODEL_DEEP_PROFILE_PERIOD_SEC", "1.0") or 1.0),
+            )
+        except Exception:
+            return 1.0
+
+    def _maybe_log_deep_profile(self, result: Dict[str, Any], data: Dict[str, Any], context: Dict[str, Any]) -> None:
+        if not self._deep_profile_enabled():
+            return
+        now = time.monotonic()
+        last = float(getattr(self, "_last_deep_profile_log_at", 0.0) or 0.0)
+        if now - last < self._deep_profile_period_sec():
+            return
+        self._last_deep_profile_log_at = now
+
+        sample_created_at = float(context.get("input_sample_created_at_monotonic", 0.0) or 0.0)
+        sample_age_ms = (now - sample_created_at) * 1000.0 if sample_created_at > 0.0 else None
+        frame_ts = context.get("input_frame_timestamps_monotonic") or {}
+        try:
+            frame_skew_ms = (
+                max(float(v) for v in frame_ts.values())
+                - min(float(v) for v in frame_ts.values())
+            ) * 1000.0
+        except Exception:
+            frame_skew_ms = None
+
+        cuda_fields: Dict[str, Any] = {}
+        if torch is not None and str(self.device).startswith("cuda") and torch.cuda.is_available():
+            try:
+                cuda_fields = {
+                    "cuda_alloc_mb": torch.cuda.memory_allocated(self.device) / (1024.0 * 1024.0),
+                    "cuda_reserved_mb": torch.cuda.memory_reserved(self.device) / (1024.0 * 1024.0),
+                    "cuda_max_alloc_mb": torch.cuda.max_memory_allocated(self.device) / (1024.0 * 1024.0),
+                }
+            except Exception:
+                cuda_fields = {}
+
+        def _shape(name: str) -> str:
+            value = data.get(name)
+            shape = getattr(value, "shape", None)
+            dtype = getattr(value, "dtype", None)
+            device = getattr(value, "device", None)
+            return f"{tuple(shape) if shape is not None else '-'}:{dtype}:{device}"
+
+        def _fmt(value: Any) -> str:
+            if value is None:
+                return "n/a"
+            try:
+                return f"{float(value):.1f}"
+            except Exception:
+                return str(value)
+
+        cv2_threads = "n/a"
+        if cv2 is not None:
+            try:
+                cv2_threads = str(cv2.getNumThreads())
+            except Exception:
+                pass
+
+        print(
+            "REAL MODEL DEEP PROFILE: "
+            f"frame={result.get('frame_id', 'n/a')} "
+            f"seq={context.get('input_sample_seq', 'n/a')} "
+            f"sample_age={_fmt(sample_age_ms)}ms "
+            f"frame_skew={_fmt(frame_skew_ms)}ms "
+            f"build={_fmt(result.get('model_build_ms'))}ms "
+            f"cuda_pre_sync={_fmt(result.get('model_cuda_pre_sync_ms'))}ms "
+            f"forward_enqueue={_fmt(result.get('model_forward_enqueue_ms'))}ms "
+            f"cuda_post_sync={_fmt(result.get('model_cuda_post_sync_ms'))}ms "
+            f"forward_total={_fmt(result.get('model_forward_ms'))}ms "
+            f"predict_total={_fmt(result.get('model_predict_total_ms'))}ms "
+            f"process_cpu={_fmt(result.get('model_process_cpu_ms'))}ms "
+            f"threads={threading.active_count()} "
+            f"cv2_threads={cv2_threads} "
+            f"visual_pending={len(getattr(self, '_visualization_futures', []) or [])} "
+            f"rgb_left={_shape('rgb_left')} "
+            f"rgb_right={_shape('rgb_right')} "
+            f"cuda_alloc={_fmt(cuda_fields.get('cuda_alloc_mb'))}MB "
+            f"cuda_reserved={_fmt(cuda_fields.get('cuda_reserved_mb'))}MB "
+            f"cuda_max_alloc={_fmt(cuda_fields.get('cuda_max_alloc_mb'))}MB",
+            flush=True,
+        )
+
     def __init__(
         self,
         builder: Optional[RealModel0011InputBuilder] = None,
@@ -746,12 +841,21 @@ class LeadModel0011RealPortAdapter:
         thickness = 2
         margin = 10
         (text_w, text_h), baseline = cv2.getTextSize(text, font, scale, thickness)
-        box_w = min(annotated.shape[1], text_w + margin * 2)
-        box_h = text_h + baseline + margin * 2
+        box_w = int(min(int(annotated.shape[1]), int(text_w) + margin * 2))
+        box_h = int(int(text_h) + int(baseline) + margin * 2)
         overlay = annotated.copy()
         cv2.rectangle(overlay, (0, 0), (box_w, box_h), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.55, annotated, 0.45, 0, annotated)
-        cv2.putText(annotated, text, (margin, margin + text_h), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        cv2.putText(
+            annotated,
+            text,
+            (int(margin), int(margin + int(text_h))),
+            font,
+            scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
         return annotated
 
     @staticmethod
@@ -879,19 +983,29 @@ class LeadModel0011RealPortAdapter:
 
     def predict(self, frames: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         context = dict(context or {})
+        process_cpu_started_at = time.process_time()
         predict_started_at = time.monotonic()
         build_started_at = predict_started_at
         data = self.builder.build_torch(frames, context, self.device)
         build_finished_at = time.monotonic()
 
+        cuda_pre_sync_ms = 0.0
+        forward_enqueue_ms = 0.0
+        cuda_post_sync_ms = 0.0
         forward_started_at = time.monotonic()
         if str(self.device).startswith("cuda") and torch.cuda.is_available():
+            cuda_pre_sync_started_at = time.perf_counter()
             torch.cuda.synchronize(self.device)
+            cuda_pre_sync_ms = max(0.0, (time.perf_counter() - cuda_pre_sync_started_at) * 1000.0)
             forward_started_at = time.monotonic()
+        forward_enqueue_started_at = time.perf_counter()
         with torch.inference_mode():
             pred = self.inference.forward(data)
+        forward_enqueue_ms = max(0.0, (time.perf_counter() - forward_enqueue_started_at) * 1000.0)
         if str(self.device).startswith("cuda") and torch.cuda.is_available():
+            cuda_post_sync_started_at = time.perf_counter()
             torch.cuda.synchronize(self.device)
+            cuda_post_sync_ms = max(0.0, (time.perf_counter() - cuda_post_sync_started_at) * 1000.0)
         forward_finished_at = time.monotonic()
 
         self._frame_id += 1
@@ -933,8 +1047,9 @@ class LeadModel0011RealPortAdapter:
         if getattr(pred, "target_speed_brake", None) is not None:
             metadata["target_speed_brake"] = float(pred.target_speed_brake)
         postprocess_finished_at = time.monotonic()
+        process_cpu_ms = max(0.0, (time.process_time() - process_cpu_started_at) * 1000.0)
 
-        return {
+        result = {
             "steer": steer,
             "throttle": throttle,
             "brake": brake,
@@ -955,8 +1070,14 @@ class LeadModel0011RealPortAdapter:
             "model_visualization_ms": max(0.0, (visualization_finished_at - visualization_started_at) * 1000.0),
             "model_postprocess_ms": max(0.0, (postprocess_finished_at - postprocess_started_at) * 1000.0),
             "model_predict_total_ms": max(0.0, (postprocess_finished_at - predict_started_at) * 1000.0),
+            "model_cuda_pre_sync_ms": cuda_pre_sync_ms,
+            "model_forward_enqueue_ms": forward_enqueue_ms,
+            "model_cuda_post_sync_ms": cuda_post_sync_ms,
+            "model_process_cpu_ms": process_cpu_ms,
             **metadata,
         }
+        self._maybe_log_deep_profile(result, data, context)
+        return result
 
 
 def create_agent() -> LeadModel0011RealPortAdapter:

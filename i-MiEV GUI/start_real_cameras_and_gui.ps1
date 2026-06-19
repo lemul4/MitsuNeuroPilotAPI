@@ -47,7 +47,11 @@ $GuiEnv = @(
     "set MITSU_AUTO_AI_PREVIEW=1",
     "set MITSU_REAL_ALLOW_ROUTE_PID_FALLBACK=1",
     "set MITSU_REAL_MODEL_PID_WAYPOINT_INDEX=2",
-    "set MITSU_CAN_TX_DEBUG=1",
+    "set MITSU_REAL_VISUALIZATION=0",
+    "set MITSU_REAL_VISUALIZATION_FREQUENCY=5",
+    "set MITSU_REAL_MODEL_DEEP_PROFILE=0",
+    "set MITSU_REAL_MODEL_DEEP_PROFILE_PERIOD_SEC=1.0",
+    "set MITSU_CAN_TX_DEBUG=0",
     "set MITSU_CAN_RX_DEBUG=0",
     "set MITSU_GPS_MIN_SATELLITES=6",
     "set MITSU_GPS_MAX_HDOP=3",
@@ -57,11 +61,7 @@ $GuiEnv = @(
     "set MITSU_REAL_POSE_STALE_MS=1500",
     "set MITSU_REAL_ENABLE_ACTUATION=1",
     "set MITSU_REAL_DRY_RUN=0",
-<<<<<<< HEAD
     "set MITSU_GPS_LOG_RAW=0",
-=======
-    "set MITSU_GPS_LOG_RAW=1",
->>>>>>> b51b246ac5767281767fec68d02187d62a88b647
     "`"$Python`" main.py"
 ) -join "&&"
 
@@ -71,7 +71,7 @@ Start-Process `
     -WorkingDirectory $Root
 
 Write-Host "Camera service started with $Config"
-Write-Host "GUI backend: zmq; camera service: external; pose: nmea_serial COM4@9600; auto device: COM3; AI Preview: on; model waypoint: 2; CAN TX debug: on"
+Write-Host "GUI backend: zmq; camera service: external; pose: nmea_serial COM4@9600; auto device: COM3; AI Preview: on; model waypoint: 2; real visualization: off; model deep profile: off; CAN TX debug: off"
 Write-Host "REAL ACTUATION ENABLED: MITSU_REAL_ENABLE_ACTUATION=1; MITSU_REAL_DRY_RUN=0"
 Write-Host "GUI started. Logs:"
 Write-Host "  $CameraOut"
